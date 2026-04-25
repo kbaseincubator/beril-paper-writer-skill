@@ -178,6 +178,7 @@ projects/<project_id>/papers/draft_N/
 ├── 04_introduction.md
 ├── 05_abstract.md
 ├── 06_limitations.md
+├── 07_data_availability.md     ← ICMJE-required (M4 validator)
 ├── references.md               ← human-readable, numbered
 ├── bibliography.bib            ← machine-readable (BibTeX)
 ├── citation_map.md             ← claim → reference index

@@ -82,7 +82,9 @@ projects/<project_id>/
 │   │   ├── state.json                  ← stop / resume state
 │   │   ├── manuscript.md               ← assembled draft
 │   │   ├── 00_throughline.md           ← chosen throughline + evidence map
-│   │   ├── 01_methods.md, 02_results.md, ...
+│   │   ├── 01_methods.md, 02_results.md, 03_discussion.md,
+│   │   │   04_introduction.md, 05_abstract.md, 06_limitations.md,
+│   │   │   07_data_availability.md
 │   │   ├── references.md               ← human-readable, numbered
 │   │   ├── bibliography.bib            ← machine-readable (for reviewer)
 │   │   ├── citation_map.md             ← claim → reference index

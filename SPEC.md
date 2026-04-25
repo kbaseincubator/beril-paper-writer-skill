@@ -874,7 +874,8 @@ This prevents the rewrite-introduces-new-issues spiral.
 
 1. Concatenates `00_throughline.md`, `01_methods.md`, `02_results.md`,
    `03_discussion.md`, `04_introduction.md`, `05_abstract.md`,
-   `06_limitations.md`, `references.md` into `manuscript.md`.
+   `06_limitations.md`, `07_data_availability.md`, `references.md` into
+   `manuscript.md`.
 2. Runs the M1–M10 validators (final check).
 3. Renders to `manuscript.docx` via `python-docx` (figures embedded
    inline, numbered references, IMRAD structure, no journal-specific
