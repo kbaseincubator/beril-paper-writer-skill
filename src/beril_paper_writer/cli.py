@@ -4,7 +4,7 @@ Dispatches to command modules under beril_paper_writer.commands/.
 
 Subcommands (per LAYOUT.md "Slash commands"):
   install-skill   Copy shipped skill/ tree into BERIL/.claude/skills/beril-paper-writer/.
-  configure       Verify claude is on PATH; warn if beril-adversarial / pandoc absent.
+  configure       Verify claude is on PATH; warn if beril-adversarial absent.
   continue        Resume a paused paper draft (Phase 4 — currently stub).
   assemble        Render markdown intermediates to .docx (Phase 5 — currently stub).
 

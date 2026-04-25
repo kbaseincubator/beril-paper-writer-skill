@@ -63,15 +63,29 @@ classifiers = [
 # Runtime dependencies
 # ----------------------------------------------------------------------
 #
-# None planned for the Python layer. Per LAYOUT.md, the Python layer is
-# install + configure + state-diff + validators + assembly. All of these
-# use stdlib only (argparse, pathlib, shutil, subprocess,
-# importlib.resources, hashlib, json, os, re).
+# Two pure-Python dependencies for the assemble step (pyproject.toml
+# version of "self-contained pipx install" — no system binaries).
 #
-# pandoc is a system dependency invoked at the assemble step; not a
-# Python package.
+# Everything else (install, configure, state-diff, validators, methods
+# extraction) uses stdlib only: argparse, pathlib, shutil, subprocess,
+# importlib.resources, hashlib, json, os, re.
+#
+# Decision history: see DECISIONS.md D-024. Earlier drafts assumed
+# `pandoc` as a system dependency for assemble; that requires `apt-get`
+# / `brew` access on remote BERIL deployments which we cannot assume.
+# `python-docx` is a pure-Python .docx writer (with the lxml C extension
+# as a transitive dependency, widely available as a wheel on every
+# platform we care about). We write a small markdown→docx converter
+# on top in tools/assemble_docx.py.
 
-dependencies = []
+dependencies = [
+    # Pure-Python .docx writer. Pulls in `lxml` transitively (precompiled
+    # wheels are widely available; pipx handles the install).
+    "python-docx>=1.1.0",
+    # Notebook AST extraction (Phase 2 — methods grounding from .ipynb
+    # source). Pure Python, stdlib-only deps.
+    "nbformat>=5.7.0",
+]
 
 # ----------------------------------------------------------------------
 # Optional dependencies (extras)

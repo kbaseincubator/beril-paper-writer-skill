@@ -29,7 +29,7 @@ ArkinLaboratory/beril-paper-writer-skill/
 │   │   ├── install_skill.py    copies skill/ via importlib.resources
 │   │   ├── configure.py        claude-on-PATH; optional beril-adversarial check
 │   │   ├── continue_run.py     resume a paused draft
-│   │   └── assemble.py         markdown → docx via pandoc
+│   │   └── assemble.py         markdown → docx via python-docx
 │   └── skill/               ships as package_data → .claude/skills/beril-paper-writer/
 │       ├── SKILL.md
 │       ├── commands/        slash-command markdowns (.md per CLI verb)
@@ -40,7 +40,7 @@ ArkinLaboratory/beril-paper-writer-skill/
 │       │   ├── extract_figures.py     figure selection + caption extraction
 │       │   ├── citation_pool.py       literature-pool builder + verifier
 │       │   ├── validate_manuscript.py M1–M10 mechanized checks
-│       │   └── assemble_docx.py       pandoc wrapper for the final pass
+│       │   └── assemble_docx.py       markdown→docx via python-docx (no pandoc)
 │       ├── prompts/
 │       │   ├── plan.v1.md             Plan-phase: triage + throughline candidates
 │       │   ├── methods.v1.md          Methods extraction (notebook-grounded)
@@ -96,7 +96,8 @@ ArkinLaboratory/beril-paper-writer-skill/
   - citation DOI/PMID verification (also calls `WebSearch` via claude)
   - M1–M10 validators
   - hash-diff against `state.json` on `continue`
-- `pandoc` for `.md` → `.docx` (only at `assemble` step)
+- `python-docx` for `.md` → `.docx` (only at `assemble` step). Pure
+  Python, no system pandoc binary needed (D-024).
 
 Nothing about *what* the manuscript says is hardcoded in Python. The
 Python layer is install + configure + state-diff + validators + assembly.
@@ -129,7 +130,8 @@ proceeds with whatever phase was paused (throughline-pick, gap-fill response,
 review-rewrite acceptance).
 
 `assemble` is the markdown → docx step. Runs final M1–M10 validators,
-concatenates intermediate files in IMRAD order, calls pandoc, reports
+concatenates intermediate files in IMRAD order, walks the markdown via
+a small converter on top of `python-docx`, reports
 validator pass/fail summary.
 
 ## Slash commands
@@ -338,9 +340,10 @@ to a shared dependency post-MVP if drift becomes an issue.
 
 Python 3.10+. `pathlib.Path` everywhere. Bash 3.2-compatible (macOS
 default), confirmed by `bash -n` syntax check. `.gitattributes` enforces
-LF endings on `.sh`/`.py`/`.md`/`.toml`/`.bib`. Pandoc is required for
-`assemble` (degraded gracefully — `assemble` errors with a clear
-install-pandoc message if not on PATH).
+LF endings on `.sh`/`.py`/`.md`/`.toml`/`.bib`. The assemble step uses
+`python-docx` (pure Python; bundled with the pipx install). No system
+binaries required at any point — important for remote BERIL deployments
+where `apt-get` / `brew` may not be available (D-024).
 
 Windows users run under WSL or Git Bash; PowerShell parity not promised.
 
@@ -374,7 +377,7 @@ Live-LLM tests not in CI (cost + brittleness). Fixture project lives at
 | Validation pass | <1 min | <1K, <1K | mechanical |
 | Adversarial review | 8–14 min | (separate skill cost, ~$1–2) | |
 | 1 rewrite pass | 5–10 min | ~150K, ~10K | targeted to flagged sections |
-| Assembly | <1 min | 0, 0 | pandoc only |
+| Assembly | <1 min | 0, 0 | python-docx only (no LLM call) |
 | **Total (default)** | **30–60 min** | **~640K input, ~60K output** | **~$5–$15 + adversarial** |
 
 If approaching 2× upper bound on either dimension, fail loud with
@@ -390,10 +393,9 @@ checkpoint + user prompt to continue. Cost summary in
 
 ## Open questions for revisit
 
-1. **Pandoc dependency.** Should we ship a pure-Python docx writer
-   (python-docx) instead and drop pandoc? Trade-off: pandoc is more
-   capable (citation rendering, math, tables); python-docx is one less
-   system dependency.
+1. **Pandoc vs. python-docx.** RESOLVED 2026-04-25: python-docx (D-024).
+   Reason: remote BERIL deployments may not have admin to install pandoc
+   as a system binary; pipx + python-docx is fully self-contained.
 2. **Citation pool re-use across drafts.** A project's draft_2 should
    probably inherit draft_1's verified citation pool. Implementation
    detail; can punt to v0.2.

@@ -876,8 +876,10 @@ This prevents the rewrite-introduces-new-issues spiral.
    `03_discussion.md`, `04_introduction.md`, `05_abstract.md`,
    `06_limitations.md`, `references.md` into `manuscript.md`.
 2. Runs the M1–M10 validators (final check).
-3. Renders to `manuscript.docx` via `pandoc` (figures embedded inline,
-   numbered references, IMRAD structure, no journal-specific styling).
+3. Renders to `manuscript.docx` via `python-docx` (figures embedded
+   inline, numbered references, IMRAD structure, no journal-specific
+   styling). Pure-Python; no `pandoc` system dependency required.
+   See DECISIONS D-024 for rationale.
 4. Reports the validator pass/fail summary.
 
 Users can stop at markdown if they want; the docx step is opt-in. This

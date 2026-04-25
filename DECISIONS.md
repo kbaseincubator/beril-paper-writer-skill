@@ -592,6 +592,68 @@ line 22.
 
 ---
 
+## D-024 — 2026-04-25 — `python-docx` for assemble; no `pandoc` system dependency
+
+**Decision:** The assemble step (`beril-paper-writer assemble`) renders
+markdown intermediates to `.docx` via `python-docx` (pure-Python PyPI
+package), not via `pandoc` (system binary). A small markdown→docx
+converter (~200-300 lines, planned in `tools/assemble_docx.py`) walks
+the markdown the writer itself produced and emits docx via python-docx.
+
+`python-docx>=1.1.0` and `nbformat>=5.7.0` are added as runtime
+dependencies in `pyproject.toml`. Both are pure-Python (with `lxml` as
+a python-docx transitive — widely available as a wheel on every
+platform we ship to). No system binaries, no `apt-get`, no `brew`.
+
+**Rationale:** Adam, while running the Phase 1 smoke test on his Mac,
+flagged that requiring `pandoc` as a separate `brew install` step is
+a portability problem for remote BERIL deployments where users may not
+have admin access to install system packages. The principle is
+"`pipx install` does everything." python-docx satisfies the principle;
+pandoc does not.
+
+Also relevant: the assembly path needs to stay model-agnostic. Using
+Claude Code's loaded `anthropic-skills:docx` skill would tie us to
+Claude (no codex compatibility), and the adversarial-reviewer ecosystem
+already supports `--reviewer claude,codex` fusion. Even if paper-writer
+v1 doesn't add `--writer codex`, defending future flexibility now is
+the cheap defensive choice.
+
+Tradeoffs the python-docx path accepts:
+- We write ~200-300 lines of markdown→docx conversion code (Phase 5
+  scope). Manageable because we control the markdown we emit; we don't
+  need to handle arbitrary markdown.
+- python-docx is less feature-rich than pandoc (no math typesetting,
+  no LaTeX bridge, no exotic citation styles). For our IMRAD scope
+  (prose + numbered citations + embedded PNG figures + tables) this
+  is sufficient.
+
+**Alternatives considered:**
+
+- `pypandoc-binary` (pandoc bundled in a Python wheel, pre-built per
+  platform). Pros: full pandoc, no conversion code. Cons: ~50MB per
+  wheel, per-arch wheels (linux-x86_64, linux-arm64, macos-x86_64,
+  macos-arm64, windows-x86_64) with availability gaps for newer Python
+  versions, bundles third-party binaries (some security policies
+  object). Rejected as overkill for our scope.
+- `mistletoe` + `python-docx` (markdown AST + docx writer). Pros: less
+  hand-rolled markdown parsing. Cons: two libraries, and our markdown
+  is constrained enough that AST parsing is overkill. Deferred — could
+  adopt if v0.1's hand-rolled converter proves brittle.
+- Use `anthropic-skills:docx` via Claude Code skill loader. Pros: no
+  Python conversion code at all. Cons: ties assembly to Claude (loses
+  codex compatibility); only available inside a Claude Code session,
+  not from a bare CLI invocation. Rejected.
+- Keep `pandoc` and document it as a system requirement. Cons: violates
+  the self-contained-pipx-install principle for remote BERIL
+  deployments. Rejected.
+
+**Related:** [SPEC](SPEC.md) §9; [LAYOUT](LAYOUT.md) "What ships vs.
+what runs" + "Cross-platform" + "Open questions for revisit" §1;
+[pyproject.toml](pyproject.toml) `[project] dependencies`.
+
+---
+
 ## Known follow-ups (open work referenced from settled decisions)
 
 - **From D-023:** update `../beril-adversarial-skill-draft/src/beril_adversarial/skill/prompts/adversarial_paper.v1.md`

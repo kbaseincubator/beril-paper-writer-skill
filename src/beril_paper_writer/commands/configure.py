@@ -4,12 +4,16 @@ Verify that:
   - `claude` CLI is installed (HARD requirement; exit 3 if missing)
   - `beril-adversarial` CLI is installed (SOFT; warn if missing — the
     writer will fall back to the inline reviewer per SPEC §8.2)
-  - `pandoc` is installed (SOFT; warn if missing — only needed by
-    `beril-paper-writer assemble`)
+  - `python-docx` is importable (SOFT; should always be present since
+    pipx pulls it in as a runtime dep, but we verify defensively)
+
+No system-binary dependencies (no pandoc, no LaTeX). Per DECISIONS D-024,
+the assembly path uses `python-docx` so a pipx install is fully
+self-contained — important for remote BERIL deployments where users may
+not have admin to `apt-get install` or `brew install`.
 
 Mirrors `beril_adversarial.commands.configure` with the additional
-soft checks for adversarial and pandoc, both of which are dependencies
-the paper writer can degrade around.
+soft check for adversarial.
 
 Exit codes:
   0 — claude is present (regardless of soft-check outcome)
@@ -28,13 +32,14 @@ from beril_paper_writer import __version__, discovery
 def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "configure",
-        help="Verify the claude CLI is installed; warn if optional deps absent.",
+        help="Verify the claude CLI is installed; report optional dep status.",
         description=(
             "Quick check that the `claude` CLI is on PATH (hard requirement). "
-            "Also reports whether `beril-adversarial` and `pandoc` are "
-            "available — both are optional but improve output. The actual "
-            "drafting run will surface any further configuration issues "
-            "(MCP servers, WebSearch, model auth) with clear error messages."
+            "Also reports whether `beril-adversarial` and `python-docx` are "
+            "available — both are soft requirements the writer can degrade "
+            "around. The actual drafting run will surface any further "
+            "configuration issues (MCP servers, WebSearch, model auth) with "
+            "clear error messages."
         ),
     )
     p.add_argument(
@@ -86,18 +91,37 @@ def run(args: argparse.Namespace) -> int:
             "ArkinLaboratory/beril-adversarial-skill.git"
         )
 
-    # Soft check: pandoc (only needed by `assemble`)
-    pandoc_path = shutil.which("pandoc")
-    if pandoc_path:
-        print(f"  [OK]      pandoc            — {pandoc_path}  (used by `assemble`)")
+    # Soft check: python-docx (assemble step). pipx install bundles this,
+    # so absence indicates a manually-broken environment.
+    docx_version = _import_check("docx")
+    if docx_version:
+        print(
+            f"  [OK]      python-docx       — {docx_version}  "
+            f"(used by `assemble` to render .docx)"
+        )
     else:
         print(
-            "  [absent]  pandoc            — not on PATH; "
-            "`beril-paper-writer assemble` will fail until pandoc is installed."
+            "  [MISSING] python-docx       — not importable; "
+            "`beril-paper-writer assemble` will fail.",
+            file=sys.stderr,
         )
         print(
-            "            macOS: brew install pandoc | "
-            "Linux: apt-get install pandoc"
+            "            This is unexpected — pipx should bundle python-docx. "
+            "Try `pipx reinstall beril-paper-writer-skill`.",
+            file=sys.stderr,
         )
 
     return 0
+
+
+def _import_check(module: str) -> str | None:
+    """Attempt to import a module and return its __version__ or None.
+
+    Used to soft-check runtime deps that should be present (pipx pulls
+    them in) but might be missing if the install was tampered with.
+    """
+    try:
+        mod = __import__(module)
+    except ImportError:
+        return None
+    return getattr(mod, "__version__", "(version unknown)")
