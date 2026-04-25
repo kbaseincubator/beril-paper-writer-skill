@@ -1,0 +1,185 @@
+####################################################################
+# beril-paper-writer-skill — pyproject.toml
+#
+# Status: v0.1.0-spec (specification-only release; implementation
+# pending). Mirrors beril-adversarial-skill packaging.
+#
+# When implementation lands, version bumps to 0.1.0 and the CLI
+# stubs in cli.py become real subcommands. The package shape is
+# stable from this commit forward; future PRs add code, not
+# refactor structure.
+####################################################################
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+# ----------------------------------------------------------------------
+# Project metadata
+# ----------------------------------------------------------------------
+
+[project]
+name = "beril-paper-writer-skill"
+version = "0.1.0.dev0"
+description = "BERIL Paper Writer — drafts ICMJE-conformant scientific manuscripts from BERDL analysis projects, with intercalated gap-fill loops and adversarial-review-driven revision. Distributed as a Claude Code skill."
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+    {name = "Arkin Laboratory", email = "aparkin@lbl.gov"},
+]
+
+license = {text = "MIT"}
+
+keywords = [
+    "bioinformatics",
+    "claude-code",
+    "beril",
+    "kbase",
+    "research-observatory",
+    "scientific-writing",
+    "paper-drafting",
+    "icmje",
+]
+
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    # Prevents accidental `twine upload` while repo is private.
+    # Remove when going public on PyPI.
+    "Private :: Do Not Upload",
+]
+
+# ----------------------------------------------------------------------
+# Runtime dependencies
+# ----------------------------------------------------------------------
+#
+# None planned for the Python layer. Per LAYOUT.md, the Python layer is
+# install + configure + state-diff + validators + assembly. All of these
+# use stdlib only (argparse, pathlib, shutil, subprocess,
+# importlib.resources, hashlib, json, os, re).
+#
+# pandoc is a system dependency invoked at the assemble step; not a
+# Python package.
+
+dependencies = []
+
+# ----------------------------------------------------------------------
+# Optional dependencies (extras)
+# ----------------------------------------------------------------------
+
+[project.optional-dependencies]
+
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
+    "build>=1.0.0",
+]
+
+# ----------------------------------------------------------------------
+# Console scripts
+# ----------------------------------------------------------------------
+
+[project.scripts]
+beril-paper-writer = "beril_paper_writer.cli:main"
+
+# Planned subcommands (per LAYOUT.md):
+#   beril-paper-writer install-skill <BERIL_ROOT>
+#   beril-paper-writer configure
+#   beril-paper-writer continue <draft_dir>
+#   beril-paper-writer assemble <draft_dir>
+#
+# The drafting and review-rewrite paths are NOT Python subcommands —
+# they're handled by the planned shipped shell script
+# tools/paper_writer.sh (which the slash command will invoke directly).
+# Same pattern as beril-adversarial.
+
+# ----------------------------------------------------------------------
+# URLs
+# ----------------------------------------------------------------------
+
+[project.urls]
+Homepage = "https://github.com/ArkinLaboratory/beril-paper-writer-skill"
+Issues = "https://github.com/ArkinLaboratory/beril-paper-writer-skill/issues"
+Repository = "https://github.com/ArkinLaboratory/beril-paper-writer-skill.git"
+
+# ----------------------------------------------------------------------
+# Build configuration
+# ----------------------------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/beril_paper_writer"]
+
+# The shipped skill directory (SKILL.md, prompts, references, tools)
+# will live inside the package at src/beril_paper_writer/skill/ and
+# ship as package data. Accessed at runtime via importlib.resources.
+# Hatchling auto-includes non-.py files in the package; the shell
+# script's executable bit is preserved through wheel metadata.
+#
+# v0.1.0-spec: skill/ tree does not yet exist. Lands with implementation.
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/beril_paper_writer",
+    "tests",
+    "README.md",
+    "SPEC.md",
+    "LAYOUT.md",
+    "DECISIONS.md",
+    "reference",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.DS_Store",
+    # State directories never ship.
+    "src/beril_paper_writer/skill/state",
+    # Per-draft runtime state never ships either.
+    "papers/draft_*/state.json",
+    "papers/draft_*/audit",
+    "papers/cost-log.jsonl",
+]
+
+# ----------------------------------------------------------------------
+# Tool configurations
+# ----------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: marks tests that hit live LLM CLIs (deselect with '-m \"not integration\"')",
+    "slow: marks tests that take >5s",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+]

@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.installed.cfg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+.hypothesis/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# paper-writer skill runtime state — never commit
+**/.claude/skills/beril-paper-writer/state/
+
+# Per-draft state — generated at runtime, not source
+papers/draft_*/state.json
+papers/draft_*/audit/
+papers/cost-log.jsonl
+
+# Local .env files (defensive; shipped repo doesn't have one)
+.env
+.env.local
+
+# Ruff cache
+.ruff_cache/
