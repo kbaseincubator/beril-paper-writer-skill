@@ -100,8 +100,14 @@ versioned, not edited in place.
 
 ## How it fits into the BERIL workflow
 
+`/berdl_start` opens an analysis session. The user iterates on
+RESEARCH_PLAN.md and notebooks within that session, calling BERIL skills
+(`/berdl-query`, `/berdl-discover`, `/berdl-minio`, `/literature-review`,
+etc.) as needed. There is no single "iterate" slash command — iteration
+is the work of the session itself. `/synthesize` then produces REPORT.md.
+
 ```
-  /berdl_start → /berdl/iterate → /synthesize → REPORT.md
+  /berdl_start → (iterate within session) → /synthesize → REPORT.md
        │
        ▼
   /beril-adversarial               harsh project review
@@ -110,10 +116,14 @@ versioned, not edited in place.
   /beril-paper-writer              draft manuscript ──┐
        │                                              │
        ▼                                              │
-  user picks throughline; defers/takes gap-fills  ◄───┘
+  user picks throughline;                             │
+  defers/takes gap-fill requests              ◄───────┘
        │                                              │
        ▼                                              │
-  (optional) /berdl on accepted gap-fills ─→ updated REPORT
+  (optional) user actions taken gap-fills via         │
+  a fresh /berdl_start session — appending to         │
+  RESEARCH_PLAN.md and re-iterating until new         │
+  artifacts land in the project ─→ updated REPORT     │
        │                                              │
        ▼                                              │
   beril-paper-writer continue                         │
