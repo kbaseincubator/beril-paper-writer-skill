@@ -177,8 +177,8 @@ projects/<project_id>/papers/draft_N/
 ├── 03_discussion.md
 ├── 04_introduction.md
 ├── 05_abstract.md
-├── 06_limitations.md
-├── 07_data_availability.md     ← ICMJE-required (M4 validator)
+├── 06_limitations.md           ← extracted by assembler from 03_discussion.md
+├── 07_data_availability.md     ← ICMJE-required (M4); orchestrator emits from template
 ├── references.md               ← human-readable, numbered
 ├── bibliography.bib            ← machine-readable (BibTeX)
 ├── citation_map.md             ← claim → reference index
@@ -196,6 +196,275 @@ projects/<project_id>/papers/draft_N/
 │   └── ...
 └── manuscript.docx             ← only after `assemble` is invoked
 ```
+
+### File-ownership notes for the per-section model
+
+Two files in the layout above are **not** written by their section-
+labeled drafting prompt:
+
+- **`07_data_availability.md`** — orchestrator emits from a template
+  (`reference/data_availability_template.md`, planned), pre-filled
+  with project-specific metadata (K-BERDL database name and
+  snapshot date if available, code-repo URL, public-accession list
+  from `RESEARCH_PLAN.md`). This is metadata-driven boilerplate, not
+  a synthesis task that needs LLM judgment. Same pattern as the
+  `AI_DISCLOSURE_TEMPLATE` that `methods.v1` consumes verbatim.
+- **`06_limitations.md`** — `assemble` extracts the Limitations
+  subsection from `03_discussion.md` and writes it to
+  `06_limitations.md` as well, so M9 finds it at a top-level
+  position in the assembled view. The Limitations content lives
+  once (in Discussion's prose); the split is a serialization
+  concern. `discussion.v1` does NOT write `06_limitations.md`
+  itself.
+
+## Orchestrator capabilities (what `paper_writer.sh` must provide)
+
+The prompts assume an orchestrator (`paper_writer.sh`, planned in
+Phase 4) that exposes the following capabilities. None of these are
+called from inside a prompt; the orchestrator runs them between
+prompt invocations.
+
+### Extract-tool invocation
+
+Before any drafting prompt that depends on extracted facts, the
+orchestrator runs the corresponding Phase 2 extractor:
+
+- **`extract_methods.py`** — invocation:
+  `python3 <SKILL_TOOLS_DIR>/extract_methods.py <PROJECT_ROOT> --output-dir <DRAFT_DIR>`
+  Produces `<DRAFT_DIR>/methods_provenance.md` (consumed by
+  `methods.v1`). On exit code 1 (no notebooks) → halt the run with
+  the error verbatim. On exit code 2 (some notebooks failed parse)
+  → log the per-notebook failures, proceed (the script continues
+  with the notebooks that did parse).
+- **`extract_figures.py`** — invocation:
+  `python3 <SKILL_TOOLS_DIR>/extract_figures.py <PROJECT_ROOT> --output-dir <DRAFT_DIR>`
+  Produces `<DRAFT_DIR>/figures_inventory.md` (consumed by
+  `results.v1`). Empty figures directory is not an error; the
+  inventory will be empty and `results.v1` proceeds without figure
+  callouts.
+
+### Template loading and placeholder filling
+
+Two orchestrator-loaded templates are passed verbatim to drafting
+prompts:
+
+- **`AI_DISCLOSURE_TEMPLATE`** — read from
+  `<SKILL_REFERENCE_DIR>/ai_disclosure_template.md` (the reference
+  text per SPEC §10.1). Orchestrator fills placeholders `{X.Y}`
+  (skill version), `{model_id}` (e.g. `claude-sonnet-4-20250514`),
+  `{project_id}` (from the project directory), `{sha}` (snapshot
+  hash from `state.json`'s `source_artifacts`), and `{N}` (rewrite
+  pass count from `state.json.iteration.rewrite_passes`). The filled
+  string is passed to `methods.v1` as the `AI_DISCLOSURE_TEMPLATE`
+  parameter.
+- **`data_availability_template.md`** — read from
+  `<SKILL_REFERENCE_DIR>/data_availability_template.md` (planned;
+  see "BLOCKED in v0.1" note in the validator dispatch table for
+  M4). Orchestrator fills with project-specific metadata (K-BERDL
+  database name and snapshot date if available, code-repo URL,
+  public-accession list from `RESEARCH_PLAN.md`) and writes the
+  filled result to `<DRAFT_DIR>/07_data_availability.md`. No prompt
+  consumes this template directly.
+
+Placeholder syntax is `{name}` (single-brace, no escape). Template
+files use this notation throughout.
+
+### Citation-pool formatter step
+
+After `citation_pool.v1` writes `pool.json` and the schema validator
+passes, the orchestrator runs the formatter:
+
+`python3 <SKILL_TOOLS_DIR>/citation_pool.py format <DRAFT_DIR>/pool.json <DRAFT_DIR>`
+
+This produces `<DRAFT_DIR>/references.md`,
+`<DRAFT_DIR>/bibliography.bib`, and `<DRAFT_DIR>/citation_map.md`.
+`discussion.v1` reads `references.md` (per its `REFERENCES_MD_PATH`
+input); the BibTeX is consumed by the adversarial reviewer and at
+assembly. **The prompt does NOT invoke this formatter itself** — the
+prompt's job ends with `pool.json`, and the orchestrator owns the
+format step.
+
+### Validator invocation and result dispatch
+
+After all section drafts complete, the orchestrator runs:
+
+`python3 <SKILL_TOOLS_DIR>/validate_manuscript.py <DRAFT_DIR> --mode <MODE> --output <DRAFT_DIR>/audit/validation.json`
+
+The output JSON has shape `ValidationReport` (per
+`validate_manuscript.py`'s dataclass). The orchestrator parses
+failures, partitions by validator, and dispatches each named-
+validator failure to the relevant section prompt in REPAIR_MODE
+(see "REPAIR_MODE" below + "Validator → section dispatch table").
+
+### Figure copy/symlink logic
+
+After `results.v1` returns its closing message naming the K
+selected figures (with `paper-order names` like
+`fig01_<descriptive>.png`), the orchestrator copies or symlinks
+those figures from `<PROJECT_ROOT>/figures/` to
+`<DRAFT_DIR>/figures/`. v0.1 default is **copy** (avoids broken
+symlinks if the project directory moves); symlink is opt-in via a
+configure flag. On copy failure (permission, disk space), halt the
+run with the OS error verbatim.
+
+### Reframing-log initialization
+
+Multiple prompts append to `<DRAFT_DIR>/reframing_log.md`. On
+first-write into a fresh `draft_N/` directory, the orchestrator
+creates the file with a `# Reframing Log` header and a blank line
+before any prompt is invoked. Prompts assume the file exists and is
+readable; the empty-file case is handled per each prompt's escape
+hatches.
+
+## Per-section prompt invocation contract
+
+The orchestrator (`paper_writer.sh`) invokes each section prompt as
+a `claude -p` subagent. Two invocation modes:
+
+### Drafting mode (default)
+
+The section prompt is invoked with the full input set (per its
+`Inputs the user prompt will pass` section). The prompt drafts the
+section, runs its own self-review checklist, writes the output via
+the `Write` tool, and emits a one-line closing message.
+
+**The section prompt does NOT invoke the manuscript-level
+validators (`validate_manuscript.py` M1–M10).** M1 (IMRAD sections
+present) cannot pass on a partial draft; per-section invocation
+generates spurious failures. The orchestrator runs the validator
+once after all sections are drafted, before the adversarial-review
+loop and again at `assemble`.
+
+The exception is `citation_pool.v1`, which runs a *schema*
+validation (`citation_pool.py validate`) on its own output —
+that's `pool.json`'s structural integrity, not manuscript-level
+M1–M10.
+
+### REPAIR_MODE
+
+After running `validate_manuscript.py` and finding failures, the
+orchestrator dispatches each failure to the relevant section prompt
+in REPAIR_MODE. The section prompt receives **all of its original
+drafting-mode inputs** (THROUGHLINE_PATH, REPORT_PATH, RESULTS_PATH,
+POOL_JSON_PATH, METHODS_PROVENANCE_PATH, etc.) **plus** the four
+REPAIR_MODE-specific fields:
+
+- `REPAIR_MODE` — `"true"`.
+- `NAMED_VALIDATOR` — one of `M1`...`M10`. Identifies which
+  validator's failure to repair.
+- `VALIDATOR_OUTPUT_PATH` — file containing the validator's
+  structured failure detail. Format is the JSON shape produced by
+  `validate_manuscript.py --output <file>` (a `ValidationReport`
+  object per its dataclass), filtered to the single named validator
+  via the orchestrator before invoking the prompt. The prompt reads
+  the JSON and identifies the specific span(s) to repair.
+- `REPAIR_TARGET_PATH` — the section file to modify (e.g.
+  `01_methods.md`).
+
+The drafting-mode inputs are necessary because the prompt must read
+the existing section, understand what NOT to change (claims that
+already pass other validators, content scoped to the throughline,
+etc.), and fix only the named span. A REPAIR_MODE invocation without
+the drafting-mode inputs would force the prompt to either
+re-generate from scratch (forbidden) or guess at scope (worse).
+
+The section prompt's REPAIR_MODE behavior:
+
+1. Read the validator failure detail in `VALIDATOR_OUTPUT_PATH`.
+2. **Multiple violations in one invocation:** if the JSON contains
+   multiple violations from the same validator, fix each in turn
+   within the bounded-retry budget below. Do not split into multiple
+   prompt invocations; the orchestrator's responsibility is one
+   validator's failures per dispatch.
+3. Fix only the named spans. Do not regenerate the section, do not
+   introduce new claims, do not delete grounded claims that the
+   validator did not flag.
+4. Re-write `REPAIR_TARGET_PATH`.
+5. Bounded retry: up to 2 attempts per invocation. After the second
+   failure on the same validator, halt with the closing message
+   below; the orchestrator routes per the four escalation paths
+   (auto-fix exhausted → user-modify, escalate-as-analysis-request,
+   or accept-as-limitation).
+
+When the prompt halts after exhausted attempts, its closing message
+includes a **path recommendation** so the orchestrator (or the user)
+has guidance:
+
+```
+Halted after 2 repair attempts on <NAMED_VALIDATOR>; recommended
+next path: {user-modify | escalate-as-analysis-request |
+accept-as-limitation}; rationale: <one-line>.
+```
+
+The recommended-path values come from SPEC §7.1.1's four escalation
+paths (excluding auto-fix, which has already been exhausted). The
+prompt picks based on the failure character: missing-data violations
+(M6 multi-test correction without the underlying data) recommend
+escalate-as-analysis-request; project-scope-limit violations (M7
+effect-size missing because not computed) recommend
+accept-as-limitation; user-judgment violations recommend
+user-modify. The orchestrator may override; the recommendation is
+guidance, not a directive.
+
+On successful repair, the closing message is one line:
+`"<REPAIR_TARGET_PATH> repaired for <NAMED_VALIDATOR>; <one-line
+summary of the change>."` This goes back to the orchestrator, which
+re-runs the validator and updates `state.json`'s `validator_status`
+accordingly.
+
+### Validator → section dispatch table
+
+Which section prompt owns repairs for which validator:
+
+| Validator | Section | Notes |
+|---|---|---|
+| M1 (IMRAD sections) | (assembler) | Missing-section failure → orchestrator invokes the missing section's drafting prompt in IMRAD-order (Methods → Results → Discussion → Introduction → Abstract per SPEC §6.1) with the current draft state. Multiple missing sections re-drafted sequentially, not in parallel. |
+| M2 (structured abstract) | `abstract.v1` | |
+| M3 (AI-disclosure) | `methods.v1` | Disclosure paragraph lives in Methods §"AI-Assisted Analysis" |
+| M4 (data availability) | (orchestrator) | **BLOCKED in v0.1**: Repair requires `reference/data_availability_template.md`, which has not been written. Until the template lands, M4 failures produce a stub `07_data_availability.md` with `[DATA_AVAILABILITY: TBD — template not yet implemented]` and the validator escalates as user-modify. Implementation task: write the template before M4 repair logic is added. |
+| M5 (software + version, soft) | `methods.v1` | Soft-warning per §7.1.2; user-modify or accept-as-limitation are valid paths |
+| M6 (multi-test correction) | `methods.v1` | Often escalates to analysis-request (re-run analysis with correction) per §7.1.1 |
+| M7 (n / effect size / CI / p) | `results.v1` | |
+| M8 (counts before percentages) | `results.v1` | |
+| M9 (limitations >150 chars) | `discussion.v1` | Repair expands the existing Limitations subsection; assembler then re-extracts to `06_limitations.md` |
+| M10 (citation cross-ref) | `discussion.v1` (default) or `results.v1` | Tie-breaker rule: if an orphan citation appears in only one section, dispatch to that section. If it appears in multiple, dispatch to `discussion.v1` (the later section in drafting order) and the prompt verifies the citation is correct in `results.v1` as well, escalating as `analysis-request` if a conflict between sections cannot be resolved by reference-numbering alone. |
+
+## Reframing-log entry-numbering contract
+
+Multiple prompts append entries to `<DRAFT_DIR>/reframing_log.md`
+during a single drafting run: `citation_pool.v1`, `methods.v1`,
+`results.v1`, `discussion.v1`, `plan.v1`, `reframer.v1` (per
+SPEC §5.6). Each prompt assigns a unique entry number to avoid
+collisions in the append-only log.
+
+**v0.1 entry-numbering rule (sequential execution):**
+
+1. Each prompt reads the existing `reframing_log.md` before
+   appending. (The orchestrator creates the file with a
+   `# Reframing Log` header before any prompt runs; see Orchestrator
+   capabilities.)
+2. The prompt extracts the maximum entry number from existing
+   entries via the regex
+   `^## Entry (\d+) — `; if no entries exist, max_N = 0.
+3. The prompt's first appended entry is `Entry max_N + 1`. If a
+   prompt appends multiple entries in one invocation (e.g.,
+   `reframer.v1` writing several drift-audit entries), they receive
+   `max_N + 1`, `max_N + 2`, etc., in order.
+4. After appending, the prompt re-writes the full file content.
+
+This contract assumes **sequential execution**, which is the v0.1
+default. SPEC §5.3 caps gap-fill rounds and §6.1 establishes a
+strict drafting order; nothing in v0.1 runs prompts concurrently
+against the same `draft_N/` directory.
+
+If parallelization is ever introduced (Methods + Results in
+parallel per LAYOUT's "Open questions" §3), entry-number
+assignment must be coordinated by the orchestrator: either
+pre-assign entry numbers before invoking prompts, or have prompts
+append without numbering and let the orchestrator renumber on
+assembly. Both options break the per-prompt simplicity of the
+v0.1 contract; prefer staying sequential unless wall-clock costs
+become prohibitive.
 
 ## state.json schema (informal)
 
@@ -234,12 +503,41 @@ projects/<project_id>/papers/draft_N/
     {"id": "REQ-1", "type": "analysis-request", "status": "pending",
      "originated_at_iteration": 1, "beril_command_suggestion": "/berdl ..."}
   ],
+  "discussion": {
+    "pool_exhaustion": {
+      "needs_citation_count": 7,
+      "options_offered": ["scope-down", "citation-request", "accept-as-limitation"],
+      "user_choice": "scope-down",
+      "decided_at": "2026-04-25T15:42:00Z",
+      "note": "User opted to drop the [NEEDS CITATION] claims rather than spend a gap-fill round."
+    }
+  },
   "iteration": {"rewrite_passes": 0, "gap_fill_rounds": 0},
   "cost_so_far_usd": 3.42,
   "elapsed_seconds": 1240,
-  "validator_status": {"M1": "pass", "M2": "pass", ...}
+  "validator_status": {
+    "M1": "pass",
+    "M3": "pass",
+    "M5": "soft-warning",
+    "M6": "escalated",
+    "M7": "user-fixed",
+    "M9": "accepted-as-limitation"
+  }
 }
 ```
+
+**`validator_status` enum** is per SPEC §7.1.1: one of `pass`,
+`soft-warning` (M5 only, per §7.1.2), `escalated`,
+`user-fixed`, `accepted-as-limitation`. The example above shows
+all five values across different validators. M-tier labels (`M1`
+... `M10`) match the SPEC §7.1 numbering.
+
+**`discussion.pool_exhaustion`** is populated by the orchestrator
+when `discussion.v1` surfaces non-zero `[NEEDS CITATION]`
+placeholders. The user picks one of the three options on `continue`;
+the choice is recorded here. `discussion.v1` does NOT write this
+field directly — it only surfaces the count and recommended option
+in its closing message; the orchestrator owns the field.
 
 ## Path resolution
 
