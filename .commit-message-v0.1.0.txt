@@ -1,0 +1,72 @@
+v0.1.0 — first usable release
+
+Pipx-installable Claude Code skill for drafting ICMJE-conformant
+scientific manuscripts from BERDL analysis projects.
+
+PIPELINE
+- Linear orchestrator (paper_writer.sh, ~1600 lines) with two
+  load-bearing user pause points: throughline-pick gate + final
+  review handoff. Phase-dispatched, idempotent, halt-and-resume
+  contract via state.json + .handoff.json. Lock file via stdlib
+  Python PID-file (no flock dep).
+- Drafting pipeline: plan.v1 → citation_pool.v1 (with finalize +
+  bib_key resolution + render-with-numbers) → methods.v1 →
+  results.v1 → discussion.v1 → reframer.v1 (drift audit) →
+  intro.v1 → abstract.v1 → orchestrator-side data_availability
+  template fill → assemble (manuscript.md) → validate_manuscript
+  (M1-M10) → adversarial review (beril-adversarial-cli or fallback)
+  → next_actions.md aggregation → final pause.
+
+DELIVERABLES
+- Pipx package: beril-paper-writer-skill v0.1.0 (Python 3.10+)
+- Slash commands: /beril-paper-writer + /beril-paper-writer-continue
+- 11 versioned prompts (10 v1 + revise_throughline.v1)
+- Helper tools: stream_progress.py, paper_writer_helpers.py
+  (handoff JSON, state mutations, lock, next_actions aggregator),
+  citation_pool.py (validate, format, finalize, render-with-numbers),
+  check_throughline_glyphs.py (cross-walk post-processor),
+  validate_manuscript.py (M1-M10), extract_methods.py,
+  extract_figures.py
+- Reference templates: ai_disclosure_template.md,
+  data_availability_template.md (orchestrator-filled)
+- Configure-time environment audit (claude, Python, nbformat,
+  python-docx, beril-adversarial, bash, POSIX utilities)
+
+LIVE VALIDATION
+- End-to-end smoke run on functional_dark_matter (STRONG-tier; 14
+  notebooks; ~228K-gene pangenome): $4.20 / 17 min on Sonnet 4.5
+- Validators: 9/10 pass with M5 N/A (post 2-line validator regex
+  fix; pipeline output was correct)
+- Reviewer: 1 critical, surfaced in next_actions.md
+- 0 citation orphans, 0 pipeline halts
+- Full findings: smoke-test/end_to_end_smoke_findings.md
+
+DEPENDENCIES
+Hard:
+- claude CLI (Claude Code 2.x)
+- Python 3.10+ (pipx venv)
+- nbformat, python-docx (bundled via pipx)
+
+Soft (graceful fallback):
+- beril-adversarial-cli (sibling skill; falls back to inline
+  fallback_reviewer.v1 if absent)
+
+No external bash binaries beyond POSIX core. No flock, no pandoc,
+no system Python required. Tested on macOS bash 3.2 + Linux bash 5.x.
+
+DEFERRED TO v0.2
+- REPAIR_MODE for validator failures
+- Review-rewrite loop with bounded retry
+- assemble markdown→docx (python-docx already bundled; converter
+  pending)
+- Card elicitation pre-drafting checkpoint
+- Citation-pool exhaustion user pause (B1 path)
+- Scope-coherence post-processor (Discussion-vs-Results)
+- Overclaim post-processor (Abstract/Discussion verbs vs Weakness)
+
+See RELEASE_NOTES.md for full deferral rationale + workarounds.
+
+SEE ALSO
+- SPEC.md, LAYOUT.md, DECISIONS.md (skill-internal design docs)
+- smoke-test/end_to_end_runbook.md (validation procedure)
+- smoke-test/v0_1_x_punch_list.md (patch cycle audit trail)

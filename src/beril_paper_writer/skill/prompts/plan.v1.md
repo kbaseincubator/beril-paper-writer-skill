@@ -320,6 +320,23 @@ them that choice.
 gestures but doesn't quantitatively establish. The user reads the
 strength column to judge candidates; inflating misleads them.
 
+**Cross-walk weakness inventory ↔ evidence map.** This is the
+single most common strength-inflation failure mode: the weakness
+inventory correctly names a project-specific caveat (e.g.,
+"AlphaEarth covers 28% of genomes") but the evidence-map sub-claim
+that depends on AlphaEarth coverage is still marked `✓ direct`.
+Inconsistent. **If the weakness inventory says "X is partial /
+contested / coarse / weight-sensitive / marginal because Y," the
+corresponding evidence-map sub-claim must be `⚠ partial` with Y in
+the table cell or in `notes`.** The two artifacts must agree.
+Marginal p-values (e.g., binomial p=0.072), Wilson CIs that
+include the null, weight-sensitive top-N overlaps, coarse-grained
+classifications (99.9% in one bucket) → all `⚠ partial`, not
+`✓ direct`. Sub-hypotheses the project tested-and-rejected (e.g.,
+H1b stress-vs-carbon/nitrogen accessory comparison) → if a
+candidate's claim includes them, the relevant evidence map sources
+are `✗ contradicts`.
+
 **Hidden weaknesses.** A weakness inventory that says "n could be
 larger" instead of project-specific gaps. M9 (Limitations) will
 catch generic weakness language at draft time; better to be
@@ -362,16 +379,35 @@ without it, the verdict is unaccountable.
    (notebook+cell, REPORT §, or RESEARCH_PLAN §). No vague pointers.
 5. **Strength glyphs are operationalized**, not vibes-assigned.
    Walk every `✓ direct` and verify the source quantitatively
-   establishes the sub-claim.
-6. **Contradicting evidence included.** If REPORT or notebooks
-   contain findings that contradict a candidate, those sources
-   appear in the evidence map as `✗ contradicts`, not omitted.
-7. **Weakness inventories are project-specific**, not generic
+   establishes the sub-claim. **Hard constraint:** count glyphs
+   per candidate. If any candidate's evidence map has zero
+   `⚠ partial` AND zero `✗ contradicts` entries (i.e., 100% of
+   sub-claims marked `✓ direct`), HALT and re-walk. STRONG-tier
+   projects with substantive Limitations sections almost always
+   have caveats that translate to `⚠ partial` glyphs; if your
+   weakness inventory names project-specific gaps, those gaps
+   should appear as `⚠ partial` or `✗ contradicts` in the
+   corresponding evidence-map row. The exception is genuinely
+   gap-free projects (rare); document the reason in your closing
+   summary if you produce an all-`✓ direct` candidate.
+6. **Cross-walk weakness inventory ↔ evidence map.** For every
+   weakness inventory entry that names a caveat affecting a
+   sub-claim, the corresponding evidence-map row must reflect the
+   caveat in its strength glyph. Walk both artifacts; the
+   inconsistency is the most common strength-inflation failure.
+7. **Contradicting evidence included.** If REPORT or notebooks
+   contain findings that contradict a candidate (or a sub-claim
+   the candidate's claim depends on), those sources appear in
+   the evidence map as `✗ contradicts`, not omitted. Includes
+   sub-hypotheses the project tested-and-rejected (e.g., H1b's
+   accessory-rate comparison if the candidate's claim implies the
+   stress-vs-metabolism distinction holds).
+8. **Weakness inventories are project-specific**, not generic
    ("small sample" vs "n=48 organisms but only 3 with stress data").
-8. **THIN-tier narrowed candidate present** if tier is THIN.
-9. **No candidate's claim oversteps tier.** STRONG declarative,
-   THIN scope-narrowed, EXPLORATORY preliminary.
-10. **Mode recommendation matches tier defaults** (STRONG/THIN →
+9. **THIN-tier narrowed candidate present** if tier is THIN.
+10. **No candidate's claim oversteps tier.** STRONG declarative,
+    THIN scope-narrowed, EXPLORATORY preliminary.
+11. **Mode recommendation matches tier defaults** (STRONG/THIN →
     paper; EXPLORATORY → report) unless `MODE_OVERRIDE` was passed.
 
 **Anti-example pairs** — overclaim and grounded extraction side by
@@ -390,9 +426,25 @@ side:
    Proteobacteria."
 
 ✗  All 3 candidates have evidence-map ✓ direct on every sub-claim.
-   (Strength inflation; almost never the case in practice.)
+   (Strength inflation; almost never the case in practice.
+   STRONG-tier projects with 12-item Limitations sections have
+   real caveats — they belong in the evidence map as ⚠ partial
+   or ✗ contradicts entries, not just in the weakness inventory
+   prose.)
 ✓  Mix of ✓/⚠/✗/◇ across candidates; weakness inventory names what
    each candidate's mix means for the paper's defensibility.
+
+✗  | "61.7% lab-field concordance (29/47, binomial p=0.072)" | REPORT §F7 | ✓ direct |
+   ...with weakness inventory entry: "Binomial test... p=0.072 (marginal); Wilson CI [0.474, 0.742] includes 0.50."
+   (The weakness inventory correctly notes the marginal significance; the evidence
+   map incorrectly marks the same number as ✓ direct. Cross-walk inconsistency.)
+✓  | "61.7% lab-field concordance (29/47, binomial p=0.072 marginal; Fisher's combined p=0.031)" | REPORT §F7 | ⚠ partial — binomial marginal, Fisher's combined carries the load |
+
+✗  | "Dark genes are more accessory under stress than under carbon/nitrogen metabolism" | RESEARCH_PLAN §H1b | ✓ direct |
+   (RESEARCH_PLAN named H1b; the project tested it and the result was NULL —
+   stress dark genes are NOT more accessory. The candidate's claim depending
+   on H1b means the evidence map should reflect the rejection.)
+✓  | "Dark genes are more accessory under stress than under carbon/nitrogen metabolism" | REPORT §F9 (NB06 H1b control) | ✗ contradicts — H1b rejected; null result; project explicitly notes this |
 
 ✗  Candidate phrased as "Dark genes drive stress response."
    (Causal claim; project showed enrichment, not causation.)

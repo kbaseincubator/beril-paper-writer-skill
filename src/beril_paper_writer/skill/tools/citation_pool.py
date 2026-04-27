@@ -499,12 +499,26 @@ def format_references_md(pool: CitationPool) -> str:
     out: list[str] = []
     out.append("# References")
     out.append("")
-    out.append(
-        "Numbered in order of first citation in the manuscript. Each entry "
-        "carries the full 9-field citation discipline (Authors / Year / "
-        "Title / Venue / DOI / ID / Studied / Finding / Scope alignment / "
-        "Assessment) used by the BERIL paper-writer's adversarial reviewer."
-    )
+    has_cited = bool(pool.citation_map)
+    if has_cited:
+        out.append(
+            "Numbered in order of first citation in the manuscript. Each "
+            "entry carries the full 9-field citation discipline (Authors / "
+            "Year / Title / Venue / DOI / ID / Studied / Finding / Scope "
+            "alignment / Assessment) used by the BERIL paper-writer's "
+            "adversarial reviewer."
+        )
+    else:
+        out.append(
+            "Citation pool — drafting prompts cite entries by their "
+            "BibTeX-key in square brackets (e.g., `[Price2018]`). The "
+            "orchestrator's `citation_pool.py finalize` step renumbers to "
+            "ICMJE-style `[N]` citations after all sections are drafted, "
+            "based on first-citation order in the assembled manuscript. "
+            "Each entry carries the full 9-field discipline (Authors / "
+            "Year / Title / Venue / DOI / ID / Studied / Finding / Scope "
+            "alignment / Assessment)."
+        )
     out.append("")
 
     # Build (number, entry) pairs in numeric order
@@ -533,9 +547,24 @@ def format_references_md(pool: CitationPool) -> str:
 
 
 def _format_one_entry_md(number: Optional[int], entry: CitationEntry) -> str:
-    """Render a single entry's full 10-field block in markdown."""
+    """Render a single entry's full 10-field block in markdown.
+
+    For cited entries (number is not None): renders `[N]` numeric form.
+    For uncited entries: renders `[bib_key]` so downstream prompts can
+    discover the citekey to cite by. Pre-finalize, all entries are
+    uncited and visible-by-citekey; post-finalize, cited entries get
+    numbered and the un-numbered (uncited-pool-residual) entries
+    continue to display by bib_key.
+    """
     lines: list[str] = []
-    n_str = f"[{number}]" if number is not None else "[—]"
+    if number is not None:
+        n_str = f"[{number}]"
+    elif entry.bib_key:
+        n_str = f"[{entry.bib_key}]"
+    else:
+        # Should not happen if assign_bib_keys was called, but fall
+        # back gracefully rather than emit something the prompts can't cite.
+        n_str = "[—]"
     review_marker = " [REVIEW ARTICLE]" if entry.is_review_article else ""
     preprint_marker = " [PREPRINT]" if entry.is_preprint else ""
     authors_str = _format_authors_for_prose(entry.authors)
@@ -835,6 +864,206 @@ def _cmd_load(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Finalize: walk drafted sections for [bib_key] marks, populate citation_map,
+# rewrite references.md / citation_map.md / pool.json with numbering.
+# ---------------------------------------------------------------------------
+
+# Regex matching bib_keys in section prose: `[Lastname2018]`,
+# `[Price2018a]`, or extreme-edge `[Price2018_2]`. Deliberately rejects
+# `[1]` (no leading uppercase letter), so this won't false-match
+# pre-edit numeric citations.
+_CITEKEY_PATTERN = re.compile(r"\[([A-Z][a-zA-Z]*\d{4}(?:[a-z]|_\d+)?)\]")
+
+# IMRAD ordering for citation-number assignment. The same order is used
+# for first-citation discovery walking. Results-before-Discussion
+# matches journal convention.
+_FINALIZE_SECTION_ORDER = (
+    "01_methods.md",
+    "02_results.md",
+    "03_discussion.md",
+    "04_introduction.md",
+    "05_abstract.md",
+    "06_limitations.md",
+    "07_data_availability.md",
+)
+
+
+def extract_citekeys_in_first_citation_order(
+    draft_dir: Path,
+    section_order: tuple[str, ...] = _FINALIZE_SECTION_ORDER,
+) -> tuple[list[str], list[tuple[str, str, int]]]:
+    """Walk section files in IMRAD order; return (ordered_keys, locations).
+
+    `ordered_keys` is the list of unique bib_keys in first-citation order
+    across the IMRAD sections (each key appears once, at its first
+    citation site).
+
+    `locations` is a list of `(bib_key, section_filename, paragraph_n)`
+    tuples for every citekey occurrence (including duplicates) — used
+    to populate `pool.first_cited_at` for citation_map.md.
+
+    Section files that don't exist are skipped silently (the orchestrator
+    handles section presence; finalize tolerates partial drafts during
+    development).
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    locations: list[tuple[str, str, int]] = []
+
+    for section_name in section_order:
+        section_path = draft_dir / section_name
+        if not section_path.is_file():
+            continue
+        text = section_path.read_text(encoding="utf-8")
+        # Track paragraph number (1-based) by counting blank-line separators.
+        paragraph_n = 1
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                # Paragraph break (collapse runs of blank lines into one boundary).
+                paragraph_n += 1
+                continue
+            for match in _CITEKEY_PATTERN.finditer(line):
+                key = match.group(1)
+                locations.append((key, section_name, paragraph_n))
+                if key not in seen:
+                    ordered.append(key)
+                    seen.add(key)
+    return ordered, locations
+
+
+def _cmd_finalize(args: argparse.Namespace) -> int:
+    """Renumber a draft's citations based on first-citation order.
+
+    Reads `<draft_dir>/pool.json`, walks `<draft_dir>/0?_*.md` section
+    files for `[bib_key]` marks, populates `pool.citation_map` and
+    `pool.first_cited_at` from the prose, then re-runs serialize_to_disk
+    to rewrite references.md / citation_map.md / pool.json with
+    numbered citations.
+
+    Section files are NOT modified — they preserve `[bib_key]` form
+    (non-destructive; finalize is re-runnable). The numeric `[N]` form
+    is applied at manuscript-assembly time by `paper_writer.sh
+    phase_assemble`, which substitutes `[bib_key]` → `[N]` from the
+    finalized citation_map when concatenating to manuscript.md.
+
+    Emits a finalize_warnings.md file if any `[bib_key]` in the prose
+    doesn't resolve to a pool entry — these are orphaned citations the
+    user should fix before submission. Exit 0 always (advisory); the
+    warnings file (if non-empty) signals the orchestrator to surface in
+    the next-actions handoff.
+    """
+    draft_dir: Path = args.draft_dir
+    if not draft_dir.is_dir():
+        print(f"error: draft_dir not found: {draft_dir}", file=sys.stderr)
+        return 1
+
+    pool_path = draft_dir / "pool.json"
+    if not pool_path.is_file():
+        print(f"error: pool.json not found at {pool_path}", file=sys.stderr)
+        return 1
+
+    raw = json.loads(pool_path.read_text(encoding="utf-8"))
+    pool = CitationPool.from_dict(raw)
+    assign_bib_keys(pool)  # idempotent — no-op if already assigned
+
+    ordered_keys, locations = extract_citekeys_in_first_citation_order(draft_dir)
+
+    pool_keys = {e.bib_key for e in pool.entries if e.bib_key}
+    resolved_keys = [k for k in ordered_keys if k in pool_keys]
+    orphan_keys = [k for k in ordered_keys if k not in pool_keys]
+
+    # Wipe any prior citation_map (re-runnable) and re-assign from prose order.
+    pool.citation_map = {}
+    pool.first_cited_at = {}
+    assign_citation_numbers(pool, resolved_keys)
+    # Populate first_cited_at for citation_map.md
+    for key, section, para in locations:
+        if key not in pool.citation_map:
+            continue
+        n = pool.citation_map[key]
+        if n in pool.first_cited_at:
+            continue  # earliest occurrence wins
+        pool.first_cited_at[n] = {"section": section, "paragraph": str(para)}
+
+    paths = serialize_to_disk(pool, draft_dir)
+    for name, p in paths.items():
+        print(f"  rewrote {name} → {p}", file=sys.stderr)
+
+    # Orphan-citation warnings file. Always written; empty body if no orphans.
+    warnings_path = draft_dir / "finalize_warnings.md"
+    warning_lines: list[str] = ["# Citation Finalize Warnings", ""]
+    if orphan_keys:
+        warning_lines.append(
+            f"**{len(orphan_keys)} orphaned citation(s)** — bib_keys cited "
+            f"in prose but not present in pool.json. The user must add "
+            f"these to the pool (or remove the citation from prose) "
+            f"before submission. M10 will continue to fail until "
+            f"resolved."
+        )
+        warning_lines.append("")
+        for key in orphan_keys:
+            occurrences = [(s, p) for (k, s, p) in locations if k == key]
+            warning_lines.append(f"- `[{key}]` — orphaned (not in pool):")
+            for s, p in occurrences[:5]:
+                warning_lines.append(f"    - {s}, paragraph {p}")
+            if len(occurrences) > 5:
+                warning_lines.append(
+                    f"    - ...and {len(occurrences) - 5} more occurrence(s)"
+                )
+        warning_lines.append("")
+    else:
+        warning_lines.append(
+            "_(No orphaned citations. Every `[bib_key]` in prose "
+            "resolves to a pool entry.)_"
+        )
+    warnings_path.write_text("\n".join(warning_lines) + "\n", encoding="utf-8")
+    print(f"  wrote finalize_warnings.md → {warnings_path}", file=sys.stderr)
+
+    print(
+        f"\nSummary: {len(resolved_keys)} cited, "
+        f"{len(orphan_keys)} orphaned, "
+        f"{len(pool.entries) - len(resolved_keys)} pool entries uncited.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _cmd_render_with_numbers(args: argparse.Namespace) -> int:
+    """Substitute [bib_key] → [N] in a section file using pool.json's
+    citation_map. Emits to stdout. Non-destructive: the input section
+    file is unchanged.
+
+    If a [bib_key] in the section isn't in the citation_map (orphaned),
+    it stays as `[bib_key]` in the output — visible to the human reader
+    as a cue to fix before submission. The validator (M10) will flag
+    these too.
+    """
+    section_path: Path = args.section_file
+    pool_path: Path = args.pool_json
+    if not section_path.is_file():
+        print(f"error: section file not found: {section_path}", file=sys.stderr)
+        return 1
+    if not pool_path.is_file():
+        print(f"error: pool.json not found: {pool_path}", file=sys.stderr)
+        return 1
+    raw = json.loads(pool_path.read_text(encoding="utf-8"))
+    pool = CitationPool.from_dict(raw)
+    text = section_path.read_text(encoding="utf-8")
+
+    # Build a replacement function: [bib_key] → [N] iff key is in
+    # citation_map; else leave the [bib_key] intact.
+    def _sub(match: re.Match) -> str:
+        key = match.group(1)
+        n = pool.citation_map.get(key)
+        return f"[{n}]" if n is not None else match.group(0)
+
+    out = _CITEKEY_PATTERN.sub(_sub, text)
+    sys.stdout.write(out)
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         prog="citation_pool.py",
@@ -876,6 +1105,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         "draft_dir", type=Path, help="Draft directory to read pool.json from."
     )
     p_load.set_defaults(func=_cmd_load)
+
+    p_fin = sub.add_parser(
+        "finalize",
+        help=(
+            "Walk drafted section files for [bib_key] marks; renumber "
+            "references.md / citation_map.md / pool.json based on "
+            "first-citation order. Idempotent."
+        ),
+    )
+    p_fin.add_argument(
+        "draft_dir", type=Path,
+        help="Draft directory (papers/draft_N/) with section files + pool.json.",
+    )
+    p_fin.set_defaults(func=_cmd_finalize)
+
+    p_render = sub.add_parser(
+        "render-with-numbers",
+        help=(
+            "Read a section markdown file, substitute [bib_key] → [N] "
+            "using pool.json's citation_map, write to stdout. Used by "
+            "paper_writer.sh phase_assemble to build manuscript.md "
+            "non-destructively (section files preserve [bib_key] form)."
+        ),
+    )
+    p_render.add_argument("section_file", type=Path, help="Section .md file to render.")
+    p_render.add_argument(
+        "pool_json", type=Path,
+        help="pool.json with populated citation_map (run finalize first).",
+    )
+    p_render.set_defaults(func=_cmd_render_with_numbers)
 
     args = p.parse_args(argv)
     return args.func(args)

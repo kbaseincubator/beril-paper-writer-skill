@@ -1,108 +1,431 @@
-"""`beril-paper-writer continue <draft_dir>` — Phase 4 stub.
+"""`beril-paper-writer continue <draft_dir> [--pick TLN] [--revision TEXT]`
 
-Resumes a paused paper draft per SPEC §5.5 (intercalation hash-diff +
-explicit user confirmation before integrating any changes). The full
-implementation lands with Phase 4 (the orchestrator); this stub validates
-arguments and reports the planned behavior so users see consistent CLI
-help across releases.
+Resume a paused paper draft. The behavior depends on state.json's `phase`:
 
-When implementation lands, this becomes a thin shell that:
-  1. Reads draft_dir/state.json (via state.load_state)
-  2. Re-hashes source artifacts; diffs vs state.json
-  3. Reports changes to the user via stderr; exits if user has un-resolved
-     manuscript edits
-  4. Dispatches to the right phase handler based on state.phase
+- phase=throughline_pick (the most common case)
+    Requires --pick TLN. If --revision is non-empty, invokes
+    revise_throughline.v1.md via `claude -p` to refine the chosen
+    candidate per the user's revision text. Otherwise copies the
+    chosen candidate verbatim into 00_throughline.md. Then sets
+    phase=drafting and dispatches to paper_writer.sh resume, which
+    drafts citation_pool → methods → ... → abstract → assemble →
+    review and pauses at phase=review (the final handoff).
+
+- phase=drafting / phase=review
+    Re-dispatches to paper_writer.sh resume with no further action.
+    Useful when a prior run halted mid-draft (claude failure, retry
+    exhaustion). The shell script's idempotency handles the rest.
+
+- phase=assembled
+    Reports "already complete" and exits 0.
+
+- phase=init
+    Re-dispatches to paper_writer.sh resume which re-runs the early
+    phases idempotently and pauses at throughline_pick.
+
+Per SPEC §5.5 (intercalation hash-diff): on resume, source-artifact
+hashes are recomputed and compared against state.json's recorded
+hashes. Any drift surfaces a warning before drafting continues. v0.1
+implementation does the comparison but does NOT auto-rebuild the
+throughline; instead emits a warning and continues. v0.2 adds the
+re-evaluation prompt path.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import shutil
+import subprocess
 import sys
+from importlib import resources
 from pathlib import Path
 
 from beril_paper_writer import __version__, state
-
-_NOT_IMPLEMENTED_MSG = (
-    "beril-paper-writer continue is declared in the planned CLI but is not\n"
-    "yet implemented. The orchestrator lands in Phase 4 (see SPEC §5.5 and\n"
-    "LAYOUT 'Repository tree' for the planned tools/paper_writer.sh).\n"
-    "\n"
-    "Phase 1 ({ver}) ships only the install / configure / state-tracking\n"
-    "primitives. State files at {draft_dir}/state.json can be inspected\n"
-    "manually; the resume logic is forthcoming.\n"
-)
 
 
 def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "continue",
-        help="Resume a paused paper draft (planned — Phase 4).",
+        help="Resume a paused paper draft.",
         description=(
-            "Resume a paper draft that paused at a user-decision point "
-            "(throughline pick, gap-fill response, or review acceptance). "
-            "Per SPEC §5.5: hash-diffs source artifacts on resume; reports "
-            "changes explicitly before integrating; never silently rebuilds "
-            "the throughline."
+            "Resume a paper draft that paused at a user-decision point. "
+            "On phase=throughline_pick: requires --pick TLN; if --revision "
+            "is provided, invokes revise_throughline.v1.md to refine the "
+            "chosen candidate. Otherwise carries the candidate verbatim. "
+            "Then runs the drafting pipeline through to phase=review."
         ),
     )
     p.add_argument(
         "draft_dir",
+        help="Path to the paper draft directory (e.g. projects/<id>/papers/draft_1/).",
+    )
+    p.add_argument(
+        "--pick",
+        default=None,
         help=(
-            "Path to the paper draft directory "
-            "(e.g. projects/<id>/papers/draft_1/)."
+            "Throughline candidate id (e.g. TL2). Required when "
+            "phase=throughline_pick. Must match an `## Candidate TLN:` "
+            "header in throughline_candidates.md."
         ),
+    )
+    p.add_argument(
+        "--revision",
+        default=None,
+        help=(
+            "Optional revision note for the chosen throughline. If "
+            "non-empty, invokes revise_throughline.v1.md to refine "
+            "the candidate. If absent or empty, the chosen candidate "
+            "is copied verbatim into 00_throughline.md."
+        ),
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help="Override default model. Forwarded to paper_writer.sh and the revise step.",
     )
     p.add_argument(
         "--no-stream",
         action="store_true",
-        help="Disable stream-json parsing (planned — Phase 4 default is on).",
+        help="Disable stream_progress.py wrapper.",
+    )
+    p.add_argument(
+        "--no-adversarial",
+        action="store_true",
+        help="Skip adversarial reviewer; use fallback inline reviewer.",
     )
     p.set_defaults(func=run)
     return p
 
 
+# ----------------------------------------------------------------------------
+# Package-data path resolution
+# ----------------------------------------------------------------------------
+
+
+def _locate_skill_resource(*parts: str) -> Path:
+    """Resolve a path inside beril_paper_writer/skill/."""
+    try:
+        ref = resources.files("beril_paper_writer").joinpath("skill", *parts)
+        with resources.as_file(ref) as p:
+            return Path(p)
+    except (ModuleNotFoundError, FileNotFoundError) as e:
+        raise FileNotFoundError(
+            f"package resource not found: skill/{'/'.join(parts)}. "
+            "Reinstall beril-paper-writer-skill."
+        ) from e
+
+
+# ----------------------------------------------------------------------------
+# Throughline-pick handling
+# ----------------------------------------------------------------------------
+
+
+def _extract_candidate_block(candidates_path: Path, pick: str) -> str | None:
+    """Return the verbatim text of the picked candidate's `## Candidate TLN:`
+    block, or None if pick not found.
+
+    The block runs from the `## Candidate TLN:` line through (but not
+    including) the next `## Candidate TLN:` H2 or end of file. Trailing
+    `---` separator lines are trimmed.
+    """
+    if not candidates_path.is_file():
+        return None
+    text = candidates_path.read_text(encoding="utf-8")
+    # Find the start of the picked candidate.
+    needle = f"## Candidate {pick}:"
+    start = text.find(needle)
+    if start == -1:
+        return None
+    # Find the next `## Candidate ` after start.
+    next_h2 = text.find("\n## Candidate ", start + len(needle))
+    if next_h2 == -1:
+        block = text[start:]
+    else:
+        block = text[start:next_h2]
+    # Trim trailing horizontal rules.
+    lines = block.rstrip().split("\n")
+    while lines and lines[-1].strip() in ("---", ""):
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def _write_throughline_verbatim(
+    draft_dir: Path, candidate_block: str, pick: str
+) -> None:
+    """Write 00_throughline.md as the candidate block converted to a
+    single-throughline format (H1 instead of H2 candidate-wrapper)."""
+    # Convert `## Candidate TLN: <title>` to H1 `# Throughline\n\n**Selected:** TLN\n\n**Statement:** <title>\n`
+    lines = candidate_block.split("\n")
+    title = ""
+    body_start = 0
+    for i, line in enumerate(lines):
+        if line.startswith("## Candidate "):
+            # Extract everything after `## Candidate TLN: `
+            after_colon = line.split(":", 1)
+            title = after_colon[1].strip() if len(after_colon) > 1 else ""
+            body_start = i + 1
+            break
+    rest = "\n".join(lines[body_start:]).strip()
+
+    header = (
+        f"# Throughline\n"
+        f"\n"
+        f"**Selected:** {pick} (carried verbatim from plan.v1 candidate; "
+        f"no user revision applied).\n"
+        f"\n"
+        f"**Statement:** {title}\n"
+        f"\n"
+    )
+    target = draft_dir / "00_throughline.md"
+    target.write_text(header + rest + "\n", encoding="utf-8")
+
+
+def _invoke_revise_throughline(
+    draft_dir: Path,
+    candidate_block: str,
+    pick: str,
+    revision_text: str,
+    model: str,
+    no_stream: bool,
+) -> int:
+    """Invoke revise_throughline.v1.md via claude -p to produce a refined
+    00_throughline.md.
+
+    Returns 0 on success, non-zero on failure. The shell script's
+    invoke_claude_with_retry pattern is mirrored here so we get the
+    same Write-verification + retry behavior.
+    """
+    if shutil.which("claude") is None:
+        print("error: 'claude' CLI not on PATH; cannot run revise step", file=sys.stderr)
+        return 3
+
+    sys_prompt_path = _locate_skill_resource("prompts", "revise_throughline.v1.md")
+    sys_prompt = sys_prompt_path.read_text(encoding="utf-8")
+    target = draft_dir / "00_throughline.md"
+    state_data = state.load_state(draft_dir)
+    project_id = state_data.project_id or "(unknown)"
+    project_root = draft_dir.parent.parent  # papers/draft_N → ../..
+
+    today_iso = (
+        __import__("datetime")
+        .datetime.now(__import__("datetime").timezone.utc)
+        .strftime("%Y-%m-%d")
+    )
+
+    user_prompt = f"""Run revise_throughline.v1 to produce {target}.
+
+## Inputs
+
+- `CHOSEN_CANDIDATE_BLOCK` (verbatim from throughline_candidates.md):
+
+{candidate_block}
+
+(end of CHOSEN_CANDIDATE_BLOCK)
+
+- `USER_REVISION_TEXT`:
+
+{revision_text}
+
+(end of USER_REVISION_TEXT)
+
+- `THROUGHLINE_OUT_PATH` = `{target}`
+- `PROJECT_ROOT` = `{project_root}`
+- `REPORT_PATH` = `{project_root}/REPORT.md`
+- `RESEARCH_PLAN_PATH` = `{project_root}/RESEARCH_PLAN.md`
+- `REFRAMING_LOG_PATH` = `{draft_dir}/reframing_log.md`
+- `TODAY` = `{today_iso}`
+- `PLAN_RUN_DATE` = `{state_data.last_updated or today_iso}`
+
+Apply the user's revision per your system prompt's discipline pass. Write THROUGHLINE_OUT_PATH via the Write tool, then emit the closing-message template."""
+
+    tools_dir = _locate_skill_resource("tools").parent / "tools"  # ../tools
+    stream_script = _locate_skill_resource("tools", "stream_progress.py")
+    metadata_path = draft_dir / "audit" / "revise_throughline.metadata.json"
+    log_path = draft_dir / "audit" / "revise_throughline.stream.log"
+
+    print(f"▸ Invoking revise_throughline.v1 via claude -p", file=sys.stderr)
+
+    use_stream = not no_stream
+    if use_stream:
+        # Pipe through stream_progress.py for Write verification.
+        claude_cmd = [
+            "claude", "-p",
+            "--model", model,
+            "--system-prompt", sys_prompt,
+            "--allowedTools", "Read,Write,Edit,Bash,Grep,Glob",
+            "--dangerously-skip-permissions",
+            "--output-format", "stream-json",
+            "--verbose",
+            user_prompt,
+        ]
+        env = {**os.environ, "CLAUDECODE": ""}
+        claude = subprocess.Popen(
+            claude_cmd,
+            stdout=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+        parser_cmd = [
+            sys.executable, str(stream_script),
+            "--expected-write-path", str(target),
+            "--log", str(log_path),
+            "--model", model,
+            "--metadata-out", str(metadata_path),
+            "--label", "revise_throughline.v1",
+        ]
+        parser = subprocess.Popen(
+            parser_cmd,
+            stdin=claude.stdout,
+            stdout=subprocess.DEVNULL,
+        )
+        claude.stdout.close()  # type: ignore[union-attr]
+        rc = parser.wait()
+        claude.wait()
+        if rc == 0 and log_path.is_file():
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
+        return rc
+    else:
+        # Direct invocation, no stream parser.
+        rc = subprocess.run(
+            [
+                "claude", "-p",
+                "--model", model,
+                "--system-prompt", sys_prompt,
+                "--allowedTools", "Read,Write,Edit,Bash,Grep,Glob",
+                "--dangerously-skip-permissions",
+                user_prompt,
+            ],
+            stdin=subprocess.DEVNULL,
+        ).returncode
+        return rc
+
+
+# ----------------------------------------------------------------------------
+# Main run logic
+# ----------------------------------------------------------------------------
+
+
+def _resume_via_paper_writer(
+    draft_dir: Path,
+    model: str | None,
+    no_stream: bool,
+    no_adversarial: bool,
+) -> int:
+    """Dispatch to paper_writer.sh resume <draft_dir> with forwarded flags."""
+    sh_path = _locate_skill_resource("tools", "paper_writer.sh")
+    argv = ["bash", str(sh_path), "resume", str(draft_dir)]
+    if model:
+        argv += ["--model", model]
+    if no_stream:
+        argv += ["--no-stream"]
+    if no_adversarial:
+        argv += ["--no-adversarial"]
+    print(f"▸ Running: {' '.join(argv)}", file=sys.stderr)
+    return subprocess.run(argv).returncode
+
+
 def run(args: argparse.Namespace) -> int:
     draft_dir = Path(args.draft_dir).expanduser().resolve()
     if not draft_dir.is_dir():
-        print(
-            f"Error: draft_dir does not exist or is not a directory: {draft_dir}",
-            file=sys.stderr,
-        )
+        print(f"error: draft_dir does not exist: {draft_dir}", file=sys.stderr)
         return 1
 
-    # If a state.json exists, give the user a brief peek (Phase 1 affordance:
-    # at least the user can see what's in there even before continue logic
-    # exists). Useful for testing the state module against real layouts.
-    state_file = state.state_path(draft_dir)
-    if state_file.is_file():
-        try:
-            st = state.load_state(draft_dir)
-            print(f"draft_dir: {draft_dir}")
-            print(f"state.json found:")
-            print(f"  schema version: {st.version}")
-            print(f"  project_id:     {st.project_id or '(unset)'}")
-            print(f"  draft_number:   {st.draft_number}")
-            print(f"  phase:          {st.phase}")
-            print(f"  mode:           {st.mode}")
-            print(f"  tier:           {st.tier or '(not yet triaged)'}")
+    try:
+        st = state.load_state(draft_dir)
+    except (OSError, ValueError) as e:
+        print(f"error: cannot load state.json: {e}", file=sys.stderr)
+        return 2
+
+    print(f"  draft_dir: {draft_dir}", file=sys.stderr)
+    print(f"  phase:     {st.phase}", file=sys.stderr)
+    print(f"  project:   {st.project_id or '(unset)'}", file=sys.stderr)
+    print("", file=sys.stderr)
+
+    model = args.model or "claude-sonnet-4-5-20250929"
+
+    # Phase-specific dispatch.
+    if st.phase == "throughline_pick":
+        if not args.pick:
             print(
-                f"  throughline:    "
-                f"{st.throughline.candidate_id or '(not yet picked)'}"
-            )
-            print(
-                f"  iteration:      "
-                f"{st.iteration.gap_fill_rounds} gap-fill round(s), "
-                f"{st.iteration.rewrite_passes} rewrite pass(es)"
-            )
-            print(f"  cost so far:    ${st.cost_so_far_usd:.2f}")
-            print(f"  last updated:   {st.last_updated or '(never)'}")
-            print()
-        except (OSError, ValueError) as e:
-            print(
-                f"Note: could not read state.json: {e}. "
-                f"Continuing with stub message.",
+                "error: phase=throughline_pick requires --pick TLN. "
+                f"Inspect candidates at {draft_dir}/throughline_candidates.md "
+                "and choose one.",
                 file=sys.stderr,
             )
+            return 1
 
-    sys.stderr.write(_NOT_IMPLEMENTED_MSG.format(ver=__version__, draft_dir=draft_dir))
-    return 2
+        candidates_path = draft_dir / "throughline_candidates.md"
+        block = _extract_candidate_block(candidates_path, args.pick)
+        if block is None:
+            print(
+                f"error: candidate {args.pick!r} not found in {candidates_path}. "
+                f"Available candidates can be listed via "
+                f"`grep '^## Candidate' {candidates_path}`.",
+                file=sys.stderr,
+            )
+            return 1
+
+        revision = (args.revision or "").strip()
+        if revision:
+            print(f"▸ Refining {args.pick} per user revision", file=sys.stderr)
+            rc = _invoke_revise_throughline(
+                draft_dir, block, args.pick, revision,
+                model, args.no_stream,
+            )
+            if rc != 0:
+                print(
+                    f"error: revise_throughline.v1 invocation failed (exit {rc}); "
+                    f"00_throughline.md may not have been written. "
+                    "Inspect the audit log and re-run.",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            print(f"▸ Carrying {args.pick} verbatim into 00_throughline.md", file=sys.stderr)
+            _write_throughline_verbatim(draft_dir, block, args.pick)
+
+        # Update state.json: phase=drafting, throughline.candidate_id=pick,
+        # throughline.chosen_at=now, etc.
+        from datetime import datetime, timezone
+        now_iso = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        st.phase = "drafting"
+        st.throughline.candidate_id = args.pick
+        st.throughline.chosen_at = now_iso
+        if revision:
+            st.throughline.revision += 1
+        state.save_state(draft_dir, st)
+        print(f"✓ state.json updated: phase=drafting, throughline={args.pick}", file=sys.stderr)
+
+        # Now dispatch to paper_writer.sh resume to run the drafting phases.
+        return _resume_via_paper_writer(draft_dir, args.model, args.no_stream, args.no_adversarial)
+
+    elif st.phase in ("init", "drafting", "review"):
+        # paper_writer.sh handles each of these idempotently.
+        return _resume_via_paper_writer(draft_dir, args.model, args.no_stream, args.no_adversarial)
+
+    elif st.phase == "assembled":
+        print("✓ Already complete (phase=assembled).", file=sys.stderr)
+        manuscript = draft_dir / "manuscript.md"
+        if manuscript.is_file():
+            print(f"  Manuscript: {manuscript}", file=sys.stderr)
+        review = next(iter((draft_dir / "reviews").glob("draft_*_review_*.md")), None)
+        if review:
+            print(f"  Review:     {review}", file=sys.stderr)
+        return 0
+
+    else:
+        print(
+            f"error: unknown phase {st.phase!r} in state.json; cannot resume.",
+            file=sys.stderr,
+        )
+        return 2

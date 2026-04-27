@@ -5,16 +5,19 @@ Dispatches to command modules under beril_paper_writer.commands/.
 Subcommands (per LAYOUT.md "Slash commands"):
   install-skill   Copy shipped skill/ tree into BERIL/.claude/skills/beril-paper-writer/.
   configure       Verify claude is on PATH; warn if beril-adversarial absent.
-  continue        Resume a paused paper draft (Phase 4 — currently stub).
+  draft           Start a fresh paper draft (init+extract+plan; pause for pick).
+  continue        Resume a paused paper draft (apply pick + revision; run drafting).
   assemble        Render markdown intermediates to .docx (Phase 5 — currently stub).
 
-The drafting and review-rewrite paths are NOT Python subcommands — they
-will be handled by the planned shipped shell script
-tools/paper_writer.sh, which the slash command will invoke directly.
-Same pattern as beril-adversarial.
+The drafting workflow runs via the shipped shell script tools/paper_writer.sh,
+which the `draft` and `continue` Python subcommands invoke. Same pattern as
+beril-adversarial, with Python wrappers for the front of the pipeline so
+slash-command markdowns can invoke either via bash blocks (paper_writer.sh
+directly) or via the Python CLI (beril-paper-writer draft / continue) — both
+paths land at the same orchestrator.
 
 Exit codes:
-  0  success
+  0  success or paused-cleanly-at-handoff
   1  user error (bad args, missing BERIL_ROOT, missing file user should fix)
   2  runtime error (subprocess failed; package data missing; subcommand
      not yet implemented in this release)
@@ -32,6 +35,7 @@ from beril_paper_writer.commands import (
     assemble,
     configure,
     continue_run,
+    draft,
     install_skill,
 )
 
@@ -54,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_skill.add_parser(subparsers)
     configure.add_parser(subparsers)
+    draft.add_parser(subparsers)
     continue_run.add_parser(subparsers)
     assemble.add_parser(subparsers)
 

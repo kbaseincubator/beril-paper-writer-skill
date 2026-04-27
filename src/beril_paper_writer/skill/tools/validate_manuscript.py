@@ -322,7 +322,11 @@ def extract_citation_numbers(text: str) -> set[int]:
 # Numbered-reference line pattern in references.md.
 # Matches "1. Smith J et al..." or "[1] Smith J et al..." at line start.
 _NUMBERED_REF_RE = re.compile(
-    r"^\s*(?:\[(\d+)\]|(\d+)\.)\s+", re.MULTILINE
+    # Match `[N]` or `N.` at line start, allowing optional leading emphasis
+    # characters (`*`, `_`) and whitespace. The format-references-md output
+    # uses `**[N] Author Year...**` (bold-prefix); plain numbered lists use
+    # `[N] ...` or `N. ...`. All three forms count as a reference entry.
+    r"^[*_\s]*(?:\[(\d+)\]|(\d+)\.)\s+", re.MULTILINE
 )
 
 
@@ -557,9 +561,16 @@ def validate_M2_structured_abstract(
                          abstract, re.IGNORECASE | re.MULTILINE):
                 any_alias_present = True
                 break
-            # Bold prefix
-            if re.search(r"\*\*" + re.escape(a) + r"[:\s]?\*\*",
-                         abstract, re.IGNORECASE):
+            # Bold prefix. Permissive: matches `**Background:**` (bold),
+            # `**_Background:_**` (bold-italic, the form abstract.v1
+            # actually emits — line 52 of the prompt), `**Background **`,
+            # `***Background:***`, etc. Allows optional emphasis chars
+            # (`_` / `*`) inside the outer `**` plus optional whitespace
+            # and a trailing colon.
+            if re.search(
+                r"\*\*[_*]?\s*" + re.escape(a) + r"[:\s]?\s*[_*]?\*\*",
+                abstract, re.IGNORECASE,
+            ):
                 any_alias_present = True
                 break
         if any_alias_present:
@@ -646,12 +657,43 @@ def validate_M4_data_availability(
         "data availability", "data and code availability",
         "code and data availability", "availability",
     )
+    # split_into_sections treats H1 and H2 as peer-level entries. When a
+    # data-availability section is structured with H2 sub-sections (Code,
+    # Data sources, Public accessions, etc. — the orchestrator's
+    # template), the H1 entry has only the header line and the H2
+    # sub-sections become separate dict entries. To compute body length
+    # honestly we must also include the H2 sub-sections that follow the
+    # H1 in document order, up to the next H1.
     text = ""
+    matched_h1_idx = -1
+    section_keys = list(sections.keys())  # insertion-ordered (from split_into_sections)
     for name in candidate_names:
-        match = find_section(sections, (name,))
-        if match:
-            text = match
+        for idx, key in enumerate(section_keys):
+            if section_matches_alias(key, (name,)):
+                text = sections[key]
+                matched_h1_idx = idx
+                break
+        if text:
             break
+
+    # If matched, gather all subsequent sections until the next "top-level"
+    # section (one whose first non-blank line begins with `# ` not `## `).
+    # The current section's text (`text`) is the H1 body; sub-sections
+    # contribute their content too.
+    if matched_h1_idx >= 0:
+        gathered: list[str] = [text]
+        for nxt_key in section_keys[matched_h1_idx + 1:]:
+            nxt_text = sections[nxt_key]
+            # Find the first non-blank line; if it starts with `# ` (H1),
+            # we've left the data-availability scope. If it starts with
+            # `## ` (H2) or content directly, it's a sub-section/continuation.
+            first_nonblank = next(
+                (l for l in nxt_text.split("\n") if l.strip()), ""
+            )
+            if first_nonblank.startswith("# ") and not first_nonblank.startswith("## "):
+                break
+            gathered.append(nxt_text)
+        text = "\n".join(gathered)
 
     if not text:
         # Fall back: search Methods or end of document for a "Data availability:" line.
@@ -1064,19 +1106,20 @@ def validate_M10_citations_crossref(
         bib_keys = extract_bib_keys(bibliography_bib)
         if references_md is not None:
             ref_count = len(extract_reference_numbers(references_md))
-            if ref_count > 0 and len(bib_keys) != ref_count:
-                # Count mismatch is a soft warning, not a hard fail (one
-                # bib entry might intentionally cover multiple ref numbers
-                # in some styles).
+            # Bibliography may legitimately have MORE entries than references
+            # (uncited pool entries survive in bib for audit; we don't strip
+            # them at finalize time). Flag only the converse: bibliography
+            # missing entries that are cited in references.md.
+            if ref_count > 0 and len(bib_keys) < ref_count:
                 violations.append(Violation(
                     severity="warning",
                     section="bibliography",
                     line=None,
                     message=(
                         f"references.md has {ref_count} numbered entries but "
-                        f"bibliography.bib has {len(bib_keys)} entries. "
-                        f"They should match in v0.1 (one bib entry per "
-                        f"reference number)."
+                        f"bibliography.bib has only {len(bib_keys)} entries. "
+                        f"Some cited references appear to be missing from "
+                        f"the BibTeX file."
                     ),
                     escalation_path="user-modify",
                 ))

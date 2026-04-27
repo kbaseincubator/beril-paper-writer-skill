@@ -46,6 +46,8 @@ _SHIPPED_FILES = ("SKILL.md",)
 _EXECUTABLE_FILES = (
     "tools/paper_writer.sh",
     "tools/stream_progress.py",
+    "tools/paper_writer_helpers.py",
+    "tools/check_throughline_glyphs.py",
     "tools/extract_methods.py",
     "tools/extract_figures.py",
     "tools/citation_pool.py",
@@ -176,6 +178,13 @@ def _copy_shipped_files(src: Path, dst: Path, *, force: bool) -> None:
 
 
 def _copy_shipped_subdirs(src: Path, dst: Path, *, force: bool) -> None:
+    # Ignore filter: __pycache__ and .pyc files. These can appear in the
+    # source tree when running install-skill from a `pip install -e .`
+    # dev install (the package data IS the source tree, and Python
+    # bytecode caches accumulate there). pipx-built wheels exclude them
+    # via pyproject's [tool.hatch.build.targets.sdist].exclude, but
+    # editable installs need this defensive filter.
+    ignore_pycache = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
     for subdir in _SHIPPED_SUBDIRS:
         s = src / subdir
         if not s.is_dir():
@@ -185,7 +194,7 @@ def _copy_shipped_subdirs(src: Path, dst: Path, *, force: bool) -> None:
         # shipped subdirs — they're maintained by the package.
         if d.exists():
             shutil.rmtree(d)
-        shutil.copytree(s, d)
+        shutil.copytree(s, d, ignore=ignore_pycache)
 
 
 def _set_executable_bits(skill_dir: Path) -> None:

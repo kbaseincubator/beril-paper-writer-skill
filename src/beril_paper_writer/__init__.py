@@ -1,7 +1,7 @@
 """beril-paper-writer-skill — scientific manuscript drafter for BERIL projects.
 
-v0.1.0-spec: specification-only. See SPEC.md for design; cli.py is a stub
-until implementation lands.
+See SPEC.md for design intent; LAYOUT.md for runtime contracts;
+RELEASE_NOTES.md for v0.1 capabilities + known limitations.
 """
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"

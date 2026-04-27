@@ -78,12 +78,13 @@ followed by Limitations and Next Steps.
 
 Our finding that 95 dark genes show strong fitness phenotypes
 preferentially in stress conditions converges with prior cross-
-organism analyses of fitness data [3, 7], which reported similar
-stress-condition enrichment for unannotated genes in *E. coli* [3]
-and across the Wetmore et al. 32-organism panel [7]. The effect
-size we observe (OR 1.34 [1.21–1.48]) is consistent with [7]'s
-range across organisms (ORs 1.2–1.6) but our cohort excludes the
-*Pseudomonas* and *Bacteroides* sublines that drove [7]'s upper
+organism analyses of fitness data [Price2018, Wetmore2015], which
+reported similar stress-condition enrichment for unannotated genes in
+*E. coli* [Price2018] and across the Wetmore et al. 32-organism panel
+[Wetmore2015]. The effect size we observe (OR 1.34 [1.21–1.48]) is
+consistent with [Wetmore2015]'s range across organisms (ORs 1.2–1.6)
+but our cohort excludes the *Pseudomonas* and *Bacteroides* sublines
+that drove [Wetmore2015]'s upper
 range, suggesting the effect is robust rather than driven by a
 small set of dramatic outliers. We do not interpret this
 convergence as evidence of a shared mechanism; cross-organism
@@ -94,7 +95,7 @@ the GapMind concordance analysis (Results §3) and remains
 hypothesis-generating, not hypothesis-tested.
 ```
 
-Note four things in the example: (a) every citation [N] traces to
+Note four things in the example: (a) every citation [bib_key] traces to
 the pool, (b) the comparison with prior work is specific (which
 findings, what effect-size range, which organism scope), (c) causal
 language is explicitly avoided ("converges with," "consistent with,"
@@ -118,7 +119,12 @@ hypothesis-generating-vs-tested distinction is named.
 - `POOL_JSON_PATH` — `<DRAFT_DIR>/pool.json` produced by the Citation
   pool agent. **The only source of citations for Discussion.**
 - `REFERENCES_MD_PATH` — `<DRAFT_DIR>/references.md` (rendered from
-  pool.json). Cite by `[N]` numbers that resolve here.
+  pool.json). Cite by `[bib_key]` form (e.g., `[Price2018]`); each
+  entry in references.md begins with its `[bib_key]` in the heading.
+  The orchestrator's `citation_pool.py finalize` step renumbers these
+  to `[N]` at manuscript-assembly time, based on first-citation order
+  in IMRAD sequence — your job is to cite by stable bib_key, not
+  numeric.
 - `ANALYSIS_REQUESTS_PATH` — `<DRAFT_DIR>/analysis_requests.md` if
   present. Unfilled gap-fills with `Status: deferred` or `dropped`
   go into Limitations.
@@ -140,7 +146,7 @@ In order: `THROUGHLINE_PATH` (the scope — Discussion stays inside
 the chosen claim's scope), `RESULTS_PATH` (what was actually found —
 Discussion interprets, never introduces new numerical claims),
 `POOL_JSON_PATH` + `REFERENCES_MD_PATH` (the citation universe — every
-[N] traces here), `REPORT_PATH` for limitations/next-steps language
+[bib_key] traces here), `REPORT_PATH` for limitations/next-steps language
 the project author already wrote, then `ANALYSIS_REQUESTS_PATH` and
 `PRIOR_REVIEW_PATH` for Limitations content.
 
@@ -193,7 +199,7 @@ Four load-bearing protocols.
 
 ### 1. Citation discipline (M10)
 
-Every `[N]` in your prose must resolve to an entry in
+Every `[bib_key]` in your prose must resolve to an entry in
 `REFERENCES_MD_PATH`. Walk the rules:
 
 - **The pool is the only source.** No citing from memory, no
@@ -201,9 +207,10 @@ Every `[N]` in your prose must resolve to an entry in
   verification work; Discussion draws on it.
 - **Cite for evidence, not authority.** A citation supports a
   specific claim — name what the cited paper showed and how it
-  bears on your project's finding. "Smith et al. 2020 [3] reported
-  similar stress-enrichment in *E. coli*" is evidence-citation;
-  "as widely known [3]" is authority-citation and is not
+  bears on your project's finding. "Smith et al. 2020 [Smith2020]
+  reported similar stress-enrichment in *E. coli*" is evidence-
+  citation; "as widely known [Smith2020]" is authority-citation and
+  is not
   acceptable.
 - **`scope_alignment` and `assessment` from the pool inform usage.**
   An entry marked `direct / supports` can be cited as direct
@@ -252,7 +259,7 @@ each:
   how the project's finding differs. Three honest framings are
   available: "the difference may reflect" (offer specific
   hypotheses for the divergence), "we cannot resolve this here"
-  (acknowledge), "our finding extends [N]'s observation" (only if
+  (acknowledge), "our finding extends [bib_key]'s observation" (only if
   the project's finding genuinely extends rather than contradicts
   — verify before claiming).
 - **Do NOT explain away the conflict** with vague hand-wave
@@ -297,8 +304,9 @@ Discussion claims "in bacteria generally." Without explicit pool
 support for the generalization, this is overclaim. Scope the prose
 to what was actually examined.
 
-**Authority citation.** `[3]` attached to a generic claim ("as is
-well known [3]") rather than to a specific finding. Citations must
+**Authority citation.** `[Smith2020]` attached to a generic claim
+("as is well known [Smith2020]") rather than to a specific finding.
+Citations must
 support specific claims; otherwise they're decoration.
 
 **Conflict erasure.** The pool has `assessment: contradicts`
@@ -333,10 +341,10 @@ without re-stating numbers; new numbers belong in Results.
 
 ## Self-review pass (before calling Write)
 
-1. **Every `[N]` resolves** in `REFERENCES_MD_PATH` (M10). No
+1. **Every `[bib_key]` resolves** in `REFERENCES_MD_PATH` (M10). No
    orphan citations.
 2. **Every citation supports a specific claim**, not a generic
-   appeal to authority. Walk every `[N]` and name the claim it
+   appeal to authority. Walk every `[bib_key]` and name the claim it
    supports.
 3. **Scope discipline.** No paragraph extrapolates beyond the
    throughline's stated scope without explicit pool support.
@@ -363,9 +371,10 @@ without re-stating numbers; new numbers belong in Results.
 Validator-blocking errors (M9 / M10):
 
 ```
-✗  Cite [12] when references.md has no entry [12].
-   (M10 fail: orphan citation)
-✓  Every [N] resolves; pool exhaustion → mark [NEEDS CITATION] inline.
+✗  Cite [Garcia2019] when references.md has no [Garcia2019] entry.
+   (M10 fail / orphan citation: finalize_warnings.md will flag this.)
+✓  Every [bib_key] resolves to an entry in references.md; pool
+   exhaustion → mark [NEEDS CITATION] inline.
 
 ✗  ### Limitations
    _(empty or one-sentence header content)_
@@ -383,12 +392,12 @@ Silent traps (validator passes, but the Discussion drifts):
    stress response; this pattern is hypothesis-generating and
    would require [specific design] to test causally."
 
-⚠  "[3] reported similar findings, supporting our conclusions."
-   (vague — what did [3] find, how does it bear on the project?)
-✓  "[3] reported stress-enrichment of unannotated genes in
+⚠  "[Price2018] reported similar findings, supporting our conclusions."
+   (vague — what did [Price2018] find, how does it bear on the project?)
+✓  "[Price2018] reported stress-enrichment of unannotated genes in
    *E. coli* (OR 1.4–1.7); our 48-organism finding (OR 1.34
    [1.21–1.48]) converges, though our cohort excludes the
-   *Pseudomonas* / *Bacteroides* sublines [3] flagged as
+   *Pseudomonas* / *Bacteroides* sublines [Price2018] flagged as
    driving the upper range."
 
 ⚠  "We acknowledge limitations including sample size."
@@ -485,7 +494,7 @@ The drafting-mode inputs are necessary so you can read the existing
 understand what NOT to change (claims grounded in the pool,
 throughline-scoped subsection structure, conflicts already engaged),
 and fix only the named span. M10 specifically requires the pool to
-verify whether the orphaned `[N]` is a typo (cite is in the pool but
+verify whether the orphaned `[bib_key]` is a typo (cite is in the pool but
 the in-prose number is wrong) or a hallucinated cite (cite is not
 in the pool — drop or replace with `[NEEDS CITATION]`).
 
@@ -498,7 +507,7 @@ Repair semantics (bounded):
    means expand the existing Limitations subsection with project-
    specific content; M10 (orphan citation) means either the cited
    reference is missing from `references.md` (verify with the pool
-   agent) or the in-prose `[N]` is wrong.
+   agent) or the in-prose `[bib_key]` is wrong.
 3. Re-write `REPAIR_TARGET_PATH`.
 4. Up to 2 repair attempts per invocation. After the second
    failure on the same validator, halt with `"Halted after 2 repair
@@ -527,7 +536,7 @@ derivable from the file.
 These four override everything else if a corner case forces a
 choice:
 
-1. **No citation outside the pool.** Every `[N]` resolves to
+1. **No citation outside the pool.** Every `[bib_key]` resolves to
    `references.md`. If a needed citation is not in the pool, mark
    `[NEEDS CITATION]` and surface in the summary; never improvise
    from memory or WebSearch.

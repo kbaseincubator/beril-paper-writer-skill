@@ -114,8 +114,12 @@ are the right verbs.
 - `RESEARCH_PLAN_PATH` — `<PROJECT_ROOT>/RESEARCH_PLAN.md`. Source
   for the project's stated motivation and hypothesis structure.
 - `POOL_JSON_PATH` — `<DRAFT_DIR>/pool.json`. The citation pool.
-- `REFERENCES_MD_PATH` — `<DRAFT_DIR>/references.md`. Cite by `[N]`
-  numbers that resolve here.
+- `REFERENCES_MD_PATH` — `<DRAFT_DIR>/references.md`. Cite by
+  `[bib_key]` form (e.g., `[Price2018]`); each entry in references.md
+  begins with its `[bib_key]` in the heading. The orchestrator's
+  `citation_pool.py finalize` step renumbers these to `[N]` at
+  manuscript-assembly time, based on first-citation order in IMRAD
+  sequence — your job is to cite by stable bib_key, not numeric.
 - `REFRAMING_LOG_PATH` — append-only log; entries when Introduction
   cannot honestly motivate the paper without overclaiming.
 - `MODE` — `paper` or `report` (per SPEC §3.2).
@@ -193,7 +197,7 @@ Three load-bearing protocols.
 Walk every claim in your draft Introduction. For each:
 
 - **Background claim** (about the field) → must be from the pool
-  (cited [N]). Generic "many studies have shown" without `[N]` is
+  (cited [bib_key]). Generic "many studies have shown" without `[bib_key]` is
   authority-citation and forbidden — see anti-patterns.
 - **Gap claim** (what's not done) → must be supportable from the
   pool. If you assert a gap, be ready to cite the absence (or
@@ -215,7 +219,7 @@ Walk every claim in your draft Introduction. For each:
 
 ### 2. Citation discipline (M10)
 
-Same as Discussion: every `[N]` resolves to `REFERENCES_MD_PATH`.
+Same as Discussion: every `[bib_key]` resolves to `REFERENCES_MD_PATH`.
 Cite for evidence, not authority. Cap at 3 citations per claim
 unless an explicit multi-citation review is needed. Pool entries
 marked `is_review_article: true` are useful for the Background
@@ -268,7 +272,7 @@ finalized.
 
 **Authority citations.** "Many studies have shown that X [3, 7,
 12]" without naming what each study showed is authority-citation
-and is M10-passable but evidence-laundering. Each `[N]` supports a
+and is M10-passable but evidence-laundering. Each `[bib_key]` supports a
 specific claim or is dropped.
 
 **Gap by inflation.** Claiming a gap larger than the pool supports
@@ -313,9 +317,9 @@ field gap the *specific* project addresses.
    Discussion's Summary's strongest conclusion. If Discussion says
    "hypothesis-generating," Introduction says "this exploration
    suggests" — not "this work demonstrates."
-4. **Every `[N]` resolves** in `REFERENCES_MD_PATH` (M10).
+4. **Every `[bib_key]` resolves** in `REFERENCES_MD_PATH` (M10).
 5. **Every citation supports a specific claim**, not a generic
-   appeal to authority. Walk every `[N]` and name what it supports.
+   appeal to authority. Walk every `[bib_key]` and name what it supports.
 6. **Methods preview is one sentence**; Results preview is one
    sentence. No re-statement of either.
 7. **Mode-conformant section title.** `paper` → "Introduction" or
@@ -332,24 +336,26 @@ side:
 Validator-blocking errors (M10):
 
 ```
-✗  Cite [12] when references.md has no entry [12].
-   (M10 fail: orphan citation)
-✓  Every [N] resolves; pool exhaustion → mark [NEEDS CITATION] inline.
+✗  Cite [Garcia2019] when references.md has no [Garcia2019] entry.
+   (M10 fail / orphan citation: finalize_warnings.md will flag this.)
+✓  Every [bib_key] resolves to an entry in references.md; pool
+   exhaustion → mark [NEEDS CITATION] inline.
 ```
 
 Silent traps (validator passes, but the Introduction overclaims):
 
 ```
-⚠  "Recent advances [3, 7, 12] have characterized dark genes
-   across bacteria, but mechanism remains poorly understood."
-   (Generic; what specifically did [3] / [7] / [12] characterize?
-   What does "mechanism remains poorly understood" mean?)
-✓  "Wetmore et al. [3] characterized fitness phenotypes for 11,779
-   unannotated genes across 32 organisms; subsequent work [7, 12]
-   extended this to additional taxa but did not link the resulting
-   phenotype data to environmental distribution. The cross-
-   organism integration of fitness, conservation, and biogeography
-   remains open."
+⚠  "Recent advances [Wetmore2015, Price2020, Garcia2019] have
+   characterized dark genes across bacteria, but mechanism remains
+   poorly understood."
+   (Generic; what specifically did each citation characterize? What
+   does "mechanism remains poorly understood" mean?)
+✓  "Wetmore et al. [Wetmore2015] characterized fitness phenotypes for
+   11,779 unannotated genes across 32 organisms; subsequent work
+   [Price2020, Garcia2019] extended this to additional taxa but did
+   not link the resulting phenotype data to environmental distribution.
+   The cross-organism integration of fitness, conservation, and
+   biogeography remains open."
 
 ⚠  Question: "Can we elucidate the molecular mechanism by which
    dark genes drive stress response?"
@@ -374,10 +380,10 @@ Silent traps (validator passes, but the Introduction overclaims):
 ⚠  "Microbial communities are critical for ecosystem function..."
    (Generic; applies to any microbial paper.)
 ✓  "Genome-wide fitness data from RB-TnSeq has accumulated for 48+
-   bacterial species [3, 7]; ~25% of genes in these organisms lack
-   functional annotation [9], and existing prediction tools have
-   not integrated cross-organism fitness with conservation
-   patterns at scale."
+   bacterial species [Wetmore2015, Price2020]; ~25% of genes in
+   these organisms lack functional annotation [Galperin2010], and
+   existing prediction tools have not integrated cross-organism
+   fitness with conservation patterns at scale."
 ```
 
 The silent traps are why "drafting Introduction last" is
@@ -437,14 +443,14 @@ full drafting-mode set plus `NAMED_VALIDATOR`, `VALIDATOR_OUTPUT_PATH`,
 
 Repair semantics (bounded):
 
-1. Read the validator failure detail; identify the specific `[N]`
+1. Read the validator failure detail; identify the specific `[bib_key]`
    that's orphaned.
 2. Either (a) the cite is correct and the reference is missing
    from `references.md` (verify with the pool — if the pool entry
    exists and just isn't in `references.md`, the orchestrator must
    re-run `citation_pool.py format`; that's not your repair), or
    (b) the cite is wrong (typo in the bracketed number, or
-   reference to a paper not in the pool) — fix the in-prose `[N]`
+   reference to a paper not in the pool) — fix the in-prose `[bib_key]`
    or replace with `[NEEDS CITATION]` if the cite was hallucinated.
 3. Re-write `REPAIR_TARGET_PATH`.
 4. Up to 2 repair attempts per invocation. After the second

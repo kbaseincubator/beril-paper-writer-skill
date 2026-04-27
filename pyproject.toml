@@ -1,13 +1,9 @@
 ####################################################################
 # beril-paper-writer-skill — pyproject.toml
 #
-# Status: v0.1.0-spec (specification-only release; implementation
-# pending). Mirrors beril-adversarial-skill packaging.
-#
-# When implementation lands, version bumps to 0.1.0 and the CLI
-# stubs in cli.py become real subcommands. The package shape is
-# stable from this commit forward; future PRs add code, not
-# refactor structure.
+# Status: v0.1.0 — first usable release. See RELEASE_NOTES.md for
+# capabilities, deferrals, and known limitations. Mirrors
+# beril-adversarial-skill packaging.
 ####################################################################
 
 [build-system]
