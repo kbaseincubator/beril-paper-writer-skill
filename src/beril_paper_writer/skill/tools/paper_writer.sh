@@ -76,6 +76,8 @@ Subcommand-agnostic options (env vars or flags):
     --mode <m>         paper | report (env: PAPER_WRITER_MODE; default: tier-driven)
     --no-stream        Disable stream_progress.py (no Write verification)
     --no-adversarial   Skip adversarial reviewer; use fallback prompt
+    --max-cost-usd <N> Halt with handoff if cumulative LLM spend exceeds N USD
+                       (checked before each LLM call; default: no cap)
     --help
 
 State file: <draft_dir>/state.json
@@ -121,6 +123,10 @@ SKILL_DIR=""
 TOOLS_DIR=""
 PROMPTS_DIR=""
 REFERENCES_DIR=""
+
+# Cost circuit-breaker (Item 5.2). Empty = no cap. Set by --max-cost-usd flag.
+# Checked inside invoke_claude_with_retry before each LLM call.
+MAX_COST_USD=""
 PYTHON_BIN=""
 
 # Discover the Python interpreter that has the package's runtime deps
@@ -323,6 +329,10 @@ invoke_claude() {
 # invoke_claude_with_retry: bounded retry on parser exit-code 2 (Write
 # never invoked — stochastic failure mode worth retrying). Other non-zero
 # codes are non-retryable. Three attempts.
+#
+# Item 5.2: enforces --max-cost-usd circuit breaker before each call.
+# Halts via halt_with if cumulative cost across audit/*.metadata.json
+# already exceeds the cap; the next call would only push further over.
 invoke_claude_with_retry() {
     local sys_prompt_file="$1"
     local base_prompt="$2"
@@ -330,6 +340,30 @@ invoke_claude_with_retry() {
     local expected_path="$4"
     local label="$5"
     local metadata_path="$6"
+
+    # Cost circuit-breaker (Item 5.2). Active only when --max-cost-usd
+    # was set. Derive draft_dir from the metadata_path's parent's parent
+    # (metadata lives at <draft>/audit/<label>.metadata.json).
+    if [[ -n "$MAX_COST_USD" ]]; then
+        local draft_dir
+        draft_dir="$(cd "$(dirname "$metadata_path")/.." 2>/dev/null && pwd)"
+        if [[ -n "$draft_dir" && -d "$draft_dir" ]]; then
+            local cumulative
+            cumulative=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+                cumulative-cost "$draft_dir" 2>/dev/null || echo "0.0000")
+            local over
+            over=$(awk -v c="$cumulative" -v m="$MAX_COST_USD" \
+                'BEGIN{print (c+0 > m+0) ? "1" : "0"}')
+            if [[ "$over" == "1" ]]; then
+                log_error "Cost circuit-breaker tripped before $label"
+                log_error "  cumulative spend: \$${cumulative}  >  --max-cost-usd cap: \$${MAX_COST_USD}"
+                log_error "  Next call would push further over. Halting via handoff."
+                halt_with "$draft_dir" \
+                    "Cost circuit-breaker tripped: cumulative \$${cumulative} > cap \$${MAX_COST_USD}" \
+                    "Re-run with a higher --max-cost-usd to continue, or accept the partial draft as-is and address next_actions.md before submission."
+            fi
+        fi
+    fi
 
     local MAX=3
     local attempt=1
@@ -1045,7 +1079,7 @@ phase_data_avail() {
     local draft_dir="$2"
     local project_id="$3"
 
-    log_phase "Phase: data_availability (orchestrator-side template fill)"
+    log_phase "Phase: data_availability (orchestrator-side template fill + extraction)"
 
     local target="$draft_dir/07_data_availability.md"
     if [[ -f "$target" ]]; then
@@ -1056,22 +1090,72 @@ phase_data_avail() {
     local pw_version
     pw_version="$("$PYTHON_BIN" -c 'from beril_paper_writer import __version__; print(__version__)' 2>/dev/null || echo '0.1.0')"
 
-    # MVP: defer all the BERDL-specific extraction logic; emit stubs with
-    # [TBD] markers per LAYOUT line 424. v0.2 implements proper extraction.
+    # v0.2: extract K-BERDL databases + public accessions from project
+    # artifacts; falls back to [TBD] markers if extraction surfaces nothing
+    # (defensive — never blocks the pipeline).
+    local extraction_json="$draft_dir/audit/data_availability_extraction.json"
+    "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" extract-data-availability \
+        "$draft_dir" --project-root "$project_root" \
+        > "$extraction_json" 2> "$draft_dir/audit/data_availability_extraction.log" \
+        || log_warn "extract-data-availability exited non-zero; falling back to [TBD] markers"
+
+    # Pull the three blocks out of the JSON for fill-template. Use
+    # --<key>-json file-passing to avoid bash word-splitting hazards
+    # on multi-line block content.
+    local kberdl_block_path="$draft_dir/audit/.data_avail_kberdl.txt"
+    local public_block_path="$draft_dir/audit/.data_avail_public.txt"
+    local restricted_block_path="$draft_dir/audit/.data_avail_restricted.txt"
+
+    "$PYTHON_BIN" - <<PYEOF "$extraction_json" "$kberdl_block_path" "$public_block_path" "$restricted_block_path"
+import json, sys
+src, kp, pp, rp = sys.argv[1:]
+try:
+    with open(src) as f:
+        d = json.load(f)
+    kberdl = d.get("kberdl_databases_block", "")
+    public = d.get("public_accessions_block", "")
+    restricted = d.get("restricted_access_block", "")
+    diag = d.get("diagnostics", {})
+    print(
+        f"[data-availability] {diag.get('n_kberdl_databases', 0)} K-BERDL database(s); "
+        f"{diag.get('n_named_sources', 0)} named source(s); "
+        f"{diag.get('n_typed_accessions', 0)} typed accession(s)",
+        file=sys.stderr,
+    )
+except Exception as e:
+    print(f"[data-availability] extraction JSON parse failed: {e}; using TBD fallback", file=sys.stderr)
+    kberdl = "[K-BERDL DATABASES: TBD — extraction failed; review methods_provenance.md and fill manually before submission.]"
+    public = "[PUBLIC ACCESSIONS: TBD — extraction failed; review RESEARCH_PLAN.md and fill manually before submission.]"
+    restricted = "[RESTRICTED ACCESS: TBD — extraction failed; default assumption is 'all publicly available' but confirm before submission.]"
+with open(kp, "w", encoding="utf-8") as f:
+    f.write(kberdl)
+with open(pp, "w", encoding="utf-8") as f:
+    f.write(public)
+with open(rp, "w", encoding="utf-8") as f:
+    f.write(restricted)
+PYEOF
+
+    local kberdl_block public_block restricted_block
+    kberdl_block="$(cat "$kberdl_block_path")"
+    public_block="$(cat "$public_block_path")"
+    restricted_block="$(cat "$restricted_block_path")"
+
     "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" fill-template \
         "$REFERENCES_DIR/data_availability_template.md" \
         "$target" \
         --var code_repo_url="[CODE REPO: TBD — fill before submission]" \
         --var code_repo_ref="HEAD" \
         --var paper_writer_version="$pw_version" \
-        --var kberdl_databases_block="[K-BERDL DATABASES: TBD — orchestrator extraction not yet implemented in v0.1; review methods_provenance.md §'Spark / K-BERDL Queries' and fill manually before submission.]" \
-        --var public_accessions_block="[PUBLIC ACCESSIONS: TBD — orchestrator extraction not yet implemented in v0.1; review RESEARCH_PLAN.md §'Data sources' and fill manually before submission.]" \
-        --var restricted_access_block="[RESTRICTED ACCESS: TBD — orchestrator extraction not yet implemented in v0.1; default assumption is 'all publicly available' but confirm before submission.]" \
+        --var kberdl_databases_block="$kberdl_block" \
+        --var public_accessions_block="$public_block" \
+        --var restricted_access_block="$restricted_block" \
         --var requirements_file_path="requirements.txt" \
         > /dev/null
 
-    log_warn "07_data_availability.md emitted with [TBD] markers (v0.1 limitation; v0.2 fills BERDL-specific blocks)"
-    log_ok "data_avail phase complete"
+    # Cleanup tempfiles on success.
+    rm -f "$kberdl_block_path" "$public_block_path" "$restricted_block_path"
+
+    log_ok "data_avail phase complete (BERDL-specific extraction landed v0.2)"
 }
 
 # ==============================================================================
@@ -1183,6 +1267,69 @@ phase_finalize_citations() {
 }
 
 # ==============================================================================
+# Phase: check_scope_coherence — Discussion↔Results scope cross-walk (advisory)
+# ==============================================================================
+#
+# Sits between finalize_citations and assemble. Mirrors the
+# check_throughline_glyphs.py architectural pattern (post-processor that
+# emits stderr WARN, always exits 0; orchestrator surfaces in
+# next_actions.md). Reads 00_throughline.md, 02_results.md, and
+# 03_discussion.md from $draft_dir; writes warnings to
+# audit/scope_warnings.txt.
+
+phase_check_scope_coherence() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_scope_coherence (advisory cross-walk)"
+
+    local scope_warnings_file="$draft_dir/audit/scope_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_scope_coherence.py" "$draft_dir" \
+        2> "$scope_warnings_file" || true
+
+    if grep -q "^\[check_scope_coherence\] WARN" "$scope_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "^\[check_scope_coherence\] WARN" "$scope_warnings_file")
+        log_warn "Scope-coherence cross-walk: $n_warn warning(s) (will surface in next_actions.md):"
+        grep "^\[check_scope_coherence\] WARN" "$scope_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $scope_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_scope_coherence phase complete"
+}
+
+# ==============================================================================
+# Phase: check_overclaim — Abstract/Discussion strong-claim cross-walk (advisory)
+# ==============================================================================
+#
+# Same hook point as check_scope_coherence (between finalize_citations and
+# assemble). Mirrors the architectural pattern: post-processor that emits
+# stderr WARN, always exits 0; orchestrator surfaces in next_actions.md.
+
+phase_check_overclaim() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_overclaim (advisory cross-walk)"
+
+    local overclaim_warnings_file="$draft_dir/audit/overclaim_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_overclaim.py" "$draft_dir" \
+        2> "$overclaim_warnings_file" || true
+
+    if grep -q "^\[check_overclaim\] WARN" "$overclaim_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "^\[check_overclaim\] WARN" "$overclaim_warnings_file")
+        log_warn "Overclaim cross-walk: $n_warn warning(s) (will surface in next_actions.md):"
+        grep "^\[check_overclaim\] WARN" "$overclaim_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $overclaim_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_overclaim phase complete"
+}
+
+# ==============================================================================
 # Phase: assemble — concat to manuscript.md, run validate_manuscript
 # ==============================================================================
 
@@ -1265,6 +1412,257 @@ EOF
 }
 
 # ==============================================================================
+# Phase: repair_validators — auto-fix M2-M10 failures via REPAIR_MODE dispatch
+# ==============================================================================
+#
+# Runs after phase_assemble (which writes audit/validation.json). For each
+# fail validator, dispatches the section prompt in REPAIR_MODE per the
+# LAYOUT.md:419 dispatch table. Bounded retry: 2 dispatches per validator.
+# After each dispatch, re-runs validate_manuscript.py and checks whether
+# the named validator now passes. If exhausted, surfaces escalation in
+# audit/repair_summary.txt (which emit-next-actions surfaces in
+# next_actions.md).
+#
+# Special-case validators per LAYOUT:
+#   - M1 (missing IMRAD section): escalate as user-modify; orchestrator's
+#     missing-section redraft path is not implemented in v0.1.
+#   - M4 (data availability): escalate as user-modify; template missing.
+#
+# Side effects per validator:
+#   - audit/repair_<VID>_input.json  (single-validator filtered failure)
+#   - audit/repair_<VID>_pre.md      (pre-repair snapshot for post-checker)
+#   - audit/repair_<VID>_attempt<N>.metadata.json  (claude-side cost sidecar)
+#   - audit/repair_<VID>_post_validation.json  (after re-validation)
+#   - audit/repair_summary.txt  (per-validator outcome lines)
+
+phase_repair_validators() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+    local project_id="$4"
+
+    log_phase "Phase: repair_validators (auto-fix M-validator failures via REPAIR_MODE)"
+
+    local validation_path="$draft_dir/audit/validation.json"
+    if [[ ! -f "$validation_path" ]]; then
+        log_warn "validation.json missing; skipping repair phase"
+        return 0
+    fi
+
+    local repair_summary="$draft_dir/audit/repair_summary.txt"
+    : > "$repair_summary"
+
+    local fail_ids
+    fail_ids=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+        list-failed-validators "$validation_path")
+
+    if [[ -z "$fail_ids" ]]; then
+        log_step "No validator failures; nothing to repair"
+        echo "no validator failures at phase entry; nothing dispatched" >> "$repair_summary"
+        log_ok "repair_validators phase complete (no-op)"
+        return 0
+    fi
+
+    log_step "Failed validators to repair: $(echo $fail_ids | tr '\n' ' ')"
+    echo "Failed validators at phase entry: $(echo $fail_ids | tr '\n' ' ')" >> "$repair_summary"
+
+    local vid
+    while IFS= read -r vid; do
+        [[ -z "$vid" ]] && continue
+        repair_one_validator "$project_root" "$draft_dir" "$model" "$project_id" "$vid" \
+            >> "$repair_summary" 2>&1 || true
+    done <<< "$fail_ids"
+
+    log_ok "repair_validators phase complete (see $repair_summary)"
+}
+
+# Resolve the canonical-source input block (per-section drafting-mode inputs)
+# as a heredoc-friendly string. Centralized to avoid per-validator drift.
+_emit_repair_inputs_block() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local target_var_name="$3"
+    local target_path="$4"
+    local validator_output_path="$5"
+    local vid="$6"
+    local mode tier
+    mode="$(read_state_field "$draft_dir" "mode")"; [[ -z "$mode" ]] && mode="paper"
+    tier="$(read_state_field "$draft_dir" "tier")"; [[ -z "$tier" ]] && tier="STRONG"
+
+    cat <<EOF
+## Inputs (canonical sources — pass-through; read what your section prompt needs)
+
+- \`PROJECT_ROOT\` = \`$project_root\`
+- \`DRAFT_DIR\` = \`$draft_dir\`
+- \`THROUGHLINE_PATH\` = \`$draft_dir/00_throughline.md\`
+- \`REPORT_PATH\` = \`$project_root/REPORT.md\`
+- \`RESEARCH_PLAN_PATH\` = \`$project_root/RESEARCH_PLAN.md\`
+- \`METHODS_PATH\` = \`$draft_dir/01_methods.md\`
+- \`RESULTS_PATH\` = \`$draft_dir/02_results.md\`
+- \`DISCUSSION_PATH\` = \`$draft_dir/03_discussion.md\`
+- \`INTRODUCTION_PATH\` = \`$draft_dir/04_introduction.md\`
+- \`ABSTRACT_PATH\` = \`$draft_dir/05_abstract.md\`
+- \`POOL_JSON_PATH\` = \`$draft_dir/pool.json\`
+- \`REFERENCES_MD_PATH\` = \`$draft_dir/references.md\`
+- \`REFRAMING_LOG_PATH\` = \`$draft_dir/reframing_log.md\`
+- \`METHODS_PROVENANCE_PATH\` = \`$draft_dir/methods_provenance.md\`
+- \`FIGURES_INVENTORY_PATH\` = \`$draft_dir/figures_inventory.md\`
+- \`MODE\` = \`$mode\`
+- \`TIER\` = \`$tier\`
+
+## REPAIR_MODE inputs (the four required for repair semantics)
+
+- \`REPAIR_MODE\` = \`true\`
+- \`NAMED_VALIDATOR\` = \`$vid\`
+- \`VALIDATOR_OUTPUT_PATH\` = \`$validator_output_path\` (filtered to the single \`$vid\` failure; read this for the violation detail)
+- \`REPAIR_TARGET_PATH\` = \`$target_path\` (the file you must rewrite via the Write tool)
+
+Read VALIDATOR_OUTPUT_PATH for the structured failure detail; identify the named span in REPAIR_TARGET_PATH; fix only that span; do not regenerate the section; do not introduce new claims; do not delete grounded claims that other validators did not flag. Re-write REPAIR_TARGET_PATH via the Write tool, then emit your prompt's REPAIR_MODE closing message.
+EOF
+}
+
+# Repair one named validator. Bounded retry: 2 dispatches per validator.
+# All outcome lines go to stdout (caller redirects to repair_summary.txt).
+repair_one_validator() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+    local project_id="$4"
+    local vid="$5"
+
+    log_step "Repairing $vid"
+
+    # Resolve dispatch via Python helper (eval-safe key=value lines).
+    local dispatch_stdout
+    dispatch_stdout=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+        prepare-repair "$draft_dir" --validator "$vid")
+
+    local SECTION_PROMPT="" TARGET_FILENAME="" TARGET_VAR_NAME=""
+    local TARGET_PATH="" VALIDATOR_OUTPUT_PATH=""
+    local DISPATCH_STATUS="" ESCALATION_NOTE="" VIOLATIONS_COUNT=0
+
+    # Parse `KEY=value` lines without invoking eval (which would expand any
+    # backticks / $-vars in the values — a real risk for ESCALATION_NOTE).
+    local line
+    while IFS= read -r line; do
+        local key="${line%%=*}"
+        local val="${line#*=}"
+        case "$key" in
+            SECTION_PROMPT)         SECTION_PROMPT="$val" ;;
+            TARGET_FILENAME)        TARGET_FILENAME="$val" ;;
+            TARGET_VAR_NAME)        TARGET_VAR_NAME="$val" ;;
+            TARGET_PATH)            TARGET_PATH="$val" ;;
+            VALIDATOR_OUTPUT_PATH)  VALIDATOR_OUTPUT_PATH="$val" ;;
+            VIOLATIONS_COUNT)       VIOLATIONS_COUNT="$val" ;;
+            DISPATCH_STATUS)        DISPATCH_STATUS="$val" ;;
+            ESCALATION_NOTE)        ESCALATION_NOTE="$val" ;;
+        esac
+    done <<< "$dispatch_stdout"
+
+    case "$DISPATCH_STATUS" in
+        skip)
+            log_step "$vid: skipping ($ESCALATION_NOTE)"
+            echo "$vid: skip — $ESCALATION_NOTE"
+            return 0
+            ;;
+        escalate)
+            log_warn "$vid: escalating per LAYOUT — $ESCALATION_NOTE"
+            echo "$vid: escalate — $ESCALATION_NOTE"
+            return 0
+            ;;
+        ready)
+            ;;
+        *)
+            log_warn "$vid: unknown DISPATCH_STATUS '$DISPATCH_STATUS'; skipping"
+            echo "$vid: unknown dispatch status: $DISPATCH_STATUS"
+            return 0
+            ;;
+    esac
+
+    log_step "$vid: dispatching to $SECTION_PROMPT (target=$TARGET_FILENAME, $VIOLATIONS_COUNT violation(s))"
+
+    # Snapshot pre-repair file for the Item 3.4 post-checker.
+    local pre_snapshot="$draft_dir/audit/repair_${vid}_pre.md"
+    cp "$TARGET_PATH" "$pre_snapshot"
+
+    # Build the user prompt once (same input set across attempts).
+    local user_prompt
+    user_prompt="REPAIR_MODE invocation: address the $vid validator failure in $TARGET_FILENAME.
+
+$(_emit_repair_inputs_block "$project_root" "$draft_dir" "$TARGET_VAR_NAME" "$TARGET_PATH" "$VALIDATOR_OUTPUT_PATH" "$vid")"
+
+    # Bounded retry: 2 orchestrator-level dispatches per validator. Each
+    # dispatch passes through invoke_claude_with_retry's stochastic-failure
+    # retries (3 attempts on Write-not-invoked) and the prompt's internal
+    # 2-attempt repair semantics.
+    local mode
+    mode="$(read_state_field "$draft_dir" "mode")"; [[ -z "$mode" ]] && mode="paper"
+
+    local attempt
+    for attempt in 1 2; do
+        log_step "$vid: dispatch $attempt/2"
+
+        local metadata_path="$draft_dir/audit/repair_${vid}_attempt${attempt}.metadata.json"
+
+        invoke_claude_with_retry \
+            "$PROMPTS_DIR/$SECTION_PROMPT" "$user_prompt" "$model" \
+            "$TARGET_PATH" "repair_$vid" "$metadata_path"
+        local rc=$?
+
+        if [[ $rc -ne 0 ]]; then
+            log_warn "$vid: dispatch $attempt/2 invocation failed (rc=$rc); aborting repair for this validator"
+            echo "$vid: invocation-fail on attempt $attempt (rc=$rc); user-modify recommended"
+            return 0
+        fi
+
+        # Re-run the full validator to confirm the fix landed.
+        local post_validation="$draft_dir/audit/repair_${vid}_post_validation.json"
+        "$PYTHON_BIN" "$TOOLS_DIR/validate_manuscript.py" "$draft_dir" \
+            --mode "$mode" --output "$post_validation" \
+            > "$draft_dir/audit/repair_${vid}_post_validate_attempt${attempt}.log" 2>&1 || true
+
+        # Check whether the named validator now passes.
+        local status_stdout
+        status_stdout=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+            check-repair-status "$post_validation" --validator "$vid")
+        local v_status=""
+        local sline
+        while IFS= read -r sline; do
+            [[ "$sline" == STATUS=* ]] && v_status="${sline#STATUS=}"
+        done <<< "$status_stdout"
+
+        if [[ "$v_status" == "pass" ]]; then
+            log_ok "$vid: dispatch $attempt/2 fixed the failure ✓"
+            echo "$vid: repaired on attempt $attempt; dispatched to $SECTION_PROMPT"
+
+            # Run check_repair_scope post-checker (Item 3.4) if available.
+            if [[ -f "$TOOLS_DIR/check_repair_scope.py" ]]; then
+                local scope_log="$draft_dir/audit/repair_${vid}_scope_warnings.txt"
+                "$PYTHON_BIN" "$TOOLS_DIR/check_repair_scope.py" \
+                    --pre "$pre_snapshot" --post "$TARGET_PATH" \
+                    --validator "$vid" --draft-dir "$draft_dir" \
+                    2> "$scope_log" || true
+                if grep -q "^\[check_repair_scope\] WARN" "$scope_log" 2>/dev/null; then
+                    local n_scope
+                    n_scope=$(grep -c "^\[check_repair_scope\] WARN" "$scope_log")
+                    log_warn "$vid: post-repair scope checker emitted $n_scope warning(s)"
+                    echo "$vid: scope-check warnings ($n_scope) — see $scope_log"
+                fi
+            fi
+
+            return 0
+        else
+            log_warn "$vid: dispatch $attempt/2 did NOT fix the failure (status=$v_status); will retry if attempts remain"
+            echo "$vid: post-attempt $attempt status=$v_status; retrying" >&2
+        fi
+    done
+
+    log_warn "$vid: 2 dispatches exhausted; surfacing escalation"
+    echo "$vid: 2 dispatches exhausted; user-modify recommended"
+    return 0
+}
+
+# ==============================================================================
 # Phase: review — single-pass adversarial OR fallback
 # ==============================================================================
 
@@ -1274,43 +1672,63 @@ phase_review() {
     local model="$3"
     local project_id="$4"
 
-    log_phase "Phase: review (single-pass; no rewrite loop in MVP)"
+    log_phase "Phase: review (initial pass; rewrite loop runs after if criticals)"
 
-    if [[ -d "$draft_dir/reviews" ]] && ls "$draft_dir/reviews/"draft_*_review_*.md >/dev/null 2>&1; then
-        log_step "Existing review found; skipping new review pass"
+    # Idempotency: skip if review_1 already exists.
+    if [[ -f "$draft_dir/reviews/draft_1_review_1.md" ]]; then
+        log_step "draft_1_review_1.md exists; skipping initial review pass"
+        return 0
+    fi
+
+    run_reviewer_pass "$project_root" "$draft_dir" "$model" "$project_id" 1 || return 1
+
+    log_ok "review phase complete"
+}
+
+# run_reviewer_pass <project_root> <draft_dir> <model> <project_id> <review_number>
+# Writes to $draft_dir/reviews/draft_1_review_${review_number}.md.
+# Reused by phase_review (number=1) and phase_review_rewrite (number=2,3).
+run_reviewer_pass() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+    local project_id="$4"
+    local review_number="$5"
+
+    local review_out="$draft_dir/reviews/draft_1_review_${review_number}.md"
+    if [[ -f "$review_out" ]]; then
+        log_step "Review pass $review_number already exists; skipping"
         return 0
     fi
 
     if [[ "${NO_ADVERSARIAL:-0}" == "1" ]]; then
-        log_step "--no-adversarial set; using fallback inline reviewer"
-        run_fallback_reviewer "$project_root" "$draft_dir" "$model" || return 1
+        log_step "--no-adversarial set; using fallback inline reviewer (pass $review_number)"
+        run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
         return 0
     fi
 
     if command -v beril-adversarial-cli &>/dev/null; then
-        log_step "Invoking beril-adversarial-cli --type paper"
-        local review_out="$draft_dir/reviews/draft_1_review_1.md"
+        log_step "Invoking beril-adversarial-cli --type paper (pass $review_number)"
         beril-adversarial-cli --type paper "$project_id" \
             > "$review_out" 2>&1 || \
-            log_warn "beril-adversarial-cli exited non-zero; review may be partial"
+            log_warn "beril-adversarial-cli exited non-zero on pass $review_number; review may be partial"
         if [[ ! -s "$review_out" ]]; then
             log_warn "Adversarial review file empty; falling back to inline reviewer"
-            run_fallback_reviewer "$project_root" "$draft_dir" "$model" || return 1
+            run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
         fi
     else
-        log_warn "beril-adversarial-cli not on PATH; using fallback inline reviewer"
-        run_fallback_reviewer "$project_root" "$draft_dir" "$model" || return 1
+        log_warn "beril-adversarial-cli not on PATH; using fallback inline reviewer (pass $review_number)"
+        run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
     fi
-
-    log_ok "review phase complete"
 }
 
 run_fallback_reviewer() {
     local project_root="$1"
     local draft_dir="$2"
     local model="$3"
+    local review_out="${4:-$draft_dir/reviews/draft_1_review_1.md}"
+    local review_number="${5:-1}"
 
-    local review_out="$draft_dir/reviews/draft_1_review_1.md"
     local user_prompt="Run the fallback adversarial reviewer against the assembled manuscript.
 
 ## Inputs
@@ -1326,7 +1744,260 @@ Read MANUSCRIPT_PATH; review per your system prompt's rubric; write REVIEW_OUT_P
 
     invoke_claude_with_retry \
         "$PROMPTS_DIR/fallback_reviewer.v1.md" "$user_prompt" "$model" \
-        "$review_out" "fallback_reviewer.v1" "$draft_dir/audit/review.metadata.json"
+        "$review_out" "fallback_reviewer.v1" \
+        "$draft_dir/audit/review_pass${review_number}.metadata.json"
+}
+
+# ==============================================================================
+# Phase: review_rewrite — bounded retry loop applying review findings via rewrite.v1
+# ==============================================================================
+#
+# After phase_review produces draft_1_review_1.md, this phase:
+#   1. Counts Critical findings; if zero, no-op return.
+#   2. Pass 1: parse review with min_severity=important (Critical+Important);
+#      dispatch rewrite.v1 per affected section; re-assemble (re-validates);
+#      run reviewer pass 2 (writes draft_1_review_2.md).
+#   3. Pass 2 (only if Critical persists in pass-2 review): parse with
+#      min_severity=critical; dispatch rewrite.v1 with REWRITE_PASS_NUMBER=2
+#      and the prompt's pass-2 discipline; re-assemble; run reviewer pass 3.
+#   4. Per SPEC §8.3 hard cap of 2 rewrite passes: any criticals remaining
+#      after pass 2 are surfaced in next_actions.md, not re-rewritten.
+#
+# Side effects:
+#   audit/rewrite_summary.txt          — per-pass dispatch + outcome lines
+#   audit/rewrite_pass<N>_<section>.metadata.json — claude-side cost sidecar
+#   reviews/draft_1_review_<2|3>.md    — post-rewrite review files
+#   manuscript.md, audit/validation.json — re-rendered after each rewrite
+
+phase_review_rewrite() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+    local project_id="$4"
+
+    log_phase "Phase: review_rewrite (bounded loop applying Critical+Important review findings)"
+
+    local review_path="$draft_dir/reviews/draft_1_review_1.md"
+    if [[ ! -f "$review_path" ]]; then
+        log_warn "No review file at $review_path; skipping rewrite loop"
+        return 0
+    fi
+
+    local rewrite_summary="$draft_dir/audit/rewrite_summary.txt"
+    : > "$rewrite_summary"
+
+    local n_crit
+    n_crit=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+        count-review-criticals "$review_path")
+    [[ -z "$n_crit" ]] && n_crit=0
+
+    if [[ "$n_crit" -eq 0 ]]; then
+        log_step "Reviewer flagged 0 Critical findings; rewrite loop skipped"
+        echo "pass 0: 0 Critical findings in $review_path; rewrite loop skipped" >> "$rewrite_summary"
+        log_ok "review_rewrite phase complete (no-op)"
+        return 0
+    fi
+
+    log_step "Initial review has $n_crit Critical finding(s); entering rewrite loop"
+    echo "pass 0: initial review at $review_path has $n_crit Critical finding(s)" >> "$rewrite_summary"
+
+    local pass_num
+    for pass_num in 1 2; do
+        local min_sev
+        if [[ "$pass_num" -eq 1 ]]; then
+            min_sev="important"
+        else
+            min_sev="critical"
+        fi
+
+        log_step "Rewrite pass $pass_num (min_severity=$min_sev) parsing $review_path"
+
+        local parsed_json="$draft_dir/audit/rewrite_pass${pass_num}_findings.json"
+        "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+            parse-review "$review_path" --min-severity "$min_sev" \
+            > "$parsed_json"
+
+        # Walk findings_by_section; for each section, dispatch rewrite.v1.
+        local sections
+        sections=$("$PYTHON_BIN" -c "
+import json, sys
+d = json.load(open('$parsed_json'))
+for k in d.get('findings_by_section', {}).keys():
+    print(k)
+")
+        if [[ -z "$sections" ]]; then
+            log_step "Pass $pass_num: no findings at min_severity=$min_sev; loop terminates"
+            echo "pass $pass_num: no findings at min_severity=$min_sev; loop terminates" >> "$rewrite_summary"
+            break
+        fi
+
+        local sec_key
+        while IFS= read -r sec_key; do
+            [[ -z "$sec_key" ]] && continue
+            dispatch_rewrite_for_section \
+                "$project_root" "$draft_dir" "$model" "$project_id" \
+                "$pass_num" "$min_sev" "$review_path" "$parsed_json" "$sec_key" \
+                >> "$rewrite_summary" 2>&1 || true
+        done <<< "$sections"
+
+        # Re-assemble manuscript + re-run validators (rewrite changed sections).
+        log_step "Pass $pass_num: re-assembling manuscript after rewrites"
+        phase_assemble "$draft_dir" || \
+            log_warn "Pass $pass_num re-assemble failed; continuing"
+
+        # Run a fresh reviewer pass on the rewritten manuscript.
+        local next_review_num=$((pass_num + 1))
+        log_step "Pass $pass_num: invoking reviewer pass $next_review_num"
+        run_reviewer_pass "$project_root" "$draft_dir" "$model" "$project_id" "$next_review_num" || {
+            log_warn "Reviewer pass $next_review_num failed; surfacing escalation"
+            echo "pass $pass_num: reviewer pass $next_review_num invocation failed; loop aborted" >> "$rewrite_summary"
+            break
+        }
+
+        review_path="$draft_dir/reviews/draft_1_review_${next_review_num}.md"
+        n_crit=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+            count-review-criticals "$review_path")
+        [[ -z "$n_crit" ]] && n_crit=0
+
+        echo "pass $pass_num complete: post-rewrite review at $review_path has $n_crit Critical finding(s)" >> "$rewrite_summary"
+
+        if [[ "$n_crit" -eq 0 ]]; then
+            log_ok "Pass $pass_num: Critical findings cleared after rewrite ✓"
+            return 0
+        fi
+
+        log_warn "Pass $pass_num: $n_crit Critical finding(s) remain"
+    done
+
+    # SPEC §8.3 hard cap reached.
+    if [[ "$n_crit" -gt 0 ]]; then
+        log_warn "Hard cap of 2 rewrite passes reached; $n_crit Critical finding(s) remain — surfacing in next_actions.md"
+        echo "hard cap reached: $n_crit Critical finding(s) remain after 2 rewrite passes; user-modify recommended (per SPEC §8.3, fold into Limitations / Next Steps if persistent)" >> "$rewrite_summary"
+    fi
+
+    log_ok "review_rewrite phase complete (see $rewrite_summary)"
+}
+
+# Dispatch rewrite.v1 for one section. All outcome lines go to stdout
+# (caller redirects to rewrite_summary.txt).
+dispatch_rewrite_for_section() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+    local project_id="$4"
+    local pass_num="$5"
+    local min_sev="$6"
+    local review_path="$7"
+    local parsed_json="$8"
+    local sec_key="$9"
+
+    # Look up FINDING_IDS + section file via Python.
+    local lookup_stdout
+    lookup_stdout=$("$PYTHON_BIN" -c "
+import json
+d = json.load(open('$parsed_json'))
+sec_file = d.get('section_files', {}).get('$sec_key', '')
+fids = [f['id'] for f in d.get('findings_by_section', {}).get('$sec_key', [])]
+print('FILE=' + sec_file)
+print('IDS=' + ','.join(fids))
+")
+    local sec_file=""
+    local finding_ids=""
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            FILE=*) sec_file="${line#FILE=}" ;;
+            IDS=*)  finding_ids="${line#IDS=}" ;;
+        esac
+    done <<< "$lookup_stdout"
+
+    if [[ -z "$sec_file" || -z "$finding_ids" ]]; then
+        log_warn "[$sec_key] no section file or finding ids resolved; skipping"
+        echo "pass $pass_num [$sec_key]: skip — no section/findings resolved"
+        return 0
+    fi
+
+    local section_path="$draft_dir/$sec_file"
+    if [[ ! -f "$section_path" ]]; then
+        log_warn "[$sec_key] section file missing at $section_path; skipping"
+        echo "pass $pass_num [$sec_key]: skip — $section_path not found"
+        return 0
+    fi
+
+    # Severity for the prompt's MIN_SEVERITY input — capitalized form.
+    local min_sev_capitalized
+    if [[ "$min_sev" == "important" ]]; then
+        min_sev_capitalized="Important"
+    elif [[ "$min_sev" == "critical" ]]; then
+        min_sev_capitalized="Critical"
+    else
+        min_sev_capitalized="Suggested"
+    fi
+
+    # Build FINDING_IDS as a JSON array literal for the prompt.
+    local finding_ids_json
+    finding_ids_json=$("$PYTHON_BIN" -c "
+import json, sys
+ids = '$finding_ids'.split(',') if '$finding_ids' else []
+print(json.dumps(ids))
+")
+
+    local mode tier
+    mode="$(read_state_field "$draft_dir" "mode")"; [[ -z "$mode" ]] && mode="paper"
+    tier="$(read_state_field "$draft_dir" "tier")"; [[ -z "$tier" ]] && tier="STRONG"
+
+    log_step "Pass $pass_num [$sec_key]: dispatching rewrite.v1 for findings $finding_ids → $sec_file"
+
+    # Snapshot pre-rewrite for diagnostic.
+    local pre_snapshot="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_pre.md"
+    cp "$section_path" "$pre_snapshot"
+
+    local user_prompt="Run rewrite.v1 to apply review findings ${finding_ids_json} to ${sec_file} on rewrite pass ${pass_num} of 2 (per SPEC §8.3).
+
+## Inputs (rewrite.v1 contract)
+
+- \`PROJECT_ROOT\` = \`$project_root\`
+- \`DRAFT_DIR\` = \`$draft_dir\`
+- \`SECTION_PATH\` = \`$section_path\`
+- \`REVIEW_PATH\` = \`$review_path\`
+- \`FINDING_IDS\` = ${finding_ids_json}
+- \`MIN_SEVERITY\` = \`${min_sev_capitalized}\`
+- \`REWRITE_PASS_NUMBER\` = \`${pass_num}\`
+- \`REFRAMING_LOG_PATH\` = \`$draft_dir/reframing_log.md\`
+- \`MODE\` = \`$mode\`
+- \`TIER\` = \`$tier\`
+
+## Canonical sources (rewrite.v1 reads what it needs to verify fix viability)
+
+- \`THROUGHLINE_PATH\` = \`$draft_dir/00_throughline.md\`
+- \`REPORT_PATH\` = \`$project_root/REPORT.md\`
+- \`METHODS_PATH\` = \`$draft_dir/01_methods.md\`
+- \`RESULTS_PATH\` = \`$draft_dir/02_results.md\`
+- \`DISCUSSION_PATH\` = \`$draft_dir/03_discussion.md\`
+- \`INTRODUCTION_PATH\` = \`$draft_dir/04_introduction.md\`
+- \`ABSTRACT_PATH\` = \`$draft_dir/05_abstract.md\`
+- \`POOL_JSON_PATH\` = \`$draft_dir/pool.json\`
+- \`REFERENCES_MD_PATH\` = \`$draft_dir/references.md\`
+- \`METHODS_PROVENANCE_PATH\` = \`$draft_dir/methods_provenance.md\`
+
+Apply the listed findings per rewrite.v1's discipline (minimal scoped edits; reframing-log entry per finding; cross-finding consistency check; cascade abandonment per pass-2 strictness if applicable). Re-write SECTION_PATH via the Write tool; emit closing-message template."
+
+    local metadata_path="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}.metadata.json"
+
+    invoke_claude_with_retry \
+        "$PROMPTS_DIR/rewrite.v1.md" "$user_prompt" "$model" \
+        "$section_path" "rewrite_pass${pass_num}_${sec_key}" "$metadata_path"
+    local rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+        log_warn "Pass $pass_num [$sec_key]: rewrite.v1 invocation failed (rc=$rc); section unchanged"
+        echo "pass $pass_num [$sec_key]: invocation-fail (rc=$rc); user-modify recommended"
+        return 0
+    fi
+
+    log_ok "Pass $pass_num [$sec_key]: rewrite.v1 completed for $sec_file"
+    echo "pass $pass_num [$sec_key]: rewritten $sec_file (findings ${finding_ids_json})"
+    return 0
 }
 
 # ==============================================================================
@@ -1427,6 +2098,7 @@ main() {
             --mode)           PAPER_WRITER_MODE="$2"; export PAPER_WRITER_MODE; shift 2 ;;
             --no-stream)     NO_STREAM=1; shift ;;
             --no-adversarial) NO_ADVERSARIAL=1; shift ;;
+            --max-cost-usd)   MAX_COST_USD="$2"; shift 2 ;;
             -*) log_error "Unknown flag: $1"; usage; exit 1 ;;
             *)
                 if [[ -z "$positional" ]]; then
@@ -1545,18 +2217,25 @@ main() {
                         || halt_with "$draft_dir" "data_availability template fill failed (orchestrator-side, no LLM); inspect tools/paper_writer_helpers.py"
                     phase_finalize_citations "$draft_dir" \
                         || halt_with "$draft_dir" "finalize_citations failed; inspect audit/finalize_citations.log"
+                    phase_check_scope_coherence "$draft_dir"
+                    phase_check_overclaim "$draft_dir"
                     phase_assemble      "$draft_dir" \
                         || halt_with "$draft_dir" "assemble (concat + validate_manuscript) failed"
+                    phase_repair_validators "$project_root" "$draft_dir" "$model" "$project_id"
                     set_state_phase     "$draft_dir" "review"
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \
                         || halt_with "$draft_dir" "review phase failed (adversarial-cli or fallback reviewer)"
+                    phase_review_rewrite "$project_root" "$draft_dir" "$model" "$project_id"
                     emit_review_handoff "$draft_dir" \
                         || halt_with "$draft_dir" "review handoff emission failed"
                     ;;
                 review)
-                    # Re-run review phase only (idempotent).
+                    # Re-run review phase only (idempotent — review_1 is skipped if present).
+                    # Then run the rewrite loop in case the user wants to resume from a previously
+                    # interrupted rewrite cycle. Both phases are no-ops when their output exists.
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \
                         || halt_with "$draft_dir" "review phase failed during resume"
+                    phase_review_rewrite "$project_root" "$draft_dir" "$model" "$project_id"
                     emit_review_handoff "$draft_dir" \
                         || halt_with "$draft_dir" "review handoff emission failed during resume"
                     ;;
