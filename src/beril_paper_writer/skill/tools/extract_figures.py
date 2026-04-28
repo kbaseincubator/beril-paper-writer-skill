@@ -100,6 +100,84 @@ class SavefigOrigin:
 
 
 @dataclass
+class PanelDescriptor:
+    """One panel's structured metadata (v0.4 Phase 2 multi-panel awareness).
+
+    Letter is row-major from `plt.subplots(N,M)` AST detection (A=axes[0,0],
+    B=axes[0,1], etc.) OR from `(Fig. N[A-Z])` callouts in REPORT.md /
+    Results-section prose (Phase 3 prose-detection pass).
+    """
+
+    letter: str
+    title: Optional[str] = None
+    xlabel: Optional[str] = None
+    ylabel: Optional[str] = None
+    prose_context: Optional[str] = None  # ±1 sentence from REPORT/Results
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+@dataclass
+class CaptionDescriptor:
+    """Structured rich-caption descriptor (v0.4 Tier 8 / inventory_schema v2).
+
+    Distinct from CaptionCandidate. Each FigureRecord carries at most one
+    descriptor. Field-population schedule across the v0.4 ladder:
+
+      Phase 1b: notebook_prose (from `_collect_md_walkback`); source_refs
+                gets 'notebook_md_walkback'.
+      Phase 2:  title, axes_labels, legend_labels, panels (from matplotlib
+                AST extraction); source_refs gets 'matplotlib_ast'.
+      Phase 3:  panels merged with prose-detected `(Fig. N[A-Z])` callouts;
+                source_refs gets 'prose_panel_callout'.
+      Phase 4:  on Source 4 invocation, the LLM-synthesized legend is
+                stored separately (it consumes the descriptor as input,
+                doesn't overwrite); see audit/figure_caption.v1.metadata.json.
+
+    `notebook_prose` is the unredacted walk-back source (capped at
+    `_DESCRIPTION_TEXT_CAP`); downstream consumers (resolve-figures,
+    sufficiency gate) apply heading-strip + word-count transforms
+    caller-side.
+    """
+
+    title: Optional[str] = None
+    axes_labels: list[str] = field(default_factory=list)
+    legend_labels: list[str] = field(default_factory=list)
+    notebook_prose: Optional[str] = None
+    panels: list[PanelDescriptor] = field(default_factory=list)
+    source_refs: list[str] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        """True if no Tier 8 signal has been populated."""
+        return (
+            self.title is None
+            and not self.axes_labels
+            and not self.legend_labels
+            and self.notebook_prose is None
+            and not self.panels
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "axes_labels": list(self.axes_labels),
+            "legend_labels": list(self.legend_labels),
+            "notebook_prose": self.notebook_prose,
+            "panels": [p.to_dict() for p in self.panels],
+            "source_refs": list(self.source_refs),
+        }
+
+
+# v0.4 Phase 1b: cap for full walk-back text stored in
+# CaptionDescriptor.notebook_prose. Empirical: max walk-back across
+# functional_dark_matter is 3424 chars (p95=2782, median=121); 4000
+# gives comfortable headroom while bounding pathological cases. This is
+# a safety bound, not a typical-case truncator.
+_DESCRIPTION_TEXT_CAP = 4000
+
+
+@dataclass
 class FigureRecord:
     """All metadata for one figure file."""
 
@@ -109,6 +187,11 @@ class FigureRecord:
     format: str           # "png" | "jpeg" | etc.
     captions: list[CaptionCandidate] = field(default_factory=list)
     savefig_origins: list[SavefigOrigin] = field(default_factory=list)
+    # v0.4 Phase 1b: structured rich-caption descriptor (inventory schema v2).
+    # Each figure has at most one descriptor; default is empty (all fields
+    # None / empty list). is_empty() is the load-bearing predicate for
+    # downstream renderers + the Phase 4c sufficiency gate.
+    description: CaptionDescriptor = field(default_factory=CaptionDescriptor)
 
     def to_dict(self) -> dict:
         return {
@@ -118,6 +201,7 @@ class FigureRecord:
             "format": self.format,
             "captions": [c.to_dict() for c in self.captions],
             "savefig_origins": [s.to_dict() for s in self.savefig_origins],
+            "description": self.description.to_dict(),
         }
 
 
@@ -311,6 +395,380 @@ def _is_savefig_call(node: ast.Call) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# v0.4 Phase 2 — matplotlib AST extraction (Source 3)
+#
+# Hard scope cap: AST walks only the savefig cell + the immediately
+# preceding code cell. Does NOT chase function calls into other modules.
+# Only string-literal arguments are extracted; f-strings with single-
+# Constant body are OK; interpolated f-strings return no signal (don't
+# fabricate). Handles 1D `plt.subplots(N, M)` grid declarations and
+# `plt.subplot(N, M, k)` index calls; does NOT handle gridspec.GridSpec
+# or plt.subplot2grid (deferred to v0.5).
+# ---------------------------------------------------------------------------
+
+
+def _string_literal(node: ast.AST) -> Optional[str]:
+    """Return the string value of a string-literal AST node.
+
+    Constant strings → the value.
+    f-strings with a single Constant body (e.g. f"foo") → the value.
+    f-strings with interpolation (e.g. f"foo {x}") → None (don't fabricate).
+    Anything else → None.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        if len(node.values) == 1 and isinstance(node.values[0], ast.Constant):
+            v = node.values[0].value
+            return v if isinstance(v, str) else None
+    return None
+
+
+def _extract_subscript_indices(node: ast.AST) -> Optional[tuple[int, ...]]:
+    """If `node` is a Subscript with constant integer indices, return them.
+
+    `axes[0]`     → (0,)
+    `axes[0, 1]`  → (0, 1)
+    `axes[i]`     → None (non-constant index; can't fabricate)
+    `axes[0][1]`  → None (chained subscript; rare in matplotlib idiom)
+    """
+    if not isinstance(node, ast.Subscript):
+        return None
+    sl = node.slice
+    if isinstance(sl, ast.Constant) and isinstance(sl.value, int):
+        return (sl.value,)
+    if isinstance(sl, ast.Tuple):
+        idxs: list[int] = []
+        for el in sl.elts:
+            if isinstance(el, ast.Constant) and isinstance(el.value, int):
+                idxs.append(el.value)
+            else:
+                return None
+        return tuple(idxs)
+    return None
+
+
+def _idxs_to_letter(
+    idxs: tuple[int, ...], grid_cols: Optional[int]
+) -> Optional[str]:
+    """Map subscript indices to a row-major panel letter.
+
+    Single index → A=0, B=1, ... (axes is a 1D array).
+    Two indices  → A=axes[0,0], B=axes[0,1], ... (row-major; needs grid_cols).
+    Without grid_cols on a 2D access we cannot honestly assign letters
+    (no fabrication).
+    """
+    if len(idxs) == 1:
+        i = idxs[0]
+        if 0 <= i < 26:
+            return chr(ord("A") + i)
+        return None
+    if len(idxs) == 2:
+        if grid_cols is None or grid_cols <= 0:
+            return None
+        i, j = idxs
+        if i < 0 or j < 0 or j >= grid_cols:
+            return None
+        flat = i * grid_cols + j
+        if flat < 26:
+            return chr(ord("A") + flat)
+        return None
+    return None
+
+
+def _classify_plot_call(node: ast.Call) -> tuple[Optional[str], object]:
+    """Classify a Call node as a matplotlib plot operation.
+
+    Returns (kind, info) tuple. Kinds:
+
+      "title"          info = str (the title text)
+      "suptitle"       info = str (suptitle text; used as title fallback)
+      "axes_label"     info = str (xlabel, ylabel, or colorbar label)
+      "legend"         info = list[str] of label strings (or [] if non-list arg)
+      "subplots_grid"  info = {"cols": int|None}  — `plt.subplots(N, M)`
+      "subplot_pos"    info = {"position": int}   — `plt.subplot(N, M, k)`
+      "panel_set"      info = (field, indices, value)  — axes[i,j].set_*(...)
+      None             — call is not a recognized plot operation
+
+    Only attribute-style calls are classified (`plt.title`, `ax.set_title`,
+    `axes[i,j].set_title`). Direct function calls like `volcano_plot(df)`
+    are NOT classified — by design (no chasing into wrapper bodies).
+    """
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None, None
+    attr = func.attr
+
+    # axes[i,j].set_title / .set_xlabel / .set_ylabel — panel-level
+    if attr in ("set_title", "set_xlabel", "set_ylabel"):
+        indices = _extract_subscript_indices(func.value)
+        value = _string_literal(node.args[0]) if node.args else None
+        if indices is not None and value is not None:
+            field = attr[len("set_"):]   # 'set_title' → 'title'
+            return "panel_set", (field, indices, value)
+        # ax.set_title (no subscript) — figure-level.
+        if value is None:
+            return None, None
+        if attr == "set_title":
+            return "title", value
+        return "axes_label", value
+
+    # Plain pyplot-style: plt.title / plt.xlabel / plt.ylabel / plt.legend
+    if attr == "title":
+        v = _string_literal(node.args[0]) if node.args else None
+        return ("title", v) if v else (None, None)
+    if attr == "suptitle":
+        v = _string_literal(node.args[0]) if node.args else None
+        return ("suptitle", v) if v else (None, None)
+    if attr in ("xlabel", "ylabel"):
+        v = _string_literal(node.args[0]) if node.args else None
+        return ("axes_label", v) if v else (None, None)
+    if attr == "set_label":
+        # cbar.set_label('Z')
+        v = _string_literal(node.args[0]) if node.args else None
+        return ("axes_label", v) if v else (None, None)
+    if attr == "legend":
+        # legend(['a', 'b']) or legend(handles=..., labels=['a','b'])
+        if node.args:
+            first = node.args[0]
+            if isinstance(first, (ast.List, ast.Tuple)):
+                labels: list[str] = []
+                for el in first.elts:
+                    s = _string_literal(el)
+                    if s:
+                        labels.append(s)
+                if labels:
+                    return "legend", labels
+        # Also check labels= kwarg
+        for kw in node.keywords:
+            if kw.arg == "labels" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                labels = []
+                for el in kw.value.elts:
+                    s = _string_literal(el)
+                    if s:
+                        labels.append(s)
+                if labels:
+                    return "legend", labels
+        return None, None
+    if attr == "subplots":
+        cols: Optional[int] = None
+        # Positional: plt.subplots(N, M, ...)
+        if len(node.args) >= 2:
+            second = node.args[1]
+            if isinstance(second, ast.Constant) and isinstance(second.value, int):
+                cols = second.value
+        # Keyword: plt.subplots(nrows=N, ncols=M)
+        for kw in node.keywords:
+            if kw.arg == "ncols":
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                    cols = kw.value.value
+        return "subplots_grid", {"cols": cols}
+    if attr == "figure":
+        # plt.figure() — new figure boundary; resets per-figure state in
+        # _extract_plot_calls. (Includes the kwarg-only variant
+        # plt.figure(figsize=(8,6)).)
+        return "figure_call", None
+    if attr == "subplot":
+        # plt.subplot(N, M, k) — k is 1-based; activates one panel of an
+        # existing figure. NOT a new-figure boundary (does not reset state).
+        if len(node.args) >= 3:
+            third = node.args[2]
+            if isinstance(third, ast.Constant) and isinstance(third.value, int):
+                return "subplot_pos", {"position": third.value}
+        return None, None
+    return None, None
+
+
+@dataclass
+class PlotCallExtraction:
+    """AST-extracted matplotlib state at a savefig point.
+
+    Phase 2 output. Captures string-literal arguments from title / axes /
+    legend calls in the savefig cell + 1 preceding code cell, partitioned
+    at savefig boundaries within the savefig cell. First-occurrence-wins
+    semantics for scalar fields (title, axis labels); panels list dedupes
+    by letter and merges sub-fields.
+    """
+
+    title: Optional[str] = None
+    axes_labels: list[str] = field(default_factory=list)
+    legend_labels: list[str] = field(default_factory=list)
+    panels: list[PanelDescriptor] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return (
+            self.title is None
+            and not self.axes_labels
+            and not self.legend_labels
+            and not self.panels
+        )
+
+
+def _extract_plot_calls(
+    setup_cell_source: Optional[str],
+    savefig_cell_source: str,
+    savefig_line: int,
+    prev_savefig_line: Optional[int] = None,
+) -> PlotCallExtraction:
+    """Extract matplotlib state for ONE savefig call.
+
+    Scope:
+      - `setup_cell_source` (the immediately preceding code cell) — entirely.
+      - `savefig_cell_source` between `prev_savefig_line` (exclusive) and
+        `savefig_line` (inclusive). For the FIRST savefig in the cell,
+        `prev_savefig_line` is None and the scope starts at line 1.
+
+    This partitioning supports the multi-savefig-per-cell idiom:
+
+        plt.figure(); plt.title('A'); plt.savefig('a.png')   ← scope 1
+        plt.figure(); plt.title('B'); plt.savefig('b.png')   ← scope 2
+
+    where each savefig sees only its own setup, not the other's.
+
+    Return value: PlotCallExtraction. is_empty() iff no signal recovered.
+    """
+    extraction = PlotCallExtraction()
+    grid_cols: Optional[int] = None
+    current_subplot_position: Optional[int] = None
+
+    # Walk a source's AST, dispatching every matched call into the
+    # extraction in source-line order.
+    def _walk(source: Optional[str], line_lo: Optional[int],
+              line_hi: Optional[int]) -> None:
+        nonlocal grid_cols, current_subplot_position
+        if not source or not source.strip():
+            return
+        cleaned = _strip_jupyter_magics(source)
+        try:
+            tree = ast.parse(cleaned)
+        except SyntaxError:
+            return
+
+        # Flatten Calls in source-line order. ast.walk yields in BFS order
+        # but we need source-text order to keep "current subplot" tracking
+        # correct when a single cell has multiple subplot()+title() pairs.
+        calls: list[ast.Call] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if line_lo is not None and node.lineno <= line_lo:
+                    continue
+                if line_hi is not None and node.lineno > line_hi:
+                    continue
+                calls.append(node)
+        calls.sort(key=lambda n: (n.lineno, n.col_offset))
+
+        for call in calls:
+            kind, info = _classify_plot_call(call)
+            if kind == "figure_call":
+                # plt.figure() — new figure boundary. Wipe any state
+                # accumulated from prior figures (typically the setup
+                # cell's calls for a previous figure that's already been
+                # saved). This is the load-bearing fix for the cross-cell
+                # over-attribution bug discovered in v0.4 Phase 2 smoke
+                # against functional_dark_matter (fig01/fig02 had
+                # identical panel titles when each cell drew its own
+                # multi-panel figure but the setup_cell_source carried
+                # the prior figure's panel titles).
+                extraction.title = None
+                extraction.axes_labels.clear()
+                extraction.legend_labels.clear()
+                extraction.panels.clear()
+                grid_cols = None
+                current_subplot_position = None
+            elif kind == "subplots_grid":
+                cols = info.get("cols") if isinstance(info, dict) else None
+                # Same boundary semantics: subplots() creates a new figure.
+                extraction.title = None
+                extraction.axes_labels.clear()
+                extraction.legend_labels.clear()
+                extraction.panels.clear()
+                grid_cols = cols
+                current_subplot_position = None
+            elif kind == "subplot_pos":
+                pos = info.get("position") if isinstance(info, dict) else None
+                if isinstance(pos, int):
+                    current_subplot_position = pos
+            elif kind == "title":
+                if extraction.title is None and isinstance(info, str):
+                    # If we're inside a subplot context, attribute as panel.
+                    if current_subplot_position is not None:
+                        _attach_panel(extraction,
+                                      ("title", (current_subplot_position - 1,), info),
+                                      grid_cols=None)
+                    else:
+                        extraction.title = info
+            elif kind == "suptitle":
+                # suptitle is fig-level; doesn't go to a panel.
+                if extraction.title is None and isinstance(info, str):
+                    extraction.title = info
+            elif kind == "axes_label" and isinstance(info, str):
+                if current_subplot_position is not None:
+                    _attach_panel(extraction,
+                                  ("axes_label", (current_subplot_position - 1,), info),
+                                  grid_cols=None)
+                else:
+                    if info not in extraction.axes_labels:
+                        extraction.axes_labels.append(info)
+            elif kind == "legend" and isinstance(info, list):
+                for lab in info:
+                    if lab not in extraction.legend_labels:
+                        extraction.legend_labels.append(lab)
+            elif kind == "panel_set":
+                _attach_panel(extraction, info, grid_cols=grid_cols)
+
+    _walk(setup_cell_source, None, None)
+    _walk(savefig_cell_source, prev_savefig_line, savefig_line)
+
+    # Sort panels by letter (A, B, C, ...) for stable rendering.
+    extraction.panels.sort(key=lambda p: p.letter)
+    return extraction
+
+
+def _attach_panel(
+    extraction: PlotCallExtraction,
+    info: tuple,
+    grid_cols: Optional[int],
+) -> None:
+    """Merge a panel-level field into the extraction's panels list.
+
+    `info` is the tuple returned by _classify_plot_call for kind
+    'panel_set' OR a synthesized tuple for plt.title-after-subplot
+    contexts: (field, indices, value).
+
+    Field-level first-occurrence-wins per panel.
+    """
+    field_name, indices, value = info
+    letter = _idxs_to_letter(indices, grid_cols)
+    if letter is None:
+        # Subplot-position context: indices are (k-1,); single-axis idiom
+        # means axes is conceptually 1D. Re-attempt with grid_cols=None
+        # (which forces the single-index path in _idxs_to_letter).
+        if len(indices) == 1:
+            i = indices[0]
+            if 0 <= i < 26:
+                letter = chr(ord("A") + i)
+        if letter is None:
+            return
+    panel = next((p for p in extraction.panels if p.letter == letter), None)
+    if panel is None:
+        panel = PanelDescriptor(letter=letter)
+        extraction.panels.append(panel)
+    if field_name == "title" and panel.title is None:
+        panel.title = value
+    elif field_name == "axes_label":
+        # Best-effort: attribute to xlabel if empty, else ylabel.
+        # axes[i,j].set_xlabel vs set_ylabel are distinguished upstream.
+        if panel.xlabel is None:
+            panel.xlabel = value
+        elif panel.ylabel is None and value != panel.xlabel:
+            panel.ylabel = value
+    elif field_name == "xlabel" and panel.xlabel is None:
+        panel.xlabel = value
+    elif field_name == "ylabel" and panel.ylabel is None:
+        panel.ylabel = value
+
+
 @dataclass
 class SavefigCall:
     """One savefig call discovered in a notebook cell."""
@@ -321,6 +779,57 @@ class SavefigCall:
     saved_basename: Optional[str]   # extracted figure filename, if recoverable
     raw_call: str
     preceding_md_cell_index: Optional[int]
+    # v0.4 Phase 2: matplotlib AST extraction (Source 3). None if no
+    # plot calls could be classified or if the cell can't be AST-parsed.
+    plot_calls: Optional[PlotCallExtraction] = None
+
+
+def _cell_text(cell) -> str:
+    """Extract a cell's source as a string (cells may store source as
+    str or list[str] depending on nbformat version)."""
+    src = cell.source
+    return src if isinstance(src, str) else "".join(src)
+
+
+def _collect_md_walkback(cells: list, savefig_raw_idx: int) -> Optional[str]:
+    """Walk backward from a savefig cell, collecting markdown cells until
+    a section break or the start of the notebook.
+
+    A section break = markdown cell whose first non-blank line begins with
+    `#` (any heading level). The header cell IS included in the walk-back
+    (heading text is descriptive, e.g. "## Fig 1: Fitness landscape across pH").
+
+    Replaces the v0.3 "consume one md cell, attribute to first following
+    code cell" model, which silently failed on the dominant scientific-
+    notebook idiom:
+
+        [md]   "## Fig 1: Fitness landscape"
+        [code] # data prep (no savefig)
+        [code] plt.plot(...); plt.savefig(...)   ← saw nothing under v0.3
+
+    Multiple savefigs in the same section legitimately share the same
+    upstream description; this function does NOT consume the markdown
+    (caller may invoke it once per savefig).
+
+    Returns concatenated markdown in chronological order (earliest first),
+    cells joined by blank lines, or None if no preceding markdown is found.
+    """
+    chunks_reversed: list[str] = []
+    for i in range(savefig_raw_idx - 1, -1, -1):
+        cell = cells[i]
+        if cell.cell_type != "markdown":
+            continue
+        text = _cell_text(cell).strip()
+        if not text:
+            continue
+        chunks_reversed.append(text)
+        # Section-header check: first non-blank line starts with '#'.
+        first_line = text.split("\n", 1)[0].lstrip()
+        if first_line.startswith("#"):
+            break
+    if not chunks_reversed:
+        return None
+    return "\n\n".join(reversed(chunks_reversed))
 
 
 def _walk_notebook_savefigs(
@@ -328,9 +837,18 @@ def _walk_notebook_savefigs(
 ) -> tuple[list[SavefigCall], dict[int, str]]:
     """Walk one notebook for savefig calls.
 
-    Returns (savefig_calls, markdown_cells_by_index) where markdown_cells
-    is keyed by CODE-CELL index (so a code cell at index N's preceding
-    markdown cell is in the dict at key N).
+    Returns (savefig_calls, markdown_cells_by_code_cell_index) where
+    markdown_cells is keyed by 1-based CODE-CELL index. A code cell whose
+    AST contains at least one savefig call gets walked back via
+    `_collect_md_walkback` to collect preceding markdown context up to
+    a section header.
+
+    Code cells without savefig calls do NOT get an md_by_code_index
+    entry — only savefig-bearing cells contribute to the map.
+
+    Multiple savefigs in adjacent code cells under a single section may
+    share the same walked-back markdown; the walk-back is independent
+    per code cell.
     """
     import nbformat
     rel_path = str(notebook_path.relative_to(project_dir))
@@ -341,42 +859,51 @@ def _walk_notebook_savefigs(
 
     cells = list(nb.cells)
     savefigs: list[SavefigCall] = []
-
-    # Map: code-cell index → text of the most recent preceding markdown cell.
-    # We iterate in document order, tracking the last-seen markdown cell.
-    last_md_text: Optional[str] = None
     md_by_code_index: dict[int, str] = {}
-    code_index = 0
-    for cell in cells:
-        if cell.cell_type == "markdown":
-            text = cell.source if isinstance(cell.source, str) else "".join(cell.source)
-            if text.strip():
-                last_md_text = text.strip()
-        elif cell.cell_type == "code":
-            code_index += 1
-            if last_md_text is not None:
-                md_by_code_index[code_index] = last_md_text
-                last_md_text = None  # consume — only attribute to one code cell
 
-    # Now AST-walk each code cell looking for savefig calls.
+    # v0.4 Phase 2: track the most recent code cell's source as the
+    # "setup scope" for the next savefig-bearing cell. Markdown cells
+    # in between are transparent. Updated after every code cell visit
+    # (savefig-bearing or not, parseable or not).
+    prev_code_source: Optional[str] = None
+
     code_index = 0
-    for cell in cells:
+    for raw_idx, cell in enumerate(cells):
         if cell.cell_type != "code":
             continue
         code_index += 1
-        source = cell.source if isinstance(cell.source, str) else "".join(cell.source)
+        source = _cell_text(cell)
         cleaned = _strip_jupyter_magics(source)
         if not cleaned.strip():
+            prev_code_source = source
             continue
         try:
             tree = ast.parse(cleaned)
         except SyntaxError:
+            prev_code_source = source
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not _is_savefig_call(node):
-                continue
+
+        # First-pass scan: does this cell contain any savefig calls?
+        # If yes, walk back ONCE for markdown context and use for every
+        # savefig in this cell.
+        cell_savefigs = sorted(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and _is_savefig_call(n)),
+            key=lambda n: (n.lineno, n.col_offset),
+        )
+        if not cell_savefigs:
+            prev_code_source = source
+            continue
+
+        md_walkback = _collect_md_walkback(cells, raw_idx)
+        if md_walkback:
+            md_by_code_index[code_index] = md_walkback
+
+        # Walk savefigs in source order so per-savefig AST scopes
+        # partition correctly (each savefig sees only the calls between
+        # the prior savefig and itself, plus the entire preceding cell).
+        prev_savefig_line: Optional[int] = None
+        for node in cell_savefigs:
             # First positional arg is the path
             saved = None
             if node.args:
@@ -392,6 +919,18 @@ def _walk_notebook_savefigs(
                     raw = raw[:197] + "..."
             except Exception:
                 raw = "(unparseable)"
+
+            # v0.4 Phase 2: matplotlib AST extraction. Scope =
+            # prev_code_source (entirely) + this cell from
+            # prev_savefig_line+1 up to and including node.lineno.
+            extraction = _extract_plot_calls(
+                setup_cell_source=prev_code_source,
+                savefig_cell_source=cleaned,
+                savefig_line=node.lineno,
+                prev_savefig_line=prev_savefig_line,
+            )
+            plot_calls = None if extraction.is_empty() else extraction
+
             savefigs.append(SavefigCall(
                 notebook=rel_path,
                 cell=code_index,
@@ -399,7 +938,11 @@ def _walk_notebook_savefigs(
                 saved_basename=saved_basename,
                 raw_call=raw,
                 preceding_md_cell_index=code_index if code_index in md_by_code_index else None,
+                plot_calls=plot_calls,
             ))
+            prev_savefig_line = node.lineno
+
+        prev_code_source = source
 
     return savefigs, md_by_code_index
 
@@ -507,6 +1050,15 @@ def build_figure_records(
                 ))
 
         # 2. Notebook savefig + preceding markdown context
+        first_walkback: Optional[str] = None
+        first_walkback_nb: Optional[str] = None
+        # v0.4 Phase 2: capture the FIRST non-empty matplotlib AST
+        # extraction across this figure's savefig origins. First-wins is
+        # consistent with how notebook_prose is selected — avoids
+        # combining title/panels from multiple notebooks (which would
+        # require deduplication of conflicting signals).
+        first_plot_calls: Optional[PlotCallExtraction] = None
+        first_plot_calls_nb: Optional[str] = None
         for s in savefig_by_basename.get(fname, []):
             rec.savefig_origins.append(SavefigOrigin(
                 notebook=s.notebook,
@@ -519,6 +1071,8 @@ def build_figure_records(
             if preceding_md:
                 last_para = _last_paragraph(preceding_md)
                 if last_para:
+                    # Short caption candidate (existing v1 behavior;
+                    # 280-char cap, last-paragraph reduction).
                     rec.captions.append(CaptionCandidate(
                         source="notebook_md",
                         text=_truncate(last_para, 280),
@@ -527,6 +1081,41 @@ def build_figure_records(
                             "preceding_cell": s.cell,
                         },
                     ))
+                # CaptionDescriptor.notebook_prose: full unredacted walk-back
+                # (v0.4 Phase 1b / inventory schema v2). First non-empty
+                # wins when a figure is saved by multiple savefigs in
+                # different notebooks; subsequent origins are recorded in
+                # savefig_origins but their walk-backs aren't concatenated
+                # (avoids duplication when notebooks repeat the same prose).
+                if first_walkback is None:
+                    first_walkback = preceding_md
+                    first_walkback_nb = s.notebook
+            if s.plot_calls is not None and first_plot_calls is None:
+                first_plot_calls = s.plot_calls
+                first_plot_calls_nb = s.notebook
+
+        if first_walkback is not None:
+            rec.description.notebook_prose = first_walkback[:_DESCRIPTION_TEXT_CAP]
+            rec.description.source_refs.append(
+                f"notebook_md_walkback({first_walkback_nb})"
+            )
+        if first_plot_calls is not None:
+            # Merge AST extraction into descriptor. notebook_prose stays
+            # as set above (separate provenance); title/axes/legend/panels
+            # come from the AST.
+            if rec.description.title is None and first_plot_calls.title:
+                rec.description.title = first_plot_calls.title
+            for label in first_plot_calls.axes_labels:
+                if label not in rec.description.axes_labels:
+                    rec.description.axes_labels.append(label)
+            for lab in first_plot_calls.legend_labels:
+                if lab not in rec.description.legend_labels:
+                    rec.description.legend_labels.append(lab)
+            if not rec.description.panels and first_plot_calls.panels:
+                rec.description.panels = list(first_plot_calls.panels)
+            rec.description.source_refs.append(
+                f"matplotlib_ast({first_plot_calls_nb})"
+            )
 
         # 3. Filename-derived (always available)
         rec.captions.append(CaptionCandidate(
@@ -592,6 +1181,9 @@ def format_figures_inventory_md(report: FigureInventoryReport) -> str:
     the REPORT-derived caption (when available) and the notebook origin.
     """
     out: list[str] = []
+    # v0.4 inventory schema v2: parseable comment for downstream tooling
+    # to detect schema version. v1 had no header comment.
+    out.append("<!-- inventory_schema_version: 2 -->")
     out.append("# Figures Inventory")
     out.append("")
     out.append(
@@ -599,9 +1191,12 @@ def format_figures_inventory_md(report: FigureInventoryReport) -> str:
         f"Each figure below comes with caption candidates ranked by source: "
         f"REPORT-derived first (project's own authored caption), then "
         f"notebook-context (preceding markdown cell), then filename-derived "
-        f"as a fallback. The Figure-selection prompt picks 4–8 figures from "
-        f"this inventory based on the chosen throughline; figures NOT in "
-        f"this inventory cannot be embedded (per SPEC §6 / D-004 — no "
+        f"as a fallback. v0.4+ inventories also carry a structured "
+        f"**Description** block (Tier 8 caption-richness) when notebook "
+        f"walk-back, matplotlib AST, or REPORT prose yields signal beyond "
+        f"the short caption. The Figure-selection prompt picks 4–8 figures "
+        f"from this inventory based on the chosen throughline; figures NOT "
+        f"in this inventory cannot be embedded (per SPEC §6 / D-004 — no "
         f"figure regeneration in v1)."
     )
     out.append("")
@@ -658,6 +1253,47 @@ def format_figures_inventory_md(report: FigureInventoryReport) -> str:
                         f"{c.context.get('preceding_cell')})_"
                     )
                 out.append(f"- **{src_label}{ctx}**: {c.text}")
+            out.append("")
+        # v0.4 Phase 1b: structured Description block (inventory schema v2).
+        # Only emitted when CaptionDescriptor has at least one populated
+        # field. Phase 1b only fills notebook_prose; later phases (2/3/4)
+        # populate title, axes, panels, etc.
+        if not fig.description.is_empty():
+            out.append("**Description:**")
+            out.append("")
+            d = fig.description
+            if d.title:
+                out.append(f"- _Title:_ {d.title}")
+            if d.axes_labels:
+                out.append(f"- _Axes:_ {'; '.join(d.axes_labels)}")
+            if d.legend_labels:
+                out.append(f"- _Legend:_ {'; '.join(d.legend_labels)}")
+            if d.panels:
+                # v0.4 Phase 3: separator is `; ` (consistent with Axes
+                # and Legend bullets); the panel-entry parser in
+                # paper_writer_helpers._parse_one_description_block uses
+                # `;` as the boundary token. Comma-separation would break
+                # parsing on titles that contain commas (e.g. "(A) Foo,
+                # bar; (B) Baz").
+                panel_summary = "; ".join(
+                    f"({p.letter})" + (f" {p.title}" if p.title else "")
+                    for p in d.panels
+                )
+                out.append(f"- _Panels:_ {panel_summary}")
+            if d.notebook_prose:
+                out.append("")
+                out.append("_Notebook prose:_")
+                out.append("")
+                # Render as blockquote so multi-line prose is visually
+                # distinct from inventory metadata and won't be misparsed
+                # as further bullet items by lenient markdown consumers.
+                for line in d.notebook_prose.split("\n"):
+                    out.append(f"> {line}" if line else ">")
+                out.append("")
+            if d.source_refs:
+                out.append(
+                    f"_Source refs:_ {', '.join(d.source_refs)}"
+                )
             out.append("")
         # Savefig origins
         if fig.savefig_origins:

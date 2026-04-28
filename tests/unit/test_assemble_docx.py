@@ -271,6 +271,89 @@ def test_render_image_block_embeds_picture(assemble_docx, tmp_path) -> None:
     assert any("Figure 1: A test caption" in t for t in para_texts)
 
 
+def test_is_italic_description_paragraph_matcher(assemble_docx) -> None:
+    """v0.4 Phase 3: matcher used to upgrade post-image italic Description
+    paragraphs to Caption style."""
+    assert assemble_docx._is_italic_description_paragraph("*Description: Foo.*")
+    assert assemble_docx._is_italic_description_paragraph(
+        "*Description: Multi-sentence prose. Second sentence.*"
+    )
+    # Must require the marker prefix
+    assert not assemble_docx._is_italic_description_paragraph("*Just italic.*")
+    # Must be wrapped in italics, not loose text
+    assert not assemble_docx._is_italic_description_paragraph(
+        "Description: bare text"
+    )
+
+
+def test_render_description_after_image_gets_caption_style(
+    assemble_docx, tmp_path,
+) -> None:
+    """The italic *Description: ...* paragraph immediately following a
+    Picture should be applied with Caption style (visual continuity)."""
+    fig_dir = tmp_path / "figures"
+    fig_dir.mkdir()
+    png_path = fig_dir / "fig01_test.png"
+    _write_minimal_png(png_path)
+
+    md = tmp_path / "in.md"
+    md.write_text(
+        "Some prose (Fig. 1).\n\n"
+        "![Figure 1: A caption](figures/fig01_test.png)\n\n"
+        "*Description: Growth curves of PA14. Time on x-axis; OD600 on y-axis.*\n\n"
+        "More prose.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.docx"
+    rc = assemble_docx.render_document(md, out)
+    assert rc == 0
+
+    from docx import Document
+    doc = Document(str(out))
+    para_styles = [p.style.name for p in doc.paragraphs]
+    para_texts = [p.text for p in doc.paragraphs]
+
+    # Find the Description paragraph
+    desc_idx = next(
+        (i for i, t in enumerate(para_texts) if "Description: Growth curves" in t),
+        None,
+    )
+    assert desc_idx is not None, f"Description not found in paragraphs: {para_texts}"
+    assert para_styles[desc_idx] == "Caption", (
+        f"expected Caption style on description paragraph, "
+        f"got {para_styles[desc_idx]!r}"
+    )
+
+
+def test_description_paragraph_NOT_after_image_stays_normal(
+    assemble_docx, tmp_path,
+) -> None:
+    """An italic Description paragraph that is NOT immediately after an
+    image keeps Normal style — the upgrade is image-context-specific."""
+    md = tmp_path / "in.md"
+    md.write_text(
+        "Random italic line not after an image:\n\n"
+        "*Description: Free-floating italic text.*\n\n"
+        "More prose.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.docx"
+    rc = assemble_docx.render_document(md, out)
+    assert rc == 0
+
+    from docx import Document
+    doc = Document(str(out))
+    para_styles = [p.style.name for p in doc.paragraphs]
+    para_texts = [p.text for p in doc.paragraphs]
+    desc_idx = next(
+        (i for i, t in enumerate(para_texts) if "Free-floating italic text" in t),
+        None,
+    )
+    assert desc_idx is not None
+    # Should be Normal (or whatever the default is), NOT Caption
+    assert para_styles[desc_idx] != "Caption"
+
+
 def test_render_image_missing_file_emits_placeholder(assemble_docx, tmp_path) -> None:
     """Missing image → italic placeholder paragraph; render does not crash."""
     md = tmp_path / "in.md"

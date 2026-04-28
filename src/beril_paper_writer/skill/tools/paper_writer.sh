@@ -905,6 +905,7 @@ phase_results() {
 
 - \`PROJECT_ROOT\` = \`$project_root\`
 - \`DRAFT_DIR\` = \`$draft_dir\`
+- \`FIGURES_OUT_DIR\` = \`$draft_dir/figures\`
 - \`RESULTS_OUT_PATH\` = \`$target\`
 - \`THROUGHLINE_PATH\` = \`$draft_dir/00_throughline.md\`
 - \`METHODS_PATH\` = \`$draft_dir/01_methods.md\`
@@ -922,18 +923,15 @@ Write RESULTS_OUT_PATH via the Write tool. Emit closing-message template naming 
         "$target" "results.v1" "$draft_dir/audit/results.metadata.json" \
         || return 1
 
-    # Figure copy: best-effort. results.v1's closing message names the
-    # figures; in MVP we just copy any figures referenced as fig0N_* in
-    # 02_results.md from the project's figures/ dir to draft_dir/figures/.
-    log_step "Copying selected figures to $draft_dir/figures/"
-    local fig_count=0
-    while IFS= read -r figname; do
-        local src="$project_root/figures/$figname"
-        if [[ -f "$src" ]]; then
-            cp "$src" "$draft_dir/figures/$figname" 2>/dev/null && fig_count=$((fig_count + 1))
-        fi
-    done < <(grep -oE '\bfig[0-9]+_[a-zA-Z0-9_-]+\.(png|svg|pdf|jpg)' "$target" 2>/dev/null | sort -u)
-    log_step "Copied $fig_count figure(s)"
+    # v0.4 Phase 0: legacy filename-grep fallback removed. In v0.1/v0.2
+    # results.v1 prose contained raw filenames; that fallback grepped them
+    # and copied as a backstop. v0.3+ prose uses (Fig. N) callouts and
+    # results.v1 owns figure-copy directly via its Bash tool, so the
+    # fallback always reported "Copied 0 figure(s)" and was misleading.
+    # If a future regression reintroduces filename-style callouts, that's
+    # a separate fix; the manifest existence check in
+    # tools/check_figures_manifest.py is the authoritative dangling-reference
+    # detector now.
 
     log_ok "results phase complete"
 }
@@ -1375,6 +1373,144 @@ phase_check_figures_manifest() {
     fi
 
     log_ok "check_figures_manifest phase complete"
+}
+
+# ==============================================================================
+# Phase: caption_synthesis — Source 4 LLM for figures failing the gate
+# ==============================================================================
+#
+# v0.4 Phase 4c. Runs after phase_check_figures_manifest, before
+# phase_embed_figures. For each figure in the manifest:
+#   1. Build the input bundle from descriptor + REPORT prose +
+#      Results-section prose + prose-side panel callouts.
+#   2. Apply the sufficiency gate: if Sources 2+3 yielded notebook prose
+#      ≥30 words AND title-or-axes populated, mark source_chosen=
+#      "deterministic" and skip Source 4.
+#   3. Otherwise invoke figure_caption.v1.md with the bundle inlined in
+#      the user_prompt; capture the LLM-written caption at
+#      audit/figure_caption_<N>.md; compute stats and update
+#      audit/figure_caption.v1.metadata.json.
+#
+# Idempotent for the deterministic side; LLM invocations re-run on every
+# call (orchestrator-level deduplication is a v0.5 candidate via
+# --recaption flag). Cost-circuit-breaker (--max-cost-usd) applies via
+# invoke_claude_with_retry.
+
+phase_caption_synthesis() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+
+    log_phase "Phase: caption_synthesis (Source 4 LLM for sparse-descriptor figures)"
+
+    local bundles_dir="$draft_dir/audit/caption_bundles"
+    local meta_path="$draft_dir/audit/figure_caption.v1.metadata.json"
+
+    # Build bundles + apply sufficiency gate. stdout is the list of
+    # figure_ids that need Source 4; empty stdout means all pass.
+    local fig_ids
+    fig_ids=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+        build-caption-bundles \
+        --draft-dir "$draft_dir" \
+        --project-root "$project_root" \
+        --bundles-dir "$bundles_dir") || true
+
+    if [[ -z "$fig_ids" ]]; then
+        log_step "All figures pass the sufficiency gate; skipping Source 4."
+        log_ok "caption_synthesis phase complete (0 LLM invocations)"
+        return 0
+    fi
+
+    local n_figs
+    n_figs=$(echo "$fig_ids" | wc -l | tr -d ' ')
+    log_step "Source 4 needed for $n_figs figure(s): $(echo "$fig_ids" | tr '\n' ' ')"
+
+    local n_synth=0
+    while IFS= read -r fig_id; do
+        [[ -z "$fig_id" ]] && continue
+        local bundle_path="$bundles_dir/figure_${fig_id}.bundle.json"
+        local output_path="$draft_dir/audit/figure_caption_${fig_id}.md"
+        local label="figure_caption.v1[fig=$fig_id]"
+        local cap_metadata="$draft_dir/audit/figure_caption_${fig_id}.invoke.metadata.json"
+
+        if [[ ! -f "$bundle_path" ]]; then
+            log_warn "Bundle file missing for figure $fig_id at $bundle_path; skipping."
+            continue
+        fi
+
+        log_step "Synthesizing caption for figure $fig_id"
+
+        # Read the bundle JSON into a variable for inlining; per the
+        # prompt's contract, all inputs flow through user_prompt (no
+        # Read-tool input gathering).
+        local bundle_json
+        bundle_json=$(cat "$bundle_path")
+
+        local user_prompt
+        user_prompt="Run figure_caption.v1 to produce $output_path.
+
+## Inputs (JSON bundle)
+
+\`\`\`json
+$bundle_json
+\`\`\`
+
+## Output path
+
+Write the caption markdown to \`$output_path\` via the Write tool.
+
+After Write succeeds, emit the closing-message template (see prompt §Closing-message)."
+
+        invoke_claude_with_retry \
+            "$PROMPTS_DIR/figure_caption.v1.md" "$user_prompt" "$model" \
+            "$output_path" "$label" "$cap_metadata" \
+            || {
+                log_warn "figure_caption.v1 failed for figure $fig_id; falling back to deterministic description."
+                continue
+            }
+
+        # Update metadata.json with stats from the written caption.
+        "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+            compute-caption-stats \
+            --draft-dir "$draft_dir" \
+            --figure-id "$fig_id" >&2 || true
+
+        n_synth=$((n_synth + 1))
+    done <<< "$fig_ids"
+
+    log_ok "caption_synthesis phase complete ($n_synth/$n_figs LLM-synthesized)"
+}
+
+# ==============================================================================
+# Phase: check_caption_provenance — Source 4 fabrication detector
+# ==============================================================================
+#
+# v0.4 Phase 4c. Runs after phase_caption_synthesis, before
+# phase_embed_figures. Sixth post-checker in the v0.2-pattern lineage.
+# Validates LLM-synthesized captions (source_chosen='llm' entries in
+# audit/figure_caption.v1.metadata.json) against their input bundles:
+# numerical claims, named entities, panel letters, word counts.
+
+phase_check_caption_provenance() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_caption_provenance (advisory)"
+
+    local prov_warnings_file="$draft_dir/audit/caption_provenance_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_caption_provenance.py" "$draft_dir" \
+        2> "$prov_warnings_file" || true
+
+    if grep -q "^\[check_caption_provenance\] WARN" "$prov_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "^\[check_caption_provenance\] WARN" "$prov_warnings_file")
+        log_warn "Caption-provenance check: $n_warn warning(s) (will surface in next_actions.md):"
+        grep "^\[check_caption_provenance\] WARN" "$prov_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $prov_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_caption_provenance phase complete"
 }
 
 # ==============================================================================
@@ -2337,6 +2473,8 @@ main() {
                     phase_finalize_citations "$draft_dir" \
                         || halt_with "$draft_dir" "finalize_citations failed; inspect audit/finalize_citations.log"
                     phase_check_figures_manifest "$draft_dir"
+                    phase_caption_synthesis "$project_root" "$draft_dir" "$model"
+                    phase_check_caption_provenance "$draft_dir"
                     phase_embed_figures "$draft_dir"
                     phase_check_scope_coherence "$draft_dir"
                     phase_check_overclaim "$draft_dir"

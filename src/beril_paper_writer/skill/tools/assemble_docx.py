@@ -308,6 +308,22 @@ def _try_paragraph_with_style(doc: Any, style_name: str, text: str = "") -> Any:
         return doc.add_paragraph(text)
 
 
+# v0.4 Phase 3: italic Description paragraph detector. The form is
+# `*Description: <text>.*` on a single paragraph (the embed-figures step
+# emits this immediately after a Picture). The detector deliberately
+# requires the marker prefix to avoid catching arbitrary italic text.
+_DESC_PARA_RE = re.compile(r"^\*Description:\s.+\*\s*$", re.DOTALL)
+
+
+def _is_italic_description_paragraph(content: str) -> bool:
+    """True if `content` matches the v0.4 Phase 3 italic Description form.
+
+    Used by render_document to apply Caption style to descriptions that
+    follow Pictures. Defensive against multi-line content via re.DOTALL.
+    """
+    return bool(_DESC_PARA_RE.match(content.strip()))
+
+
 def render_image(doc: Any, alt: str, path: str, base_dir: Path) -> None:
     """Render a block-level image as Picture + Caption-styled paragraph.
 
@@ -450,13 +466,23 @@ def render_document(input_md: Path, output_docx: Path) -> int:
     doc = Document()
     base_dir = input_md.parent
 
+    prev_kind: str | None = None
     for block in blocks:
         if block.kind in ("h1", "h2", "h3", "h4", "h5", "h6"):
             level = int(block.kind[1:])
             heading = doc.add_heading("", level=level)
             render_inline_runs(heading, block.content)
         elif block.kind == "paragraph":
-            para = doc.add_paragraph()
+            # v0.4 Phase 3: italic `*Description: ...*` paragraph
+            # immediately following an image gets Caption style instead
+            # of Normal italic. Visual continuity with the figure caption
+            # paragraph above.
+            if prev_kind == "image" and _is_italic_description_paragraph(
+                block.content,
+            ):
+                para = _try_paragraph_with_style(doc, "Caption")
+            else:
+                para = doc.add_paragraph()
             render_inline_runs(para, block.content)
         elif block.kind == "image":
             alt, path = block.content
@@ -482,6 +508,7 @@ def render_document(input_md: Path, output_docx: Path) -> int:
             # Visual separator: empty paragraph.
             doc.add_paragraph()
         # Unknown block kinds silently dropped (defensive; should not occur).
+        prev_kind = block.kind
 
     doc.save(str(output_docx))
     return 0
