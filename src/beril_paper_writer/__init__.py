@@ -5,4 +5,4 @@ RELEASE_NOTES.md for v0.1 capabilities; RELEASE_NOTES_v0_2.md for the
 v0.2 discipline-hardening + auto-repair tier.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

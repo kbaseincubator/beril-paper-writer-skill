@@ -1,6 +1,7 @@
-# beril-paper-writer-skill — v0.2.0 release notes
+# beril-paper-writer-skill — v0.2 release notes
 
-**Release date:** 2026-04-27
+**v0.2.0 release date:** 2026-04-27 (initial)
+**v0.2.1 release date:** 2026-04-27 (patch — three bugs fixed; see "v0.2.1 patch" section below)
 **Status:** v0.2 — discipline-hardening + auto-repair tier. Pre-1.0;
 expect breaking changes between minor versions until the architectural
 shape stabilizes.
@@ -293,3 +294,101 @@ In rough priority order:
 *Release notes authored 2026-04-27 alongside the v0.2 ship cycle.
 Companion to `RELEASE_NOTES.md` (v0.1.0). For per-tier scope and
 acceptance criteria, see `smoke-test/v0_2_punch_list.md`.*
+
+---
+
+## v0.2.1 patch (2026-04-27, same-day)
+
+A partial integration test on the existing `draft_1` (intended as a
+$0 verification of the orchestrator-glue plumbing) surfaced three
+real bugs that the synthetic smoke + targeted retest had missed.
+Total cost of the live discovery: **~$3.74**, well below the
+budget I had set for a full retest. The bugs are all small and were
+fixed same-day; v0.2.1 is the patch.
+
+### Bug 1 — Stale review-file reuse in `phase_review_rewrite` (important)
+
+**Symptom.** When resuming a draft that already had a rewrite-loop
+run, `phase_review_rewrite`'s call to `run_reviewer_pass` for pass 2
+hit the function's idempotency check (`if [[ -f "$review_out" ]]`)
+because `draft_1_review_2.md` from a prior run was still present.
+Skipped the fresh review. Pass 2 then operated against stale findings
+(the Criticals from before the current rewrite — not against findings
+post-pass-1 rewrites). On the partial test, this caused pass 2 to
+dispatch `rewrite.v1` against C1+C2+C3 from a stale review, when the
+post-pass-1 manuscript had different findings.
+
+**Fix.** In `phase_review_rewrite`, force-delete the target review
+file *before* calling `run_reviewer_pass`:
+```bash
+local next_review_path="$draft_dir/reviews/draft_1_review_${next_review_num}.md"
+rm -f "$next_review_path"
+run_reviewer_pass ... "$next_review_num"
+```
+The initial `phase_review` (which only handles `review_1.md`) keeps
+its idempotency — only the rewrite loop forces fresh reviews. This
+matches the contract: review_1 is the input to the loop; review_N>1
+must always be a fresh reflection of the post-rewrite manuscript.
+
+**Cost impact when not fixed.** Each resume burns one extra rewrite
+cycle at the wrong target findings (~$1-3 per resume). v0.2.0 users
+who only run a draft once are unaffected; users who resume mid-loop
+hit it.
+
+### Bug 2 — `phase_assemble`'s stale "not auto-fixing in MVP" log message (cosmetic)
+
+**Symptom.** `phase_assemble` logs `"validate_manuscript.py reported
+failures... not auto-fixing in MVP"` when the validator fails. The
+wording is from before Tier 3 landed; v0.2 *does* auto-fix via
+`phase_repair_validators` (the next phase in the orchestrator flow).
+The log message confused the partial-test trace.
+
+**Fix.** Updated to `"deferring to phase_repair_validators"`. Single-
+line change. No functional impact.
+
+### Bug 3 — `emit_review_handoff` picks alphabetically-first review file (cosmetic, user-visible)
+
+**Symptom.** The final pause message printed `"Review:
+draft_1_review_1.md"` even though `draft_1_review_3.md` was the
+latest. The lookup used `ls reviews/draft_*_review_*.md | head -1`,
+which alphabetic-sorts `_1` before `_2` before `_3` (lexical, not
+numeric). The user sees a stale review path in the handoff and clicks
+through to outdated content.
+
+**Fix.** Replaced the `ls | head -1` with a Python one-liner that
+extracts the numeric suffix and picks the highest. Portable across
+macOS / Linux without GNU `sort -V`.
+
+### Architectural insight surfaced (NOT a bug — for v0.3 scope)
+
+The partial test's M10 (orphan citation) repair attempt failed both
+times — `discussion.v1` in REPAIR_MODE couldn't fix the M10 because
+the actual fix usually requires editing `references.md`, which is
+outside any section prompt's scope. The escalation worked correctly
+(bounded retry exits to user-modify), but ~$0.83 was spent on
+attempts that couldn't succeed. **For v0.3:** consider routing M10
+to a citation-pool-aware repair path rather than a section prompt.
+Backlog item, not a v0.2 blocker.
+
+### v0.2.1 cost summary
+
+- Bug fixes: ~30 min, $0 (deterministic patches)
+- Live-test discovery cost (v0.2.0 partial test that surfaced these): $3.74
+- Total v0.2 dev cost (v0.1 ship + Tier 3 retest + Tier 5 partial test): ~$8.27 cumulative
+
+The partial test was over budget vs. my "$0" estimate — the rewrite
+loop's behavior on a resumed draft burned LLM cost I should have
+predicted. Lesson logged in `feedback_no_benchmark_gaming.md`'s
+diagnose-before-patching neighborhood: a "$0 partial test" requires
+explicitly disabling the rewrite-loop dispatch, not just relying on
+phase idempotency.
+
+### Files changed in v0.2.1
+
+```
+modified
+  pyproject.toml                                                 (0.2.0 → 0.2.1)
+  src/beril_paper_writer/__init__.py                              (__version__ 0.2.0 → 0.2.1)
+  src/beril_paper_writer/skill/tools/paper_writer.sh              (3 bug fixes; see above)
+  RELEASE_NOTES_v0_2.md                                           (this patch section)
+```

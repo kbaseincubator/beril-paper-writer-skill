@@ -1403,7 +1403,7 @@ EOF
     "$PYTHON_BIN" "$TOOLS_DIR/validate_manuscript.py" "$draft_dir" \
         --mode "$mode" --output "$draft_dir/audit/validation.json" \
         > "$draft_dir/audit/validation.log" 2>&1 || \
-        log_warn "validate_manuscript.py reported failures (see $draft_dir/audit/validation.json); not auto-fixing in MVP"
+        log_warn "validate_manuscript.py reported failures (see $draft_dir/audit/validation.json); deferring to phase_repair_validators"
 
     # Cleanup transient title-block tempfile (manuscript.md has the title).
     rm -f "$title_block_path"
@@ -1846,8 +1846,18 @@ for k in d.get('findings_by_section', {}).keys():
             log_warn "Pass $pass_num re-assemble failed; continuing"
 
         # Run a fresh reviewer pass on the rewritten manuscript.
+        # v0.2.1 fix: force-delete the target file BEFORE calling
+        # run_reviewer_pass. The function has an idempotency check that
+        # skips if the file exists; on a draft being resumed (e.g., after
+        # the user re-runs the pipeline), an old review_N.md from a prior
+        # rewrite cycle would silently make pass N operate against stale
+        # findings. Deleting first forces a fresh review of the post-
+        # rewrite manuscript. The initial review_1.md (in phase_review)
+        # keeps its idempotency — only the rewrite loop forces fresh.
         local next_review_num=$((pass_num + 1))
-        log_step "Pass $pass_num: invoking reviewer pass $next_review_num"
+        local next_review_path="$draft_dir/reviews/draft_1_review_${next_review_num}.md"
+        rm -f "$next_review_path"
+        log_step "Pass $pass_num: invoking reviewer pass $next_review_num (forced fresh)"
         run_reviewer_pass "$project_root" "$draft_dir" "$model" "$project_id" "$next_review_num" || {
             log_warn "Reviewer pass $next_review_num failed; surfacing escalation"
             echo "pass $pass_num: reviewer pass $next_review_num invocation failed; loop aborted" >> "$rewrite_summary"
@@ -2009,8 +2019,26 @@ emit_review_handoff() {
 
     log_phase "Pause: review (final handoff)"
 
+    # v0.2.1 fix: pick the LATEST review by numeric suffix, not alphabetic.
+    # `ls | head -1` picked draft_1_review_1.md even when review_2 / _3
+    # existed, surfacing a stale review file in the final handoff. Use a
+    # Python one-liner so we don't depend on `sort -V` (GNU coreutils).
     local review_path
-    review_path="$(ls "$draft_dir/reviews/"draft_*_review_*.md 2>/dev/null | head -1)"
+    review_path="$("$PYTHON_BIN" - "$draft_dir/reviews" <<'PYEOF' 2>/dev/null
+import os, re, sys
+d = sys.argv[1]
+if not os.path.isdir(d):
+    sys.exit(0)
+files = []
+for f in os.listdir(d):
+    m = re.match(r"draft_\d+_review_(\d+)\.md$", f)
+    if m:
+        files.append((int(m.group(1)), os.path.join(d, f)))
+files.sort()
+if files:
+    print(files[-1][1])
+PYEOF
+)"
     [[ -z "$review_path" ]] && review_path="$draft_dir/reviews/"
 
     "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" aggregate-metadata "$draft_dir" >/dev/null 2>&1
