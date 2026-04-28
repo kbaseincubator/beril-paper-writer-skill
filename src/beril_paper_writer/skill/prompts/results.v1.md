@@ -46,8 +46,14 @@ total). Each subsection:
    not as a question or a process step.
 2. **Descriptive prose** — what was found. Numerical claims with
    provenance (see Discipline pass).
-3. **Figure callout** when applicable — `(Fig. N)` after the
-   sentence the figure supports. Maximum 1–2 figures per subsection.
+3. **Figure callout** — `(Fig. N)` after the sentence the figure
+   supports, where N is the paper-order index from your figure
+   selection (1, 2, 3, ...). **Load-bearing when figures exist:**
+   the orchestrator's `phase_embed_figures` (post-results) injects
+   `![Figure N: <caption>](figures/<filename>)` markdown image tags
+   based on these callouts. A selected figure with no `(Fig. N)`
+   callout in prose will not be embedded in the assembled docx.
+   Maximum 1–2 figures per subsection.
 4. **Table reference** when applicable — `(Table N)` for
    key-finding tables.
 
@@ -252,6 +258,30 @@ rules:
 - **Tables follow the same logic** but the inventory doesn't
   enumerate them (yet) — pull from REPORT's `| ... | ... |`
   markdown tables.
+- **Emit `figures_manifest.tsv`** alongside the figure copies. After
+  all selected figures are copied to `FIGURES_OUT_DIR` with paper-
+  order names, write `<DRAFT_DIR>/figures_manifest.tsv` with a
+  header row + one data row per selected figure. Tab-separated;
+  three columns:
+
+      paper_order_n	filename	inventory_lookup_name
+
+  `paper_order_n` is the integer N referenced in your `(Fig. N)`
+  callouts. `filename` is the paper-order rename (e.g.
+  `fig01_dark_gene_census.png`). `inventory_lookup_name` is the
+  original filename from `figures_inventory.md` (e.g.
+  `fig01_annotation_breakdown.png`) — the join key the orchestrator
+  uses to resolve captions from the inventory at embed-time.
+  **Banned-tab discipline:** none of the three values may contain a
+  tab character. Filenames are filesystem-safe by construction; this
+  is a defensive invariant, not something you have to enforce by
+  escaping.
+
+  Caption text is NOT in the manifest — captions live in
+  `figures_inventory.md` and are resolved orchestrator-side via
+  `paper_writer_helpers.py resolve-figures`. This sidesteps the
+  LLM-emitted-JSON-with-quotes failure mode (you don't have to
+  worry about escaping caption strings).
 
 ## Tool use
 
@@ -334,6 +364,14 @@ Stub headers signal process-conformance, not science.
 6. **Figure callouts match the inventory.** Every `(Fig. N)`
    reference resolves to a figure in `FIGURES_OUT_DIR`. No callouts
    to figures not selected; no selected figures without callouts.
+   **HALT discipline:** if `FIGURES_INVENTORY_PATH` is provided AND
+   `figures_inventory.md` is non-empty AND your draft has zero
+   `(Fig. N)` callouts in the prose, HALT and re-walk the figure-
+   selection step. The orchestrator's `phase_embed_figures` depends
+   on these callouts; without them the assembled docx will be
+   figure-less. Document the HALT reason in your closing message
+   rather than emit a Results section that selects figures the
+   prose never cites.
 7. **Citations are from the pool only.** Every `[N]` in the prose
    has a matching entry in `references.md` (M10). Claims that
    would need a citation not in the pool are marked
@@ -364,6 +402,13 @@ Validator-blocking errors (M7 / M8 / M10):
 ✗  Cite [12] in Discussion when references.md has no entry [12].
    (M10 fail: orphan citation)
 ✓  Every [N] resolves; pool exhaustion → mark [NEEDS CITATION] inline.
+
+✗  All 6 selected figures copied to FIGURES_OUT_DIR; figures_manifest.tsv
+   emitted with 6 rows; prose contains 0 `(Fig. N)` callouts.
+   (HALT — phase_embed_figures has nothing to inject; assembled docx will be figure-less.)
+✓  Each subsection that maps to a sub-claim with a selected figure
+   includes `(Fig. N)` after the sentence the figure supports, with
+   N matching the manifest's `paper_order_n` column for that figure.
 ```
 
 Silent traps (validator passes, but the claim is fabricated or
@@ -402,7 +447,12 @@ content fidelity.
 3. **Cross-check every number via Grep** against REPORT.md and
    notebook output cells. Mark or drop unverifiable numbers.
 4. **Select figures (4–8)** from the inventory; copy or symlink
-   into `FIGURES_OUT_DIR` with paper-order names.
+   into `FIGURES_OUT_DIR` with paper-order names; emit
+   `<DRAFT_DIR>/figures_manifest.tsv` (3 cols, tab-separated, header
+   row + one data row per selected figure). See "Figure selection"
+   above for the exact schema; the manifest is what
+   `phase_embed_figures` consumes to inject image tags after your
+   `(Fig. N)` callouts.
 5. **Append reframing-log entries** for demoted findings
    (orthogonal-to-throughline) and for REPORT-vs-notebook
    discrepancies. Log is append-only: Read the existing file, add
@@ -470,8 +520,9 @@ of the change>."`
 ```
 02_results.md written, N words; subsections: [<list of subsection
 names actually present>]; figures selected: K (of M in inventory);
-placeholders: [NUMBER UNCLEAR ×J, FIGURE GAP ×L, NEEDS CITATION ×P];
-reframing-log entries appended: Q.
+figures_manifest.tsv emitted with K rows; placeholders: [NUMBER
+UNCLEAR ×J, FIGURE GAP ×L, NEEDS CITATION ×P]; reframing-log
+entries appended: Q.
 ```
 
 Counts and subsection list must be derivable from the file. List

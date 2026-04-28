@@ -663,4 +663,119 @@ what runs" + "Cross-platform" + "Open questions for revisit" §1;
 
 ---
 
+## D-025 — 2026-04-27 — orchestrator owns `<draft_dir>/figures/` for paper-order names; pre-clean stale files in `phase_results`
+
+**Decision:** The orchestrator owns the contents of `<draft_dir>/figures/`
+for any file matching the paper-order name pattern `fig*.png`. On entry
+to `phase_results` in drafting mode (NOT REPAIR_MODE), the orchestrator
+removes any pre-existing `fig*.png` from that directory before
+re-running results.v1's figure-selection step. results.v1 then re-copies
+figures from the project's source `figures/` dir with paper-order
+renaming, and emits `figures_manifest.tsv` (Wrinkle A canonicalization,
+v0.3 punch list).
+
+**Rationale:** v0.2.1's live-test exposure of `draft_1/figures/`
+revealed paper-order filename collisions from rewrite-loop residue:
+`fig01_dark_gene_census.png` co-existing with
+`fig01_dark_gene_census_fitness.png`, and similar duplicates at fig05,
+fig06, fig08. The duplicates accumulate because results.v1's figure-copy
+step (a) doesn't clean before copying and (b) gets re-invoked on
+rewrite-loop reruns with different selections. This pollutes the
+`<draft_dir>/figures/` listing and breaks any "paper-order N → file"
+lookup that depends on filename uniqueness.
+
+The cleanup runs ONLY in drafting-mode entry (where results.v1 will
+re-copy fresh files). In REPAIR_MODE, results.v1 is invoked with
+NAMED_VALIDATOR scope and does not re-do figure selection — the
+existing figures must remain intact. The bash gate is the absence of
+REPAIR_MODE state at phase_results entry, which is the natural
+drafting-vs-repair boundary in the orchestrator.
+
+The contract this establishes: anything matching `<draft_dir>/figures/fig*.png`
+is orchestrator-managed and may be deleted on the next drafting run.
+User-curated illustrations should NOT live in this directory; they
+should live in a separate path (TBD when a 2nd user shows up — v0.4
+concern). For v0.3, single-user is the operator and this contract is
+acceptable.
+
+**Tradeoffs accepted:**
+
+- A user who manually edits `<draft_dir>/figures/fig01_x.png` between
+  drafting runs will have their edit lost on re-run. Acceptable
+  because (a) the operator is currently solo and (b) re-running drafting
+  is the explicit "regenerate from source" gesture.
+- The cleanup is destructive without confirmation. Acceptable for v0.3;
+  a `--keep-existing-figures` flag could be added in v0.4 if needed.
+
+**Alternatives considered:**
+
+- Have results.v1 (the prompt) clean before copying. Rejected — puts
+  filesystem-hygiene discipline on the LLM, which is exactly the kind
+  of "trust the prompt" failure mode `feedback_prompt_discipline_needs_post_check.md`
+  warns against. Orchestrator-side cleanup is bulletproof.
+- A new top-level command `beril-paper-writer reset-figures <draft_dir>`.
+  Rejected — adds CLI surface for a one-line orchestrator step.
+- Append-only with a manifest. Rejected — collisions accumulate, no
+  cleanup mechanism, and the manifest grows unboundedly across reruns.
+
+**Related:** v0.3 punch list Tier 2.2; `paper_writer.sh phase_results`
+lines 875-884; [SPEC](SPEC.md) §6 (results.v1 figure-copy step).
+
+---
+
+## D-026 — 2026-04-27 — embedded-image-tag form: `![Figure N: <caption>](figures/<filename>)`
+
+**Decision:** `phase_embed_figures` (v0.3 Tier 2.2) injects markdown
+image tags in the form
+`![Figure N: <caption>](figures/<filename>)` after the first sentence
+containing `(Fig. N)` for each N. Both the figure number and caption
+text live in the markdown alt-text. The figure number N is read from
+the prose's `(Fig. N)` callout (NOT computed by the embedder).
+Caption text is sourced from `figures_inventory.md` via
+`paper_writer_helpers.py resolve-figures` — the project-authored
+caption-candidate ranking (REPORT-derived first, notebook-context
+second, filename third) is the authority.
+
+**Rationale:** Three motivations:
+
+1. **Self-contained markdown.** Anyone reading manuscript.md alone
+   (without the assembler) sees the captioned figures with proper
+   numbering. The "Figure N:" prefix in the alt-text doubles as a
+   readable label in plain-text rendering.
+
+2. **N from prose, not from manifest counting.** results.v1's prose
+   already declares paper-order N. If figures are reordered, the
+   reordering happens in results.v1's output and propagates naturally;
+   the embedder just reads what's in the prose. Counter-pattern
+   (have the embedder count and renumber) doubles the renumbering
+   authority and creates a drift surface.
+
+3. **Caption from inventory, not from LLM.** Captions live in
+   `figures_inventory.md` (project-authored, REPORT-derived). The LLM
+   is never asked to re-emit captions in the manifest, sidestepping
+   the JSON-quoting trap from `feedback_llm_json_unfixable_in_parser.md`.
+
+**docx rendering** (D-024 path): `tools/assemble_docx.py` (v0.3 Tier
+2.3) renders the markdown image tag as a python-docx `Picture` object
+in a centered paragraph + a `Caption`-styled paragraph immediately
+following with the alt-text as the caption text. The "Figure N:"
+prefix is part of the alt-text and renders verbatim.
+
+**Tradeoffs accepted:**
+
+- Alt-text is overloaded (accessibility label + caption + figure
+  number). For docx output this is fine; for accessibility tooling on
+  manuscript.md alone, a screen reader sees "Figure N: caption" which
+  is reasonable.
+- Embed once per figure: subsequent `(Fig. N)` references to an
+  already-embedded figure stay textual. This means a figure cited
+  three times in prose is only embedded after the first citation;
+  later citations are "see Fig. N" without an inline image. Standard
+  scientific-manuscript convention.
+
+**Related:** v0.3 punch list Wrinkle B; D-024 (python-docx renderer);
+`paper_writer_helpers.py cmd_embed_figures` + `_embed_figures_in_text`.
+
+---
+
 *Append new decisions below this line. Use the next D-NNN ID.*

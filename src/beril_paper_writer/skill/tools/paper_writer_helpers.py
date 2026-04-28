@@ -648,6 +648,57 @@ def cmd_emit_next_actions(args: argparse.Namespace) -> int:
         )
         lines.append("")
 
+    # 3b. Figures-manifest warnings (Tier 2.1b — schema, file existence,
+    # orphans, callout cross-walk)
+    fig_path = draft_dir / "audit" / "figures_manifest_warnings.txt"
+    lines.append("## Figures-manifest warnings")
+    lines.append("")
+    figures_warnings: list[str] = []
+    figures_notes: list[str] = []
+    if fig_path.is_file():
+        for raw in fig_path.read_text(encoding="utf-8").splitlines():
+            if raw.startswith("[check_figures_manifest] WARN"):
+                figures_warnings.append(
+                    raw.replace("[check_figures_manifest] ", "", 1)
+                )
+            elif raw.startswith("[check_figures_manifest] NOTE"):
+                figures_notes.append(
+                    raw.replace("[check_figures_manifest] ", "", 1)
+                )
+    if figures_warnings or figures_notes:
+        n_w = len(figures_warnings)
+        n_n = len(figures_notes)
+        lines.append(
+            f"_{n_w} warning(s) + {n_n} note(s) from "
+            "`tools/check_figures_manifest.py` (advisory; review each)._"
+        )
+        lines.append("")
+        # Surface WARN first (higher priority).
+        for w in figures_warnings[:10]:
+            lines.append(f"- {w}")
+        if n_w > 10:
+            lines.append(
+                f"- ... ({n_w - 10} more WARN — see "
+                "`audit/figures_manifest_warnings.txt`)"
+            )
+        for w in figures_notes[:5]:
+            lines.append(f"- {w}")
+        if n_n > 5:
+            lines.append(
+                f"- ... ({n_n - 5} more NOTE — see "
+                "`audit/figures_manifest_warnings.txt`)"
+            )
+        lines.append("")
+    elif fig_path.is_file():
+        lines.append("_No figures-manifest warnings._")
+        lines.append("")
+    else:
+        lines.append(
+            "_(audit/figures_manifest_warnings.txt not present — "
+            "check_figures_manifest may not have run.)_"
+        )
+        lines.append("")
+
     # 4a. Repair-validators outcomes (REPAIR_MODE dispatch results)
     repair_path = draft_dir / "audit" / "repair_summary.txt"
     lines.append("## REPAIR_MODE outcomes")
@@ -832,6 +883,7 @@ def cmd_emit_next_actions(args: argparse.Namespace) -> int:
         f"wrote {target} ({len(val_failures)} validator failure(s), "
         f"{'orphans present' if (warnings_path.is_file() and 'orphaned citation' in warnings_path.read_text(encoding='utf-8').lower()) else 'no orphans'}, "
         f"{len(scope_warnings)} scope warning(s), "
+        f"{len(figures_warnings)} figures-manifest warning(s), "
         f"{len(overclaim_warnings)} overclaim warning(s), "
         f"{'review found' if latest_review else 'no review'})",
         file=sys.stderr,
@@ -1586,6 +1638,431 @@ def cmd_cumulative_cost(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_figures_manifest(manifest_path: Path) -> list[dict]:
+    """Parse figures_manifest.tsv into a list of row dicts.
+
+    Schema (per Wrinkle A canonicalization, v0_3_punch_list.md):
+        paper_order_n\tfilename\tinventory_lookup_name
+
+    Returns [] if the manifest is missing. WARN to stderr on any
+    schema deviation; rows that fail validation are skipped.
+    """
+    if not manifest_path.is_file():
+        return []
+    raw = manifest_path.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    if not lines:
+        return []
+    expected = ["paper_order_n", "filename", "inventory_lookup_name"]
+    header = lines[0].split("\t")
+    if header != expected:
+        sys.stderr.write(
+            f"WARN: figures_manifest.tsv header mismatch: got {header!r}, expected {expected!r}\n"
+        )
+    rows: list[dict] = []
+    for lineno, line in enumerate(lines[1:], start=2):
+        if not line.strip():
+            continue
+        cells = line.split("\t")
+        if len(cells) < 3:
+            sys.stderr.write(
+                f"WARN: figures_manifest.tsv line {lineno}: expected 3 cells, got {len(cells)}; skipping\n"
+            )
+            continue
+        try:
+            n = int(cells[0].strip())
+        except ValueError:
+            sys.stderr.write(
+                f"WARN: figures_manifest.tsv line {lineno}: paper_order_n not an integer: {cells[0]!r}; skipping\n"
+            )
+            continue
+        rows.append({
+            "paper_order_n": n,
+            "filename": cells[1].strip(),
+            "inventory_lookup_name": cells[2].strip(),
+        })
+    return rows
+
+
+def _parse_figures_inventory_captions(inventory_path: Path) -> dict[str, str]:
+    """Parse figures_inventory.md into {inventory_filename: top_caption}.
+
+    For each `### \\`figures/<name>\\`` heading, extract the first bullet's
+    caption text from the "**Caption candidates:**" block. The inventory
+    bullets are pre-sorted by extract_figures.py in priority order
+    (REPORT-derived first, notebook-context second, filename third), so
+    the first bullet is the highest-priority caption for that figure.
+
+    If a figure entry has no caption candidates, falls back to a
+    filename-derived caption (strip `figNN_` prefix, replace `_` with
+    space, capitalize first word).
+
+    Returns {} if the inventory file is missing.
+    """
+    if not inventory_path.is_file():
+        return {}
+    text = inventory_path.read_text(encoding="utf-8")
+    captions: dict[str, str] = {}
+    # Split on each ### `figures/<name>` heading. The split keeps the
+    # captured filename in the result list, alternating with the body.
+    parts = re.split(r"^### `figures/(.+?)`\s*$", text, flags=re.MULTILINE)
+    # parts = [preamble, fname1, body1, fname2, body2, ...]
+    for i in range(1, len(parts), 2):
+        fname = parts[i].strip()
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        # First bullet under "Caption candidates:": `- **<source>**: <text>`
+        cap_match = re.search(
+            r"\*\*Caption candidates:\*\*\s*\n+\s*-\s*\*\*[^*]+\*\*:\s*(.+?)$",
+            body,
+            flags=re.MULTILINE,
+        )
+        if cap_match:
+            captions[fname] = cap_match.group(1).strip()
+        else:
+            captions[fname] = _filename_to_caption(fname)
+    return captions
+
+
+def _filename_to_caption(filename: str) -> str:
+    """Filename → human-readable caption fallback.
+
+    Strip `figNN_` paper-order prefix, replace `_` with space, capitalize
+    first word. e.g. `fig01_dark_gene_census.png` → "Dark gene census".
+    """
+    stem = Path(filename).stem
+    cleaned = re.sub(r"^fig\d+_", "", stem)
+    cleaned = cleaned.replace("_", " ").strip()
+    return cleaned[:1].upper() + cleaned[1:] if cleaned else filename
+
+
+def cmd_resolve_figures(args: argparse.Namespace) -> int:
+    """Join figures_manifest.tsv with figures_inventory.md; emit TSV.
+
+    Output to stdout: header row + one row per selected figure:
+
+        paper_order_n\tfilename\tcaption
+
+    Captions sourced from inventory's caption-candidate ranking
+    (REPORT-derived first, notebook second, filename third). Fallback to
+    filename-derived caption when the inventory has no entry for the
+    manifest's `inventory_lookup_name`.
+
+    Banned-tab and banned-newline discipline applied to captions: tabs
+    become spaces (with stderr WARN), newlines become spaces (with
+    stderr WARN). Both would break the TSV row contract for the consumer
+    (phase_embed_figures).
+
+    Returns 0 always; this is an advisory/lookup helper, not a validator.
+    Missing manifest is a NOTE, not an error.
+    """
+    draft_dir = Path(args.draft_dir).expanduser().resolve()
+    manifest_path = draft_dir / "figures_manifest.tsv"
+    inventory_path = draft_dir / "figures_inventory.md"
+
+    rows = _parse_figures_manifest(manifest_path)
+    if not rows:
+        sys.stderr.write(
+            f"NOTE: no figures to resolve (manifest empty or missing): {manifest_path}\n"
+        )
+        # Emit header only so consumers can parse a (possibly empty) TSV.
+        print("paper_order_n\tfilename\tcaption")
+        return 0
+
+    captions = _parse_figures_inventory_captions(inventory_path)
+    if not captions:
+        sys.stderr.write(
+            f"WARN: figures_inventory.md missing or empty: {inventory_path}; "
+            "will emit filename-derived captions for all rows.\n"
+        )
+
+    print("paper_order_n\tfilename\tcaption")
+    for row in rows:
+        n = row["paper_order_n"]
+        filename = row["filename"]
+        inv_name = row["inventory_lookup_name"]
+        caption = captions.get(inv_name)
+        if caption is None:
+            caption = _filename_to_caption(inv_name)
+            sys.stderr.write(
+                f"WARN: inventory has no entry for {inv_name!r} "
+                f"(paper_order_n={n}); using filename-derived caption: {caption!r}\n"
+            )
+        if "\t" in caption:
+            sys.stderr.write(
+                f"WARN: caption for paper_order_n={n} contains tab; replacing with space\n"
+            )
+            caption = caption.replace("\t", " ")
+        if "\n" in caption:
+            sys.stderr.write(
+                f"WARN: caption for paper_order_n={n} contains newline; replacing with space\n"
+            )
+            caption = caption.replace("\n", " ")
+        print(f"{n}\t{filename}\t{caption}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Tier 2.2 — phase_embed_figures helpers
+# ---------------------------------------------------------------------------
+
+# (Fig. N) callout regex. Matches inside or outside parens (so multi-figure
+# callouts like "(Fig. 3 and Fig. 5)" surface both Ns). Optional panel
+# suffix [A-Z]. Word-boundary anchored to avoid matching in
+# `figureN_something.png`-style filenames.
+_FIG_CALLOUT_RE = re.compile(r"\bFig\.\s*(\d+)[A-Z]?\b")
+
+# Match an already-embedded figure tag for paper_order_n=N. Used for
+# idempotency — re-running phase_embed_figures must not double-inject.
+_EMBEDDED_FIGURE_RE = re.compile(
+    r"!\[Figure\s+(\d+)\s*:.*?\]\(figures/[^)]+\)"
+)
+
+
+def _find_sentence_end_after(text: str, start: int) -> int:
+    """Find the position immediately after the next sentence-ending
+    `.!?` at or after `start`.
+
+    Skips over `.` characters that are clearly not sentence terminators:
+      - `.` inside `Fig. <digit>` patterns (next non-space is a digit).
+      - `.` followed by lowercase (abbreviations like `e.g.`, `et al.`).
+      - `.` followed by closing brackets/quotes; the actual terminator
+        is found after the bracket.
+
+    Heuristic: a `.` (or `!` `?`) is treated as a sentence end when the
+    next non-whitespace, non-bracket character is uppercase, OR when
+    the punctuation is followed by a newline / end-of-string.
+
+    Returns `len(text)` if no sentence end is found before EOF.
+    """
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ".!?":
+            j = i + 1
+            # Skip past closing brackets / quotes that may follow the
+            # sentence-ending punctuation (e.g. `(Fig. 3).` form).
+            while j < n and text[j] in ")]}\"'":
+                j += 1
+            # End-of-string or newline → sentence end.
+            if j >= n:
+                return j
+            if text[j] == "\n":
+                return j
+            if text[j].isspace():
+                # Look past whitespace to the next non-space character.
+                k = j
+                while k < n and text[k].isspace():
+                    k += 1
+                if k >= n:
+                    return j
+                # Sentence end iff next non-space char is uppercase.
+                # Excludes `Fig. 5` (digit) and `e.g.` (lowercase).
+                if text[k].isupper():
+                    return j
+        i += 1
+    return n
+
+
+def _build_figure_map(draft_dir: Path) -> tuple[dict[int, tuple[str, str]], list[str]]:
+    """Build paper_order_n → (filename, caption) from manifest + inventory.
+
+    Reuses `_parse_figures_manifest` and `_parse_figures_inventory_captions`
+    (defined for `cmd_resolve_figures` above). Banned-tab and banned-newline
+    discipline applied to caption text.
+
+    Returns (figure_map, warnings). Warnings is a list of stderr-style
+    strings the caller emits.
+    """
+    warnings: list[str] = []
+    manifest_path = draft_dir / "figures_manifest.tsv"
+    inventory_path = draft_dir / "figures_inventory.md"
+
+    rows = _parse_figures_manifest(manifest_path)
+    if not rows:
+        return {}, [f"NOTE: figures_manifest.tsv missing or empty: {manifest_path}"]
+
+    captions = _parse_figures_inventory_captions(inventory_path)
+    if not captions:
+        warnings.append(
+            f"WARN: figures_inventory.md missing or empty: {inventory_path}; "
+            "using filename-derived captions for all rows"
+        )
+
+    figure_map: dict[int, tuple[str, str]] = {}
+    for row in rows:
+        n = row["paper_order_n"]
+        filename = row["filename"]
+        inv_name = row["inventory_lookup_name"]
+        caption = captions.get(inv_name)
+        if caption is None:
+            caption = _filename_to_caption(inv_name)
+            warnings.append(
+                f"WARN: inventory has no entry for {inv_name!r} (paper_order_n={n}); "
+                f"using filename-derived caption: {caption!r}"
+            )
+        # Banned-tab / banned-newline discipline.
+        if "\t" in caption:
+            caption = caption.replace("\t", " ")
+        if "\n" in caption:
+            caption = caption.replace("\n", " ")
+        # Banned closing-bracket: caption ends up inside `![alt](path)` —
+        # a `]` in the caption breaks the markdown image-tag parser. Rare
+        # in REPORT-derived captions but surface it defensively.
+        if "]" in caption:
+            warnings.append(
+                f"WARN: caption for paper_order_n={n} contains ']'; "
+                "replacing with ')' to keep the markdown image tag parseable"
+            )
+            caption = caption.replace("]", ")")
+        figure_map[n] = (filename, caption)
+    return figure_map, warnings
+
+
+def _embed_figures_in_text(
+    text: str,
+    figure_map: dict[int, tuple[str, str]],
+) -> tuple[str, dict[int, str], list[int]]:
+    """Inject `![Figure N: caption](figures/<filename>)` after each first
+    `(Fig. N)` callout in `text`.
+
+    Idempotent: if `text` already contains an embedded figure tag for N,
+    that N is not re-injected.
+
+    Multi-figure sentences: when multiple distinct Ns occur in the same
+    sentence (e.g. "(Fig. 3 and Fig. 5)"), all are injected after the
+    sentence in N-ascending order.
+
+    Returns (new_text, injected_by_n, skipped_callout_ns) where
+      - injected_by_n: {N: section_filename}-ish placeholder; here just
+        a record dict mapping N → injection-position (caller doesn't use
+        these but they aid debugging in tests).
+      - skipped_callout_ns: callouts whose N has no manifest entry.
+    """
+    # Idempotency: collect Ns already embedded.
+    already_embedded = {int(m.group(1)) for m in _EMBEDDED_FIGURE_RE.finditer(text)}
+
+    # First-occurrence per N.
+    first_match_per_n: dict[int, "re.Match[str]"] = {}
+    for m in _FIG_CALLOUT_RE.finditer(text):
+        n = int(m.group(1))
+        if n not in first_match_per_n:
+            first_match_per_n[n] = m
+
+    skipped: list[int] = []
+    injection_points: dict[int, list[int]] = {}  # sentence_end_pos → [N, ...]
+    for n, match in first_match_per_n.items():
+        if n in already_embedded:
+            continue
+        if n not in figure_map:
+            skipped.append(n)
+            continue
+        sentence_end = _find_sentence_end_after(text, match.end())
+        injection_points.setdefault(sentence_end, []).append(n)
+
+    # Sort each group ascending by N for stable multi-figure order.
+    for pos in injection_points:
+        injection_points[pos].sort()
+
+    # Apply injections in reverse position order so earlier positions
+    # don't shift as later ones are inserted.
+    new_text = text
+    injected_by_n: dict[int, str] = {}
+    for pos in sorted(injection_points.keys(), reverse=True):
+        ns = injection_points[pos]
+        chunks: list[str] = []
+        for n in ns:
+            filename, caption = figure_map[n]
+            chunks.append(
+                f"\n\n![Figure {n}: {caption}](figures/{filename})"
+            )
+            injected_by_n[n] = filename
+        chunks.append("\n\n")
+        inject = "".join(chunks)
+        new_text = new_text[:pos] + inject + new_text[pos:]
+
+    return new_text, injected_by_n, sorted(skipped)
+
+
+def cmd_embed_figures(args: argparse.Namespace) -> int:
+    """Walk section files for `(Fig. N)` callouts; inject markdown image
+    tags after the first occurrence of each N's containing sentence.
+
+    Reads `<draft_dir>/figures_manifest.tsv` + `figures_inventory.md`,
+    builds paper_order_n → (filename, caption), then walks
+    `02_results.md`, `01_methods.md`, `03_discussion.md` for callouts
+    and injects `![Figure N: caption](figures/<filename>)` after each
+    sentence containing the first occurrence of `(Fig. N)`.
+
+    Idempotent: re-running does not double-inject.
+
+    Multi-figure callouts ("(Fig. 3 and Fig. 5)") inject both tags
+    after the same sentence in N-ascending order.
+
+    Returns 0 always; missing manifest is a NOTE, not an error
+    (consistent with v0.1+ pump-through philosophy: figureless drafts
+    are valid output).
+
+    Stdout: one-line summary: `embedded: K total across N section(s)`.
+    Stderr: per-section embed counts + any WARNs.
+    """
+    draft_dir = Path(args.draft_dir).expanduser().resolve()
+    if not draft_dir.is_dir():
+        sys.stderr.write(f"WARN: draft_dir does not exist: {draft_dir}\n")
+        print("embedded: 0")
+        return 0
+
+    figure_map, warnings = _build_figure_map(draft_dir)
+    for w in warnings:
+        sys.stderr.write(f"{w}\n")
+
+    if not figure_map:
+        print("embedded: 0 (no manifest)")
+        return 0
+
+    section_files = ("02_results.md", "01_methods.md", "03_discussion.md")
+    total_embedded = 0
+    sections_touched = 0
+    all_skipped: dict[str, list[int]] = {}
+
+    for section_name in section_files:
+        section_path = draft_dir / section_name
+        if not section_path.is_file():
+            continue
+        text = section_path.read_text(encoding="utf-8")
+
+        new_text, injected_by_n, skipped = _embed_figures_in_text(text, figure_map)
+
+        if skipped:
+            all_skipped[section_name] = skipped
+
+        if new_text == text:
+            sys.stderr.write(f"  {section_name}: no embeds (idempotent skip or no callouts)\n")
+            continue
+
+        section_path.write_text(new_text, encoding="utf-8")
+        n_inj = len(injected_by_n)
+        total_embedded += n_inj
+        sections_touched += 1
+        sys.stderr.write(
+            f"  {section_name}: embedded {n_inj} figure(s): "
+            f"{sorted(injected_by_n.keys())}\n"
+        )
+
+    if all_skipped:
+        for sec, ns in all_skipped.items():
+            sys.stderr.write(
+                f"WARN: {sec} cites (Fig. {ns}) but manifest has no rows for "
+                f"these Ns; phase_check_figures_manifest will surface this\n"
+            )
+
+    print(
+        f"embedded: {total_embedded} total across {sections_touched} section(s)"
+    )
+    return 0
+
+
 def cmd_extract_data_availability(args: argparse.Namespace) -> int:
     """Read methods_provenance.md + RESEARCH_PLAN.md + REPORT.md from the
     project; emit three template-fill blocks (kberdl_databases_block,
@@ -1818,6 +2295,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p_cu.add_argument("draft_dir")
     p_cu.set_defaults(func=cmd_cumulative_cost)
+
+    # resolve-figures (v0.3 Tier 2.1c) — join figures_manifest.tsv with
+    # figures_inventory.md; emit a TSV of (paper_order_n, filename,
+    # caption) for phase_embed_figures to consume.
+    p_rf = sub.add_parser(
+        "resolve-figures",
+        help="Join figures_manifest.tsv with figures_inventory.md; "
+             "emit TSV of (paper_order_n, filename, caption) to stdout.",
+    )
+    p_rf.add_argument("draft_dir")
+    p_rf.set_defaults(func=cmd_resolve_figures)
+
+    # embed-figures (v0.3 Tier 2.2) — walk section files for (Fig. N)
+    # callouts; inject markdown image tags after the first occurrence
+    # of each N's containing sentence. Idempotent.
+    p_ef = sub.add_parser(
+        "embed-figures",
+        help="Inject ![Figure N: caption](figures/<filename>) markdown "
+             "image tags into section files after each first (Fig. N) "
+             "callout's sentence. Idempotent.",
+    )
+    p_ef.add_argument("draft_dir")
+    p_ef.set_defaults(func=cmd_embed_figures)
 
     args = p.parse_args(argv)
     return args.func(args)

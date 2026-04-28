@@ -869,6 +869,22 @@ phase_results() {
         return 0
     fi
 
+    # v0.3 Tier 2.2 — stale-file cleanup. Drafting-mode entry only (we're
+    # not in REPAIR_MODE here; that's a separate dispatch path). Removes
+    # any pre-existing fig*.png paper-order files left over from a prior
+    # rewrite-loop run; results.v1 will re-copy fresh files based on its
+    # current selection. Documented in DECISIONS.md (D-NN-figure-cleanup).
+    if [[ -d "$draft_dir/figures" ]]; then
+        local stale_count
+        stale_count=$(find "$draft_dir/figures" -maxdepth 1 -type f -name 'fig*.png' 2>/dev/null | wc -l)
+        if [[ "$stale_count" -gt 0 ]]; then
+            log_step "Removing $stale_count stale paper-order figure(s) from $draft_dir/figures/"
+            rm -f "$draft_dir/figures/"fig*.png
+        fi
+    else
+        mkdir -p "$draft_dir/figures"
+    fi
+
     local figures_inventory="$draft_dir/figures_inventory.md"
     [[ ! -f "$figures_inventory" ]] && figures_inventory=""
 
@@ -1327,6 +1343,75 @@ phase_check_overclaim() {
     fi
 
     log_ok "check_overclaim phase complete"
+}
+
+# ==============================================================================
+# Phase: check_figures_manifest — figures_manifest.tsv cross-walk (advisory)
+# ==============================================================================
+#
+# v0.3 Tier 2.1b. Sits before assemble (and, when 2.2 lands, before
+# phase_embed_figures). Mirrors the post-processor architectural pattern.
+# Validates the figures_manifest.tsv contract from the artifact side:
+# schema, filesystem agreement, and (Fig. N) callout cross-walk.
+# Always exits 0; warnings surface in next_actions.md.
+
+phase_check_figures_manifest() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_figures_manifest (advisory cross-walk)"
+
+    local fig_warnings_file="$draft_dir/audit/figures_manifest_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_figures_manifest.py" "$draft_dir" \
+        2> "$fig_warnings_file" || true
+
+    if grep -q "^\[check_figures_manifest\] WARN" "$fig_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "^\[check_figures_manifest\] WARN" "$fig_warnings_file")
+        log_warn "Figures-manifest cross-walk: $n_warn warning(s) (will surface in next_actions.md):"
+        grep "^\[check_figures_manifest\] WARN" "$fig_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $fig_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_figures_manifest phase complete"
+}
+
+# ==============================================================================
+# Phase: embed_figures — inject ![Figure N: caption](path) tags after callouts
+# ==============================================================================
+#
+# v0.3 Tier 2.2. Runs after phase_check_figures_manifest (which validates
+# the manifest contract from results.v1) and before phase_assemble. Walks
+# 02_results.md / 01_methods.md / 03_discussion.md for (Fig. N) callouts;
+# for each first-occurrence per N, injects an markdown image tag of the
+# form `![Figure N: <caption>](figures/<filename>)` after the sentence
+# containing the callout. Idempotent (re-running does not double-inject);
+# safe to invoke from rewrite-loop re-assembly paths.
+
+phase_embed_figures() {
+    local draft_dir="$1"
+
+    log_phase "Phase: embed_figures (inject markdown image tags)"
+
+    local embed_log="$draft_dir/audit/embed_figures.log"
+    "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" embed-figures "$draft_dir" \
+        > "$embed_log" 2>&1 || true
+
+    # Surface the stdout summary line + count any WARNs.
+    if [[ -f "$embed_log" ]]; then
+        local summary
+        summary=$(grep -E '^embedded: ' "$embed_log" | tail -1)
+        [[ -n "$summary" ]] && log_step "$summary"
+        local n_warn
+        n_warn=$(grep -c '^WARN:' "$embed_log" || true)
+        if [[ "$n_warn" -gt 0 ]]; then
+            log_warn "embed_figures emitted $n_warn WARN(s) (see $embed_log):"
+            grep '^WARN:' "$embed_log" | head -3 | sed 's/^/  /' >&2
+        fi
+    fi
+
+    log_ok "embed_figures phase complete"
 }
 
 # ==============================================================================
@@ -1841,7 +1926,13 @@ for k in d.get('findings_by_section', {}).keys():
         done <<< "$sections"
 
         # Re-assemble manuscript + re-run validators (rewrite changed sections).
-        log_step "Pass $pass_num: re-assembling manuscript after rewrites"
+        # phase_embed_figures is idempotent — re-running after a rewrite-loop
+        # rewrite of 02_results.md / 01_methods.md / 03_discussion.md
+        # ensures any new (Fig. N) callouts get embedded; figures already
+        # embedded are not double-injected (per _EMBEDDED_FIGURE_RE check).
+        log_step "Pass $pass_num: re-embedding figures + re-assembling manuscript"
+        phase_embed_figures "$draft_dir" || \
+            log_warn "Pass $pass_num re-embed failed; continuing"
         phase_assemble "$draft_dir" || \
             log_warn "Pass $pass_num re-assemble failed; continuing"
 
@@ -2245,6 +2336,8 @@ main() {
                         || halt_with "$draft_dir" "data_availability template fill failed (orchestrator-side, no LLM); inspect tools/paper_writer_helpers.py"
                     phase_finalize_citations "$draft_dir" \
                         || halt_with "$draft_dir" "finalize_citations failed; inspect audit/finalize_citations.log"
+                    phase_check_figures_manifest "$draft_dir"
+                    phase_embed_figures "$draft_dir"
                     phase_check_scope_coherence "$draft_dir"
                     phase_check_overclaim "$draft_dir"
                     phase_assemble      "$draft_dir" \
