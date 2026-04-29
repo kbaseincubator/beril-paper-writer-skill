@@ -805,6 +805,57 @@ class TestSufficiencyGate:
         assert "Heading" not in stripped
         assert "Real prose here" in stripped
 
+    def test_v0_5_gate_fails_boilerplate_heavy_prose(self, helpers):
+        """v0.5 sufficiency-gate change: switch from _strip_heading_lines
+        to _strip_prose_for_inline. Boilerplate-heavy prose that v0.4
+        let through the gate (because heading-strip alone left the
+        keyword content intact) now correctly fails the gate."""
+        # Real example pattern from functional_dark_matter fig 8:
+        # 50+ words of pure keyword-tagged boilerplate.
+        descriptor = {
+            "title": "Domain matching analysis",
+            "axes_labels": ["X", "Y"],
+            "notebook_prose": (
+                "**Purpose:** Address 2 critical and 4 important "
+                "suggestions from automated review.\n\n"
+                "**Approach:** Single supplementary notebook using "
+                "pandas/scipy only (no Spark). All inputs are saved.\n\n"
+                "**Sections:**\n"
+                "1. Gene-to-Gap Enzymatic Matching (Critical Issue 1)\n"
+                "2. Domain Coverage Analysis (Critical Issue 2)"
+            ),
+        }
+        # v0.4 behavior would have PASSED this (heading-strip leaves
+        # keyword content; word count >> 30). v0.5 must FAIL.
+        assert not helpers._passes_sufficiency_gate(descriptor)
+
+    def test_v0_5_max_words_formula(self, helpers):
+        """v0.5: caption word budget scales with panel count."""
+        assert helpers._caption_max_words(0) == 200   # single-panel
+        assert helpers._caption_max_words(1) == 250
+        assert helpers._caption_max_words(2) == 300
+        assert helpers._caption_max_words(3) == 350
+        assert helpers._caption_max_words(4) == 400   # like fig 8
+        assert helpers._caption_max_words(6) == 500   # complex multi-panel
+        # Negative or zero → defaults to 200 (no negative scaling)
+        assert helpers._caption_max_words(-1) == 200
+
+    def test_v0_5_gate_passes_substantive_prose(self, helpers):
+        """v0.5 sufficiency-gate: real descriptive prose with no
+        boilerplate keywords still passes the gate."""
+        descriptor = {
+            "title": "Growth curves of PA14",
+            "axes_labels": ["Time (h)", "OD600"],
+            "notebook_prose": (
+                "We measured growth in 96-well plates across 47 carbon "
+                "sources. Cultures were inoculated at OD600 0.05 from "
+                "overnight starters; growth was tracked by absorbance "
+                "every 15 minutes for 24 hours. Three biological "
+                "replicates per condition; bars indicate standard error."
+            ),
+        }
+        assert helpers._passes_sufficiency_gate(descriptor)
+
 
 class TestBuildCaptionBundles:
     def _build_draft(self, tmp_path, *,
@@ -833,12 +884,20 @@ class TestBuildCaptionBundles:
             cap = captions.get(inv_name, inv_name)
             body += "**Caption candidates:**\n\n"
             body += f"- **filename**: {cap}\n\n"
-            if desc.get("title") or desc.get("notebook_prose"):
+            if (desc.get("title") or desc.get("notebook_prose")
+                    or desc.get("panels")):
                 body += "**Description:**\n\n"
                 if desc.get("title"):
                     body += f"- _Title:_ {desc['title']}\n"
                 if desc.get("axes_labels"):
                     body += f"- _Axes:_ {'; '.join(desc['axes_labels'])}\n"
+                if desc.get("panels"):
+                    panel_summary = "; ".join(
+                        f"({p['letter']})"
+                        + (f" {p['title']}" if p.get("title") else "")
+                        for p in desc["panels"]
+                    )
+                    body += f"- _Panels:_ {panel_summary}\n"
                 body += "\n"
                 if desc.get("notebook_prose"):
                     body += "_Notebook prose:_\n\n"
@@ -882,6 +941,44 @@ class TestBuildCaptionBundles:
         )
         assert len(meta["captions"]) == 2
         assert all(e["source_chosen"] == "deterministic" for e in meta["captions"])
+
+    def test_v0_5_bundle_max_words_scales_with_panels(self, helpers, tmp_path, capsys):
+        """v0.5: bundle's max_words field scales by descriptor.panels count.
+        Multi-panel figures get a larger LLM word budget."""
+        # Build a draft with two figures: one single-panel, one 4-panel.
+        proj, draft = self._build_draft(tmp_path,
+            descriptors={
+                "single.png": {"title": "Single panel", "axes_labels": ["X"]},
+                "multi.png": {
+                    "title": "Multi-panel",
+                    "axes_labels": ["X"],
+                    # No notebook_prose (so they fail gate → bundles built)
+                    "panels": [
+                        {"letter": "A", "title": "Panel A"},
+                        {"letter": "B", "title": "Panel B"},
+                        {"letter": "C", "title": "Panel C"},
+                        {"letter": "D", "title": "Panel D"},
+                    ],
+                },
+            },
+            captions={"single.png": "Single", "multi.png": "Multi"},
+            manifest_rows=[(1, "fig01.png", "single.png"),
+                           (2, "fig02.png", "multi.png")],
+        )
+        bdir = draft / "audit" / "caption_bundles"
+        class A:
+            draft_dir = str(draft)
+            project_root = str(proj)
+            bundles_dir = str(bdir)
+            max_words = None  # Use formula
+        rc = helpers.cmd_build_caption_bundles(A())
+        assert rc == 0
+        # Single-panel bundle has max_words=200 (no panels → default)
+        single = json.loads((bdir / "figure_1.bundle.json").read_text())
+        assert single["max_words"] == 200
+        # 4-panel bundle has max_words=400 (formula: 200 + 50*4)
+        multi = json.loads((bdir / "figure_2.bundle.json").read_text())
+        assert multi["max_words"] == 400
 
     def test_one_fails_gate_emits_one_id(self, helpers, tmp_path, capsys):
         long_prose = " ".join(["word"] * 50)

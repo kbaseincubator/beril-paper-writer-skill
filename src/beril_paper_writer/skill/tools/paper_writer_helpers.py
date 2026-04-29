@@ -2651,16 +2651,49 @@ def _word_count(text: str) -> int:
 _SUFFICIENCY_PROSE_MIN_WORDS = 30
 
 
+def _caption_max_words(panel_count: int) -> int:
+    """Per-figure ICMJE-conventional caption word budget; scales with
+    panel count.
+
+    v0.5 addition. Single-panel figures get 200 words (the v0.4 default).
+    Multi-panel figures get 200 + 50*N where N = number of panels —
+    e.g., 250 for 1-panel, 300 for 2-panel, 400 for 4-panel, 500 for
+    6-panel. Without this scaling, the v0.4 universal 200-word cap
+    truncated 4-panel figures (like fig 8 in functional_dark_matter
+    draft_3) mid-word, making panels B/C/D undescribed.
+
+    Negative or zero panel_count → 200 (single-panel default).
+    """
+    if panel_count <= 0:
+        return 200
+    return 200 + 50 * panel_count
+
+
 def _passes_sufficiency_gate(descriptor: dict) -> bool:
-    """Phase 4c sufficiency-gate (revised after Phase 1a empirical data).
+    """Sufficiency-gate v0.5 (revised after Phase 5b visual-review feedback).
 
     A descriptor PASSES (no Source 4 invocation needed) iff BOTH:
-      a) `word_count(strip_heading_lines(notebook_prose)) >= 30`, AND
+      a) `word_count(_strip_prose_for_inline(notebook_prose)) >= 30`, AND
       b) descriptor.title is non-None OR descriptor.axes_labels is non-empty.
 
     Equivalently, FAILS (Source 4 needed) iff EITHER:
-      a) prose is too sparse (<30 words after stripping headings), OR
+      a) prose is too sparse OR boilerplate-dense (<30 real words after
+         the aggressive boilerplate strip), OR
       b) AST yielded no title AND no axes labels.
+
+    Why this changed in v0.5: the v0.4 gate used `_strip_heading_lines`
+    which only dropped `#`-prefixed lines. Boilerplate-heavy notebook
+    prose (Purpose:/Approach:/Sections:/etc.) passed the gate but
+    produced poor captions in the docx because the deterministic
+    description-assembly path ran on prose that was 80% boilerplate.
+
+    `_strip_prose_for_inline` is the more aggressive strip already used
+    at description-render time — keyword headers (both `**X:**` and
+    `**X**:` bold idioms), inline-cascade keywords, numbered lists,
+    project-internal artifact references, and bold-Bold:Bold patterns
+    all get dropped. Using it as the gate predicate ensures figures
+    whose prose is mostly boilerplate route to the LLM (which has
+    explicit anti-pattern discipline against the same boilerplate).
 
     Returns True iff the descriptor is sufficient. Empty descriptor →
     False (insufficient).
@@ -2668,7 +2701,7 @@ def _passes_sufficiency_gate(descriptor: dict) -> bool:
     if not isinstance(descriptor, dict) or not descriptor:
         return False
     prose = descriptor.get("notebook_prose") or ""
-    stripped = _strip_heading_lines(prose)
+    stripped = _strip_prose_for_inline(prose)
     if _word_count(stripped) < _SUFFICIENCY_PROSE_MIN_WORDS:
         return False
     title = descriptor.get("title")
@@ -2796,7 +2829,14 @@ def cmd_build_caption_bundles(args: argparse.Namespace) -> int:
 
     metadata_entries: list[dict] = []
     figure_ids_for_llm: list[int] = []
-    max_words = int(getattr(args, "max_words", None) or 200)
+    # v0.5: max_words now scales by panel_count per
+    # `_caption_max_words` (200 for single-panel, +50 per panel for
+    # multi-panel). The --max-words CLI override is preserved as a
+    # ceiling-override for testing but defaults to None so the formula
+    # prevails. Multi-panel figures need more word budget to describe
+    # each panel without truncating mid-word; ICMJE convention allows
+    # 300-400 words for complex multi-panel legends.
+    max_words_override = getattr(args, "max_words", None)
 
     for row in rows:
         n = row["paper_order_n"]
@@ -2811,7 +2851,7 @@ def cmd_build_caption_bundles(args: argparse.Namespace) -> int:
                 "filename": filename,
                 "inventory_lookup_name": inv_name,
                 "source_chosen": "deterministic",
-                "reason": "Sources 2+3 sufficient (notebook prose ≥30 words AND title-or-axes populated)",
+                "reason": "Sources 2+3 sufficient (notebook prose ≥30 real words AND title-or-axes populated)",
             })
             continue
 
@@ -2823,6 +2863,16 @@ def cmd_build_caption_bundles(args: argparse.Namespace) -> int:
         results_section_prose = _extract_results_section_prose_for_figure(
             results_text, n,
         )
+
+        # v0.5: compute panel-count-scaled word budget. Use AST-detected
+        # panels (descriptor.panels) since that's the deterministic
+        # signal; if AST missed and only prose panels exist, those
+        # surface in prose_panel_callouts but we don't double-count.
+        panel_count = len(descriptor.get("panels") or [])
+        if max_words_override is not None:
+            max_words = int(max_words_override)
+        else:
+            max_words = _caption_max_words(panel_count)
 
         bundle = {
             "figure_id": n,
