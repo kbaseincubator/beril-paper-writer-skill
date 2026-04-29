@@ -125,11 +125,25 @@ def parse_manifest(manifest_path: Path) -> tuple[list[dict], list[str]]:
                 f"integer: {cells[0]!r}; skipping"
             )
             continue
+        # v0.4 retest finding: results.v1 occasionally emits filenames
+        # with `figures/` directory prefix instead of basename. WARN to
+        # surface the LLM drift; downstream parser auto-normalizes via
+        # Path().name (paper_writer_helpers._parse_figures_manifest).
+        raw_filename = cells[1].strip()
+        raw_inv_name = cells[2].strip()
+        if "/" in raw_filename or "/" in raw_inv_name:
+            warnings.append(
+                f"figures_manifest.tsv line {lineno}: filename or "
+                f"inventory_lookup_name contains a directory separator "
+                f"({raw_filename!r}, {raw_inv_name!r}); schema specifies "
+                f"basename-only. Downstream parser auto-normalizes; consider "
+                f"tightening results.v1.md if this recurs."
+            )
         rows.append({
             "lineno": lineno,
             "paper_order_n": n,
-            "filename": cells[1].strip(),
-            "inventory_lookup_name": cells[2].strip(),
+            "filename": raw_filename,
+            "inventory_lookup_name": raw_inv_name,
         })
     return rows, warnings
 

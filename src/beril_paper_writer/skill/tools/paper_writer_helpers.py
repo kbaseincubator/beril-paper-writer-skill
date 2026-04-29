@@ -1676,10 +1676,18 @@ def _parse_figures_manifest(manifest_path: Path) -> list[dict]:
                 f"WARN: figures_manifest.tsv line {lineno}: paper_order_n not an integer: {cells[0]!r}; skipping\n"
             )
             continue
+        # v0.4 retest finding (2026-04-28): results.v1 occasionally
+        # emits inventory_lookup_name and filename with a `figures/`
+        # directory prefix instead of the basename-only form the schema
+        # specifies. All downstream lookups (descriptors, captions,
+        # embed) are keyed by basename, so the prefix breaks every
+        # lookup silently — degrading to filename-derived captions and
+        # empty descriptors. Fix: defensive Path().name normalization
+        # at parse time. Idempotent on already-clean basenames.
         rows.append({
             "paper_order_n": n,
-            "filename": cells[1].strip(),
-            "inventory_lookup_name": cells[2].strip(),
+            "filename": Path(cells[1].strip()).name,
+            "inventory_lookup_name": Path(cells[2].strip()).name,
         })
     return rows
 
@@ -2060,9 +2068,49 @@ def _ensure_period(s: str) -> str:
     return s + "."
 
 
+_BOILERPLATE_KEYWORD_ALT = (
+    r"Purpose|Approach|Strategy|Sections?|Steps?|Method|Methods|"
+    r"Inputs?|Outputs?|Notes?|Test|Tests|Goal|Objective|Pipeline|"
+    r"Workflow|Implementation|Setup|Background|Rationale|Dependencies"
+)
+_NOTEBOOK_BOILERPLATE_KEYWORDS_RE = re.compile(
+    # Trailing `\s*` (not `\s+`) so a standalone keyword line like
+    # `Sections:` (with the content on the NEXT line) also matches.
+    # Caught in v0.4 Phase 5b re-render review on figure 8.
+    rf"^(?:{_BOILERPLATE_KEYWORD_ALT}):\s*$|"
+    # Inline keyword: same set, requires content after the colon.
+    rf"^(?:{_BOILERPLATE_KEYWORD_ALT}):\s+\S",
+)
+# v0.4 Phase 5b refinement #3: inline keyword-cascade stripping. The
+# line-prefix filter catches keyword-on-its-own-line cases; this regex
+# handles the inline cascade ("Sentence A. Purpose: stuff. Approach:
+# stuff. Sentence B.") that escapes the line-prefix filter when prose
+# is flattened to a single paragraph. Caught in v0.4 Phase 5b second
+# re-render: figure 8 had "Description... Purpose: Address... Approach:
+# Single supplementary..." inline; my regex required keyword at line
+# start. This regex strips "Keyword: stuff." substrings anywhere in
+# the prose, taking content up to the next sentence terminator.
+_INLINE_BOILERPLATE_CASCADE_RE = re.compile(
+    rf"(?<=[.!?])\s+(?:{_BOILERPLATE_KEYWORD_ALT}):\s+[^.!?]*[.!?]+",
+    flags=0,
+)
+# Project-internal artifact references (file names, notebook ids).
+# Matched with word boundaries so "REPORT" inside a sentence isn't
+# stripped — only the suffix `.md` form. NB\d+ + nb\d+ catch both
+# casings; lowercase variant requires a digit immediately after to
+# avoid stripping random "nb" character pairs. Optional possessive
+# `'s` consumed too — without this, `NB07's gene` becomes `'s gene`,
+# an orphaned possessive caught in v0.4 Phase 5b re-render review.
+_PROJECT_INTERNAL_ARTIFACTS_RE = re.compile(
+    r"\b(?:REVIEW\.md|REPORT\.md|RESEARCH_PLAN\.md|"
+    r"NB\d+[a-z]?|nb\d+[a-z]?)(?:[’']s)?\b",
+)
+
+
 def _strip_prose_for_inline(prose: str) -> str:
     """Reduce a multi-line markdown blockquote-prose (potentially
-    containing headings, bullets, tables) to a single-line snippet
+    containing headings, bullets, tables, notebook-organization
+    keywords, project-internal references) to a single-line snippet
     suitable for inline italic rendering.
 
     - Drop lines beginning with `#` (section headings — already captured
@@ -2071,12 +2119,55 @@ def _strip_prose_for_inline(prose: str) -> str:
     - Drop lines beginning with `-` or `*` IF they look like list bullets
       (common pattern: bullet lists in notebook prose that don't render
       meaningfully when flattened to one line).
+    - **v0.4 Phase 5b:** drop lines beginning with notebook-organization
+      keyword headers (`Purpose:`, `Approach:`, `Sections:`, `Steps:`,
+      `Method:`, etc.) — these are project-internal documentation, not
+      figure content. Discovered when fig08/9/10 descriptions hallucinated
+      "Purpose: Address 2 critical and 4 important suggestions from
+      automated review (REVIEW.md). Approach: Single supplementary
+      notebook using pandas/scipy only..." consuming the LLM word budget
+      and crowding out actual panel descriptions.
+    - **v0.4 Phase 5b:** strip inline references to project-internal
+      artifacts (`REVIEW.md`, `REPORT.md`, `RESEARCH_PLAN.md`,
+      `NB\\d+`, `nb\\d+`). The figure caption is for the manuscript
+      reader, not the notebook author.
     - Collapse remaining content to single line; strip leading
-      `**Bold:**` style labels (notebook authors often use these as
-      section markers within prose).
+      `**Bold:**` style labels.
     - Cap at 300 chars (the prose snippet is supplementary, not the
       whole description).
     """
+    # Pre-process: strip `**Bold:**` markers BEFORE the line-prefix
+    # boilerplate filter, so `**Goal:** Test ...` becomes `Goal: Test ...`
+    # which the line filter then drops. Without this pre-pass, bold-
+    # formatted notebook keywords slip through.
+    # Markdown allows TWO idiomatic forms with the same visual rendering:
+    #   `**Goal:**` (colon inside the bold delimiters)
+    #   `**Goal**:` (colon outside; more common in observed prose)
+    # Both must be normalized. Caught in v0.4 Phase 5b third re-render:
+    # figure 7's actual notebook_prose used the colon-outside form,
+    # which my single-form regex missed.
+    prose = re.sub(r"\*\*([^*]+?):\*\*", r"\1:", prose)   # **X:**
+    prose = re.sub(r"\*\*([^*]+?)\*\*\s*:", r"\1:", prose)  # **X**:
+    # Pre-process: strip project-internal artifacts globally BEFORE
+    # the inline-cascade. Otherwise `REVIEW.md` inside keyword content
+    # provides a spurious `.` that the cascade's sentence-boundary
+    # anchor matches against, leaving a `.md)` residue. Caught in
+    # v0.4 Phase 5b second re-render: fig 8 emitted "Domain matching
+    # analysis.md). All inputs are saved..." after cascade.
+    prose = _PROJECT_INTERNAL_ARTIFACTS_RE.sub("", prose)
+    prose = re.sub(r"  +", " ", prose)
+    # Inline-cascade strip: catches "Sentence A. Keyword: content.
+    # Keyword2: content. Sentence B." patterns that flatten across
+    # paragraphs and escape the per-line filter. Applied iteratively
+    # until no more matches (each pass strips one keyword chunk; cascades
+    # need multiple passes since the regex anchors on the preceding
+    # `.!?` and only consumes one chunk per match).
+    while True:
+        new_prose = _INLINE_BOILERPLATE_CASCADE_RE.sub("", prose)
+        if new_prose == prose:
+            break
+        prose = new_prose
+
     lines = []
     for line in prose.split("\n"):
         s = line.strip()
@@ -2084,11 +2175,22 @@ def _strip_prose_for_inline(prose: str) -> str:
             continue
         if s.startswith("#") or s.startswith("|"):
             continue
-        if re.match(r"^[-*]\s", s):
+        # Drop bullet-list items (`- foo`, `* foo`) AND numbered-list
+        # items (`1. foo`, `2) foo`). Numbered lists are common after
+        # `Sections:` / `Steps:` keyword headers; without this they leak
+        # through as bare items even when the parent header is dropped.
+        if re.match(r"^(?:[-*]|\d+[.)])\s", s):
+            continue
+        if _NOTEBOOK_BOILERPLATE_KEYWORDS_RE.match(s):
+            continue
+        # Strip inline project-internal artifact references.
+        s = _PROJECT_INTERNAL_ARTIFACTS_RE.sub("", s)
+        # Collapse double-spaces left by the strip.
+        s = re.sub(r"\s+", " ", s).strip()
+        if not s:
             continue
         lines.append(s)
     flat = " ".join(lines)
-    flat = re.sub(r"\*\*([^*]+):\*\*", r"\1:", flat)
     flat = re.sub(r"\s+", " ", flat).strip()
     if len(flat) > 300:
         flat = flat[:297].rstrip() + "..."
@@ -2311,10 +2413,32 @@ def _build_figure_map(
                 "replacing with ')' to keep the markdown image tag parseable"
             )
             caption = caption.replace("]", ")")
+        # v0.4 Phase 5c: pull in Source 4 LLM-synthesized caption if it
+        # exists. Without this loop-closure, the Source 4 work was
+        # write-only — figure_caption_<N>.md was generated and validated
+        # but never embedded in the manuscript. Detected during visual
+        # review of draft_3: figures 1-5 (LLM-synthesized) had
+        # descriptor-derived captions in the docx, not the LLM output.
+        # The synthesized file's existence is the signal — no need to
+        # check source_chosen in metadata.
+        synthesized_caption: Optional[str] = None
+        audit_caption_path = draft_dir / "audit" / f"figure_caption_{n}.md"
+        if audit_caption_path.is_file():
+            try:
+                raw = audit_caption_path.read_text(encoding="utf-8").strip()
+                # Single-line sanitization for inline alt-text embedding;
+                # the LLM may emit minor whitespace variation.
+                cleaned = re.sub(r"\s+", " ", raw).strip()
+                if cleaned:
+                    synthesized_caption = cleaned
+            except OSError:
+                pass
+
         figure_map[n] = {
             "filename": filename,
             "caption": caption,
             "descriptor": descriptors.get(inv_name, {}),
+            "synthesized_caption": synthesized_caption,
         }
     return figure_map, warnings
 
@@ -2384,19 +2508,35 @@ def _embed_figures_in_text(
             filename = entry["filename"]
             caption = entry["caption"]
             descriptor = entry.get("descriptor") or {}
-            chunks.append(
-                f"\n\n![Figure {n}: {caption}](figures/{filename})"
-            )
-            # v0.4 Phase 3: italic Description paragraph if descriptor
-            # has any signal (or prose-side panel callouts exist).
-            prose_panels = _detect_prose_panel_callouts(text, n)
-            description = _assemble_description_text(descriptor, prose_panels)
+            # v0.4 Phase 5c: Source 4 loop-closure. If the LLM
+            # synthesized a caption for this figure (audit/figure_caption
+            # _<N>.md exists), use IT as the description verbatim — the
+            # prompt's output protocol already produces a polished
+            # ICMJE-style legend, so no descriptor-assembly needed.
+            # Falls back to descriptor-based assembly when no synth.
+            synthesized = entry.get("synthesized_caption")
+            if synthesized:
+                description = synthesized
+            else:
+                prose_panels = _detect_prose_panel_callouts(text, n)
+                description = _assemble_description_text(descriptor, prose_panels)
+            # v0.4 Phase 5b (visual-review patch): combine short caption +
+            # description into a SINGLE alt-text. Eliminates the prior
+            # two-paragraph "Figure N: caption" + "*Description: ...*"
+            # layout, which ICMJE/Nature convention does not match.
+            # Reader sees one ICMJE-style Caption paragraph below each
+            # Picture: "Figure N: <short>. <description>."
+            # Sanitize alt-text: `]` breaks the markdown image-tag close;
+            # already-applied `]→)` substitution in _build_figure_map for
+            # the short caption; description gets the same treatment +
+            # `*` strip (markdown italic delimiter, irrelevant in alt).
+            short = caption.replace("]", ")")
             if description:
-                # Sanitize for inline italic: collapse newlines (already
-                # done in _assemble_description_text) + escape `*` to
-                # avoid breaking the italic span.
-                description = description.replace("*", "")
-                chunks.append(f"\n\n*Description: {description}*")
+                desc = description.replace("]", ")").replace("*", "")
+                alt_text = f"Figure {n}: {short}. {desc}"
+            else:
+                alt_text = f"Figure {n}: {short}"
+            chunks.append(f"\n\n![{alt_text}](figures/{filename})")
             injected_by_n[n] = filename
         chunks.append("\n\n")
         inject = "".join(chunks)

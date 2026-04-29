@@ -193,7 +193,10 @@ def test_embed_first_occurrence_only(helpers) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_embed_with_descriptor_injects_italic_description(helpers) -> None:
+def test_embed_with_descriptor_combines_into_alt_text(helpers) -> None:
+    """v0.4 Phase 5b: descriptor content is now embedded INTO the alt-text
+    of the image markdown, NOT as a separate `*Description: ...*`
+    paragraph. ICMJE-conventional one-paragraph caption layout."""
     text = "Stable point (Fig. 1). Next sentence."
     figure_map = {
         1: {
@@ -211,28 +214,128 @@ def test_embed_with_descriptor_injects_italic_description(helpers) -> None:
     }
     new_text, injected, _ = helpers._embed_figures_in_text(text, figure_map)
     assert 1 in injected
-    assert "![Figure 1: Growth curves](figures/fig01_a.png)" in new_text
-    # Italic Description paragraph appended after the image
-    assert "*Description:" in new_text
-    assert "Growth curves of PA14" in new_text
-    # Picture comes BEFORE the Description paragraph
-    pic_pos = new_text.index("![Figure 1:")
-    desc_pos = new_text.index("*Description:")
-    assert pic_pos < desc_pos
+    # Alt-text contains BOTH short caption AND description, separated by ".".
+    # Format: "Figure N: <short>. <description>"
+    assert "Figure 1: Growth curves." in new_text
+    assert "Growth curves of PA14" in new_text  # from description.title
+    assert "We plotted growth across substrates" in new_text  # from prose
+    # NO separate `*Description: ...*` paragraph (legacy v0.4-pre-patch form).
+    assert "*Description:" not in new_text
 
 
-def test_embed_with_empty_descriptor_skips_description(helpers) -> None:
-    """Empty descriptor → no Description paragraph (v0.3 behavior preserved)."""
+def test_embed_with_empty_descriptor_keeps_short_only(helpers) -> None:
+    """Empty descriptor → alt-text stays as `Figure N: <short>` (v0.3 behavior)."""
     text = "Stable point (Fig. 1). Next sentence."
     figure_map = {
         1: {"filename": "fig01_a.png", "caption": "Cap", "descriptor": {}},
     }
     new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
-    assert "![Figure 1:" in new_text
+    assert "![Figure 1: Cap](figures/fig01_a.png)" in new_text
     assert "*Description:" not in new_text
 
 
+def test_embed_uses_synthesized_caption_when_present(helpers) -> None:
+    """v0.4 Phase 5c: when figure_map[n]['synthesized_caption'] is set,
+    use it verbatim as the description (Source 4 LLM output)."""
+    text = "Stable point (Fig. 1). Next sentence."
+    figure_map = {
+        1: {
+            "filename": "fig01_a.png",
+            "caption": "Short cap",
+            "descriptor": {
+                "title": "Descriptor title — should be IGNORED",
+                "notebook_prose": "Descriptor prose — should be IGNORED",
+            },
+            "synthesized_caption": (
+                "LLM-synthesized polished caption for figure 1 with "
+                "panel breakdown and method details that overrides the "
+                "descriptor entirely."
+            ),
+        },
+    }
+    new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
+    # Synthesized caption used:
+    assert "LLM-synthesized polished caption" in new_text
+    # Descriptor content NOT used:
+    assert "Descriptor title" not in new_text
+    assert "Descriptor prose" not in new_text
+
+
+def test_embed_falls_back_to_descriptor_when_no_synthesis(helpers) -> None:
+    """v0.4 Phase 5c fallback: no synthesized_caption → descriptor-assembled."""
+    text = "Stable point (Fig. 1). Next sentence."
+    figure_map = {
+        1: {
+            "filename": "fig01_a.png",
+            "caption": "Short cap",
+            "descriptor": {
+                "title": "Descriptor title",
+                "notebook_prose": "Descriptor prose here.",
+            },
+            "synthesized_caption": None,
+        },
+    }
+    new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
+    # Descriptor content used (existing Phase 3/5b behavior):
+    assert "Descriptor title" in new_text
+
+
+def test_build_figure_map_loads_synthesized_caption(
+    helpers, tmp_path: Path,
+) -> None:
+    """v0.4 Phase 5c: _build_figure_map reads audit/figure_caption_<N>.md
+    when present and stores it in the entry."""
+    draft = tmp_path / "draft"
+    audit = draft / "audit"
+    audit.mkdir(parents=True)
+    (draft / "figures_manifest.tsv").write_text(
+        "paper_order_n\tfilename\tinventory_lookup_name\n"
+        "1\tfig01.png\torig.png\n",
+        encoding="utf-8",
+    )
+    (draft / "figures_inventory.md").write_text(
+        "<!-- inventory_schema_version: 2 -->\n"
+        "# Inventory\n\n"
+        "### `figures/orig.png`\n\n"
+        "**Caption candidates:**\n\n"
+        "- **filename**: Orig\n",
+        encoding="utf-8",
+    )
+    # Source 4 LLM-synthesized caption for figure 1.
+    (audit / "figure_caption_1.md").write_text(
+        "Synthesized\nmulti-line caption with whitespace.",
+        encoding="utf-8",
+    )
+    figure_map, _ = helpers._build_figure_map(draft)
+    assert 1 in figure_map
+    # Single-line + whitespace-collapsed.
+    assert figure_map[1]["synthesized_caption"] == \
+        "Synthesized multi-line caption with whitespace."
+
+
+def test_build_figure_map_synth_absent_when_no_audit_file(
+    helpers, tmp_path: Path,
+) -> None:
+    draft = tmp_path / "draft"
+    draft.mkdir()
+    (draft / "figures_manifest.tsv").write_text(
+        "paper_order_n\tfilename\tinventory_lookup_name\n"
+        "1\tfig01.png\torig.png\n",
+        encoding="utf-8",
+    )
+    (draft / "figures_inventory.md").write_text(
+        "<!-- inventory_schema_version: 2 -->\n"
+        "### `figures/orig.png`\n\n"
+        "**Caption candidates:**\n\n"
+        "- **filename**: Orig\n",
+        encoding="utf-8",
+    )
+    figure_map, _ = helpers._build_figure_map(draft)
+    assert figure_map[1]["synthesized_caption"] is None
+
+
 def test_embed_with_multipanel_descriptor(helpers) -> None:
+    """Multi-panel descriptor → panel breakdown in alt-text."""
     text = "Both panels show this (Fig. 3). Next sentence."
     figure_map = {
         3: {
@@ -251,8 +354,10 @@ def test_embed_with_multipanel_descriptor(helpers) -> None:
         },
     }
     new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
+    # Panel content lives inside the alt-text now, not a separate paragraph.
     assert "(A) Left half" in new_text
     assert "(B) Right half" in new_text
+    assert "*Description:" not in new_text
 
 
 def test_embed_idempotency_with_descriptor(helpers) -> None:
@@ -444,6 +549,96 @@ def test_assemble_description_max_chars_cap(helpers) -> None:
     assert len(out) <= 200
 
 
+def test_strip_prose_drops_notebook_organization_keywords(helpers) -> None:
+    """v0.4 Phase 5b: lines beginning with `Purpose:`, `Approach:`,
+    `Sections:`, `Steps:`, `Method:` etc. are notebook-organization
+    metadata; drop them from the inline prose snippet."""
+    raw = (
+        "Purpose: Address 2 critical and 4 important suggestions.\n"
+        "Approach: Single supplementary notebook using pandas/scipy only.\n"
+        "Sections: 1. Gene-to-Gap. 2. Some other thing.\n"
+        "We see a clear pattern across the data.\n"
+        "Steps: a, b, c.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    # Notebook keywords stripped
+    assert "Purpose:" not in out
+    assert "Approach:" not in out
+    assert "Sections:" not in out
+    assert "Steps:" not in out
+    # Real prose retained
+    assert "clear pattern" in out
+
+
+def test_strip_prose_drops_bold_prefixed_keyword_headers(helpers) -> None:
+    """v0.4 Phase 5b refinement: bold-formatted keyword headers like
+    `**Goal:**`, `**Purpose:**` must be stripped. Pre-process bold
+    markers before the line-prefix filter so they're caught.
+
+    Caught during draft_3 re-render: figure 7 had 'Goal: Test whether...'
+    in the docx because the source prose had `**Goal:**` and the bold
+    marker prevented the line-filter from matching."""
+    raw = (
+        "**Goal:** Test whether dark gene cross-organism concordance is special.\n"
+        "**Purpose:** Validate the H1d hypothesis.\n"
+        "We see strong concordance across the 65 ortholog groups tested.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    assert "Goal:" not in out
+    assert "Purpose:" not in out
+    assert "Validate" not in out  # purpose-line content also dropped
+    assert "65 ortholog groups" in out
+
+
+def test_strip_prose_handles_colon_outside_bold(helpers) -> None:
+    """v0.4 Phase 5b refinement #4: `**Goal**:` (colon OUTSIDE the bold
+    delimiters) must be normalized like `**Goal:**` (colon inside). Both
+    visual forms render identically in markdown but parse differently.
+
+    Caught in v0.4 Phase 5b third re-render: figure 7's actual prose used
+    `**Goal**: Test whether...` and my single-form regex only handled
+    `**Goal:** Test whether...`."""
+    raw = (
+        "**Goal**: Test whether dark gene concordance is special.\n"
+        "**Approach**: Some method.\n"
+        "Real content here about the data.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    assert "Goal:" not in out
+    assert "Goal" not in out  # bold markers also gone
+    assert "Approach:" not in out
+    assert "Test whether" not in out  # goal content dropped
+    assert "Real content here" in out
+
+
+def test_strip_prose_handles_possessive_artifact_refs(helpers) -> None:
+    """v0.4 Phase 5b refinement: NBxx's gene neighborhood → strip the
+    whole `NB07's`, not just `NB07`, to avoid orphaned possessive."""
+    raw = "NB07's gene neighborhood analysis uses positional heuristics."
+    out = helpers._strip_prose_for_inline(raw)
+    assert "NB07" not in out
+    assert "'s" not in out
+    assert "gene neighborhood analysis" in out
+
+
+def test_strip_prose_drops_project_internal_artifact_refs(helpers) -> None:
+    """v0.4 Phase 5b: REVIEW.md / REPORT.md / NB04 / nb09 are
+    project-internal references; strip them from inline prose."""
+    raw = (
+        "We address findings from REVIEW.md by re-running NB04 and "
+        "comparing with REPORT.md and nb09 outputs in our analysis."
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    assert "REVIEW.md" not in out
+    assert "REPORT.md" not in out
+    assert "NB04" not in out
+    assert "nb09" not in out
+    # Sentence shape preserved (just artifact-tokens removed; semantic
+    # may be slightly degraded but not nonsensical).
+    assert "address findings" in out
+    assert "comparing with" in out
+
+
 def test_assemble_description_strips_redundant_panel_letter_prefix(
     helpers,
 ) -> None:
@@ -476,6 +671,88 @@ def test_assemble_description_collapses_newlines(helpers) -> None:
 # ---------------------------------------------------------------------------
 # Original test resumed below
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# v0.4 Phase 5 retest fix: manifest prefix-normalization regression test
+# ---------------------------------------------------------------------------
+
+
+class TestManifestPrefixNormalization:
+    """v0.4 Phase 5 retest finding: results.v1 occasionally emits
+    inventory_lookup_name and filename with a `figures/` directory prefix
+    instead of basename-only. The prefix breaks every downstream lookup
+    silently. Fix: defensive Path().name normalization in
+    _parse_figures_manifest.
+    """
+
+    def test_strips_directory_prefix_from_inventory_lookup(
+        self, helpers, tmp_path: Path,
+    ):
+        manifest = tmp_path / "figures_manifest.tsv"
+        manifest.write_text(
+            "paper_order_n\tfilename\tinventory_lookup_name\n"
+            "1\tfigures/fig01_dark.png\tfigures/orig_dark.png\n"
+            "2\tfig02_clean.png\torig_clean.png\n",
+            encoding="utf-8",
+        )
+        rows = helpers._parse_figures_manifest(manifest)
+        assert len(rows) == 2
+        # Prefixed row: prefix stripped on BOTH columns.
+        assert rows[0]["filename"] == "fig01_dark.png"
+        assert rows[0]["inventory_lookup_name"] == "orig_dark.png"
+        # Already-basename row: unchanged.
+        assert rows[1]["filename"] == "fig02_clean.png"
+        assert rows[1]["inventory_lookup_name"] == "orig_clean.png"
+
+    def test_basename_only_manifest_is_unchanged(self, helpers, tmp_path: Path):
+        # Idempotent on basename-only manifests (the v0.3 happy path).
+        manifest = tmp_path / "figures_manifest.tsv"
+        manifest.write_text(
+            "paper_order_n\tfilename\tinventory_lookup_name\n"
+            "1\tfig01.png\torig01.png\n"
+            "2\tfig02.png\torig02.png\n",
+            encoding="utf-8",
+        )
+        rows = helpers._parse_figures_manifest(manifest)
+        assert rows[0]["filename"] == "fig01.png"
+        assert rows[1]["inventory_lookup_name"] == "orig02.png"
+
+    def test_build_figure_map_works_after_prefix_strip(
+        self, helpers, tmp_path: Path,
+    ):
+        """End-to-end: a prefixed manifest must let _build_figure_map
+        correctly look up the inventory descriptor + caption."""
+        draft = tmp_path / "draft"
+        draft.mkdir()
+        # Manifest with prefixed names (the LLM-drift case).
+        (draft / "figures_manifest.tsv").write_text(
+            "paper_order_n\tfilename\tinventory_lookup_name\n"
+            "1\tfigures/fig01.png\tfigures/orig_one.png\n",
+            encoding="utf-8",
+        )
+        # Inventory keyed by basename (extract_figures.py emits this).
+        (draft / "figures_inventory.md").write_text(
+            "<!-- inventory_schema_version: 2 -->\n"
+            "# Inventory\n\n"
+            "### `figures/orig_one.png`\n\n"
+            "**Caption candidates:**\n\n"
+            "- **REPORT.md**: Real REPORT-derived caption\n\n"
+            "**Description:**\n\n"
+            "- _Title:_ Real title from descriptor\n",
+            encoding="utf-8",
+        )
+        figure_map, warnings = helpers._build_figure_map(draft)
+        assert 1 in figure_map
+        # Lookup succeeds: we get the REAL caption, not filename-derived.
+        assert figure_map[1]["caption"] == "Real REPORT-derived caption"
+        assert figure_map[1]["filename"] == "fig01.png"
+        # Descriptor populated (sufficiency gate downstream uses this).
+        assert figure_map[1]["descriptor"]["title"] == "Real title from descriptor"
+        # No "inventory has no entry" warning surfaced.
+        assert not any(
+            "inventory has no entry" in w for w in warnings
+        ), f"unexpected WARN: {warnings}"
 
 
 # ---------------------------------------------------------------------------

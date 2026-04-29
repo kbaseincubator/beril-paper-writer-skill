@@ -174,7 +174,47 @@ If neither, DO NOT mention panel X. The post-checker
 (`tools/check_caption_provenance.py`) will WARN on ungrounded panel
 letters; HALT and re-draft if you find one.
 
-### 3. Word-count compliance
+### 3. Notebook-organization boilerplate exclusion
+
+The descriptor's `notebook_prose` field often contains project-internal
+documentation that is NOT figure content. The reader of the manuscript
+does not care about the author's notebook organization. Strip these
+patterns from your draft before writing:
+
+- ALL-CAPS-COLON keyword headers transcribed from notebook prose:
+  `Purpose:`, `Approach:`, `Strategy:`, `Sections:`, `Steps:`,
+  `Method:`, `Inputs:`, `Outputs:`, `Notes:`, `Goal:`, `Pipeline:`,
+  `Workflow:`, `Implementation:`. These are notebook-organization
+  metadata, NOT figure content.
+- References to project-internal artifacts: `REVIEW.md`, `REPORT.md`,
+  `RESEARCH_PLAN.md`, notebook ids like `NB04` or `nb09`.
+- Boilerplate about development process: "supplementary notebook",
+  "saved data files", "no Spark", "existing notebooks NOT modified",
+  "single notebook", "all inputs are saved", and similar dev-process
+  language.
+
+The caption is for the READER of the published manuscript, not the
+AUTHORS of the notebook. Strip notebook-organization context and
+focus on what the figure shows — its panels, axes, methods (sample
+sizes, statistical tests, error bars, thresholds), and any
+reader-relevant numerical claims.
+
+**Anti-example (FAIL):**
+> "(A) Matches per pathway. Axes: Domain-compatible dark genes; max
+> |fitness|; Count. Purpose: Address 2 critical and 4 important
+> suggestions from automated review (REVIEW.md). Approach: Single
+> supplementary notebook using pandas/scipy only (no Spark). All
+> inputs are saved data files from NB01–NB09. Existing notebooks are
+> NOT modified."
+
+**Corrected (PASS):**
+> "(A) Matches per pathway (top 20). (B) Matches per organism (top
+> 15). (C) Confidence tier counts by pathway. (D) Fitness magnitude
+> distribution by confidence tier (n=5,398 high; 4,687 medium;
+> 32,154 low). Domain-compatible dark genes shown across confidence
+> tiers; pathways and organisms ranked by total domain match count."
+
+### 4. Word-count compliance
 
 Count words in your draft. If `>max_words`, trim. If `<30`, the
 caption is suspiciously sparse — verify you've covered the
