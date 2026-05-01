@@ -10,4 +10,4 @@ RELEASE_NOTES_v0_5.md for v0.5 caption-quality tightening
 RELEASE_NOTES_v0_6.md for v0.6 tables pipeline (Tier 9).
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"

@@ -131,10 +131,12 @@ def test_embed_single_callout(helpers) -> None:
         text, _basic_figure_map()
     )
     assert 1 in injected
-    assert "![Figure 1: Caption for figure one](figures/fig01_a.png)" in new_text
+    # v0.6.1: visible-caption format — empty alt + **Figure N.** paragraph
+    assert "![](figures/fig01_a.png)" in new_text
+    assert "**Figure 1.** Caption for figure one" in new_text
     assert skipped == []
     # Injection lands AFTER the period, before "Next sentence."
-    fig_pos = new_text.index("![Figure 1:")
+    fig_pos = new_text.index("![](figures/fig01_a.png)")
     period_pos = new_text.index("(Fig. 1).") + len("(Fig. 1).")
     assert fig_pos > period_pos
 
@@ -146,8 +148,8 @@ def test_embed_multi_figure_sentence(helpers) -> None:
     )
     assert set(injected.keys()) == {3, 5}
     # Both image tags should appear, in N-ascending order, before "Next sentence."
-    fig3_pos = new_text.index("![Figure 3:")
-    fig5_pos = new_text.index("![Figure 5:")
+    fig3_pos = new_text.index("**Figure 3.**")
+    fig5_pos = new_text.index("**Figure 5.**")
     next_pos = new_text.index("Next sentence")
     assert fig3_pos < fig5_pos < next_pos
 
@@ -178,10 +180,10 @@ def test_embed_first_occurrence_only(helpers) -> None:
     new_text, injected, _ = helpers._embed_figures_in_text(
         text, _basic_figure_map()
     )
-    # Exactly one image tag.
-    assert new_text.count("![Figure 1:") == 1
+    # Exactly one caption paragraph.
+    assert new_text.count("**Figure 1.**") == 1
     # The image tag is between the first and second occurrences.
-    fig_pos = new_text.index("![Figure 1:")
+    fig_pos = new_text.index("**Figure 1.**")
     first_callout = new_text.index("(Fig. 1)")
     # Second callout is after first; image tag is between them.
     second_callout = new_text.index("(Fig. 1)", first_callout + 1)
@@ -193,10 +195,9 @@ def test_embed_first_occurrence_only(helpers) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_embed_with_descriptor_combines_into_alt_text(helpers) -> None:
-    """v0.4 Phase 5b: descriptor content is now embedded INTO the alt-text
-    of the image markdown, NOT as a separate `*Description: ...*`
-    paragraph. ICMJE-conventional one-paragraph caption layout."""
+def test_embed_with_descriptor_combines_into_visible_caption(helpers) -> None:
+    """v0.6.1: descriptor content is combined into a visible **Figure N.**
+    caption paragraph below the image, not hidden in alt-text."""
     text = "Stable point (Fig. 1). Next sentence."
     figure_map = {
         1: {
@@ -214,23 +215,25 @@ def test_embed_with_descriptor_combines_into_alt_text(helpers) -> None:
     }
     new_text, injected, _ = helpers._embed_figures_in_text(text, figure_map)
     assert 1 in injected
-    # Alt-text contains BOTH short caption AND description, separated by ".".
-    # Format: "Figure N: <short>. <description>"
-    assert "Figure 1: Growth curves." in new_text
+    # Image tag has empty alt-text.
+    assert "![](figures/fig01_a.png)" in new_text
+    # Visible caption paragraph contains short + description.
+    assert "**Figure 1.** Growth curves." in new_text
     assert "Growth curves of PA14" in new_text  # from description.title
     assert "We plotted growth across substrates" in new_text  # from prose
-    # NO separate `*Description: ...*` paragraph (legacy v0.4-pre-patch form).
+    # NO separate `*Description: ...*` paragraph (legacy form).
     assert "*Description:" not in new_text
 
 
 def test_embed_with_empty_descriptor_keeps_short_only(helpers) -> None:
-    """Empty descriptor → alt-text stays as `Figure N: <short>` (v0.3 behavior)."""
+    """Empty descriptor → caption is just the short caption."""
     text = "Stable point (Fig. 1). Next sentence."
     figure_map = {
         1: {"filename": "fig01_a.png", "caption": "Cap", "descriptor": {}},
     }
     new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
-    assert "![Figure 1: Cap](figures/fig01_a.png)" in new_text
+    assert "![](figures/fig01_a.png)" in new_text
+    assert "**Figure 1.** Cap" in new_text
     assert "*Description:" not in new_text
 
 
@@ -254,7 +257,8 @@ def test_embed_uses_synthesized_caption_when_present(helpers) -> None:
         },
     }
     new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
-    # Synthesized caption used:
+    # Visible caption paragraph used:
+    assert "**Figure 1.** Short cap." in new_text
     assert "LLM-synthesized polished caption" in new_text
     # Descriptor content NOT used:
     assert "Descriptor title" not in new_text
@@ -335,7 +339,7 @@ def test_build_figure_map_synth_absent_when_no_audit_file(
 
 
 def test_embed_with_multipanel_descriptor(helpers) -> None:
-    """Multi-panel descriptor → panel breakdown in alt-text."""
+    """Multi-panel descriptor → panel breakdown in visible caption."""
     text = "Both panels show this (Fig. 3). Next sentence."
     figure_map = {
         3: {
@@ -354,10 +358,26 @@ def test_embed_with_multipanel_descriptor(helpers) -> None:
         },
     }
     new_text, _, _ = helpers._embed_figures_in_text(text, figure_map)
-    # Panel content lives inside the alt-text now, not a separate paragraph.
+    # Panel content in visible caption paragraph, not alt-text.
+    assert "**Figure 3.** Multi." in new_text
     assert "(A) Left half" in new_text
     assert "(B) Right half" in new_text
     assert "*Description:" not in new_text
+
+
+def test_embed_idempotency_with_old_format(helpers) -> None:
+    """v0.6.1 backward compat: text with old-format `![Figure N: ...]()` tags
+    must not be double-injected by the new-format embedder."""
+    old_text = (
+        "Stable point (Fig. 1). "
+        "\n\n![Figure 1: Old caption](figures/fig01_a.png)\n\n"
+        "Next sentence."
+    )
+    new_text, injected, _ = helpers._embed_figures_in_text(
+        old_text, _basic_figure_map()
+    )
+    assert injected == {}  # nothing injected — old format detected
+    assert new_text == old_text
 
 
 def test_embed_idempotency_with_descriptor(helpers) -> None:
@@ -1070,9 +1090,9 @@ def test_embed_multiple_sections_separate_injections(helpers) -> None:
         text, _basic_figure_map()
     )
     assert set(injected.keys()) == {1, 2, 3}
-    # Image tags appear in document order (1, 2, 3).
-    assert new_text.index("![Figure 1:") < new_text.index("![Figure 2:")
-    assert new_text.index("![Figure 2:") < new_text.index("![Figure 3:")
+    # Caption paragraphs appear in document order (1, 2, 3).
+    assert new_text.index("**Figure 1.**") < new_text.index("**Figure 2.**")
+    assert new_text.index("**Figure 2.**") < new_text.index("**Figure 3.**")
 
 
 # ---------------------------------------------------------------------------
@@ -1132,10 +1152,12 @@ def test_cmd_embed_figures_end_to_end(helpers, tmp_path: Path, capsys) -> None:
     # Stdout summary mentions 2 embedded.
     assert "embedded: 2" in captured.out
 
-    # Section file now contains both image tags with REPORT-derived captions.
+    # Section file now contains both visible-caption figure blocks.
     body = (draft / "02_results.md").read_text(encoding="utf-8")
-    assert "![Figure 1: Caption for figure one](figures/fig01_a.png)" in body
-    assert "![Figure 2: Caption for figure two](figures/fig02_b.png)" in body
+    assert "![](figures/fig01_a.png)" in body
+    assert "**Figure 1.** Caption for figure one" in body
+    assert "![](figures/fig02_b.png)" in body
+    assert "**Figure 2.** Caption for figure two" in body
 
     # Re-running is idempotent.
     capsys.readouterr()  # clear

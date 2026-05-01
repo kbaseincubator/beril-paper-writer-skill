@@ -2295,9 +2295,13 @@ def cmd_resolve_figures(args: argparse.Namespace) -> int:
 # `figureN_something.png`-style filenames.
 _FIG_CALLOUT_RE = re.compile(r"\bFig\.\s*(\d+)[A-Z]?\b")
 
-# Match an already-embedded figure tag for paper_order_n=N. Used for
+# Match an already-embedded figure for paper_order_n=N. Used for
 # idempotency — re-running phase_embed_figures must not double-inject.
-_EMBEDDED_FIGURE_RE = re.compile(
+# v0.6.1: new format uses `**Figure N.**` visible-caption paragraph
+# (matches table convention). Old format `![Figure N: ...](...)` kept
+# for backward compat with pre-v0.6.1 drafts.
+_EMBEDDED_FIGURE_RE_NEW = re.compile(r"\*\*Figure\s+(\d+)\.\*\*")
+_EMBEDDED_FIGURE_RE_OLD = re.compile(
     r"!\[Figure\s+(\d+)\s*:.*?\]\(figures/[^)]+\)"
 )
 
@@ -2447,9 +2451,14 @@ def _embed_figures_in_text(
     text: str,
     figure_map: dict[int, dict],
 ) -> tuple[str, dict[int, str], list[int]]:
-    """Inject `![Figure N: caption](figures/<filename>)` plus optional
-    *Description: ...* italic paragraph after each first `(Fig. N)`
-    callout in `text`.
+    """Inject visible-caption figure blocks after each first `(Fig. N)`
+    callout in `text`. v0.6.1 format:
+
+        ![](figures/<filename>)
+
+        **Figure N.** Caption text.
+
+    Matches the table convention for visible captions in rendered markdown.
 
     Idempotent: if `text` already contains an embedded figure tag for N,
     that N is not re-injected (and any pre-existing description paragraph
@@ -2471,8 +2480,9 @@ def _embed_figures_in_text(
       - injected_by_n: {N: filename} for each successfully-injected figure.
       - skipped_callout_ns: callouts whose N has no manifest entry.
     """
-    # Idempotency: collect Ns already embedded.
-    already_embedded = {int(m.group(1)) for m in _EMBEDDED_FIGURE_RE.finditer(text)}
+    # Idempotency: collect Ns already embedded (union of new + old format).
+    already_embedded = {int(m.group(1)) for m in _EMBEDDED_FIGURE_RE_NEW.finditer(text)}
+    already_embedded |= {int(m.group(1)) for m in _EMBEDDED_FIGURE_RE_OLD.finditer(text)}
 
     # First-occurrence per N.
     first_match_per_n: dict[int, "re.Match[str]"] = {}
@@ -2525,18 +2535,21 @@ def _embed_figures_in_text(
             # two-paragraph "Figure N: caption" + "*Description: ...*"
             # layout, which ICMJE/Nature convention does not match.
             # Reader sees one ICMJE-style Caption paragraph below each
-            # Picture: "Figure N: <short>. <description>."
-            # Sanitize alt-text: `]` breaks the markdown image-tag close;
-            # already-applied `]→)` substitution in _build_figure_map for
-            # the short caption; description gets the same treatment +
-            # `*` strip (markdown italic delimiter, irrelevant in alt).
-            short = caption.replace("]", ")")
+            # v0.6.1: visible-caption format. Image tag has empty alt;
+            # caption is a separate **Figure N.** paragraph below the
+            # image — visible in markdown rendering (matches table
+            # convention). The docx renderer detects this paragraph
+            # after an image block and applies Caption style.
+            short = caption.replace("*", "")
             if description:
-                desc = description.replace("]", ")").replace("*", "")
-                alt_text = f"Figure {n}: {short}. {desc}"
+                desc = description.replace("*", "")
+                caption_text = f"{short}. {desc}"
             else:
-                alt_text = f"Figure {n}: {short}"
-            chunks.append(f"\n\n![{alt_text}](figures/{filename})")
+                caption_text = short
+            chunks.append(
+                f"\n\n![](figures/{filename})\n\n"
+                f"**Figure {n}.** {caption_text}"
+            )
             injected_by_n[n] = filename
         chunks.append("\n\n")
         inject = "".join(chunks)

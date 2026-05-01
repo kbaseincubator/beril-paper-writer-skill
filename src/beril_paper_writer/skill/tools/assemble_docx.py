@@ -29,10 +29,13 @@ Inline elements supported (within paragraph / heading / list / cell text):
   - Bare `[N]` citation form preserved verbatim (does NOT match link)
 
 Block-level images are rendered as an inline Picture in a centered
-paragraph, followed by a Caption-styled paragraph with the alt-text as
-the caption (Wrinkle B canonicalization, v0.3 punch list). Inline
-images within a paragraph are not supported in v0.3 — 2.2 always emits
-images on their own block-level line.
+paragraph. Captions come from one of two formats:
+  - v0.6.1+: empty alt-text `![]()` followed by a `**Figure N.** ...`
+    paragraph — rendered as Caption-styled paragraph (visible in both
+    markdown and docx).
+  - Legacy: alt-text `![Figure N: caption]()` — rendered as Caption-
+    styled paragraph from the alt-text (invisible in markdown rendering).
+Inline images within a paragraph are not supported.
 
 Exit codes:
   0  success — output docx written
@@ -314,6 +317,9 @@ def _try_paragraph_with_style(doc: Any, style_name: str, text: str = "") -> Any:
 # requires the marker prefix to avoid catching arbitrary italic text.
 _DESC_PARA_RE = re.compile(r"^\*Description:\s.+\*\s*$", re.DOTALL)
 
+# v0.6.1: visible-caption paragraph — `**Figure N.** Caption text`.
+_FIGURE_CAPTION_PARA_RE = re.compile(r"^\*\*Figure\s+\d+\.\*\*\s")
+
 
 def _is_italic_description_paragraph(content: str) -> bool:
     """True if `content` matches the v0.4 Phase 3 italic Description form.
@@ -322,6 +328,15 @@ def _is_italic_description_paragraph(content: str) -> bool:
     follow Pictures. Defensive against multi-line content via re.DOTALL.
     """
     return bool(_DESC_PARA_RE.match(content.strip()))
+
+
+def _is_figure_caption_paragraph(content: str) -> bool:
+    """True if `content` starts with `**Figure N.**` (v0.6.1 format).
+
+    Used by render_document to apply Caption style to the visible-caption
+    paragraph that follows an image block in the new format.
+    """
+    return bool(_FIGURE_CAPTION_PARA_RE.match(content.strip()))
 
 
 def render_image(doc: Any, alt: str, path: str, base_dir: Path) -> None:
@@ -373,12 +388,15 @@ def render_image(doc: Any, alt: str, path: str, base_dir: Path) -> None:
         pic_para.add_run(f"[FIGURE EMBED FAILED: {alt}]").italic = True
         return
 
-    # Caption paragraph below.
-    cap_para = _try_paragraph_with_style(doc, "Caption", alt)
-    if cap_para.style.name != "Caption":
-        # Fallback styling: italic paragraph.
-        for r in cap_para.runs:
-            r.italic = True
+    # Caption paragraph below — only when alt-text is non-empty.
+    # v0.6.1 format uses empty alt with a separate **Figure N.** paragraph
+    # that render_document detects and styles as Caption.
+    if alt.strip():
+        cap_para = _try_paragraph_with_style(doc, "Caption", alt)
+        if cap_para.style.name != "Caption":
+            # Fallback styling: italic paragraph.
+            for r in cap_para.runs:
+                r.italic = True
 
 
 def render_table(doc: Any, lines: list[str]) -> None:
@@ -473,12 +491,13 @@ def render_document(input_md: Path, output_docx: Path) -> int:
             heading = doc.add_heading("", level=level)
             render_inline_runs(heading, block.content)
         elif block.kind == "paragraph":
-            # v0.4 Phase 3: italic `*Description: ...*` paragraph
-            # immediately following an image gets Caption style instead
-            # of Normal italic. Visual continuity with the figure caption
-            # paragraph above.
-            if prev_kind == "image" and _is_italic_description_paragraph(
-                block.content,
+            # v0.6.1: `**Figure N.** Caption` paragraph immediately
+            # following an image gets Caption style (visible-caption
+            # format). v0.4 legacy: italic `*Description: ...*` also
+            # gets Caption style for backward compat.
+            if prev_kind == "image" and (
+                _is_figure_caption_paragraph(block.content)
+                or _is_italic_description_paragraph(block.content)
             ):
                 para = _try_paragraph_with_style(doc, "Caption")
             else:

@@ -2369,6 +2369,33 @@ Apply the listed findings per rewrite.v1's discipline (minimal scoped edits; ref
 }
 
 # ==============================================================================
+# Phase: assemble_docx — markdown → docx via python-docx
+# ==============================================================================
+
+phase_assemble_docx() {
+    local draft_dir="$1"
+
+    log_phase "Phase: assemble_docx (markdown → docx)"
+
+    local manuscript="$draft_dir/manuscript.md"
+    local output_docx="$draft_dir/manuscript.docx"
+
+    if [[ ! -f "$manuscript" ]]; then
+        log_warn "manuscript.md missing; skipping docx generation"
+        return 0
+    fi
+
+    if "$PYTHON_BIN" "$TOOLS_DIR/assemble_docx.py" "$manuscript" "$output_docx" 2>"$draft_dir/audit/assemble_docx.log"; then
+        log_ok "docx generated: $output_docx"
+    else
+        local rc=$?
+        log_warn "assemble_docx.py exited $rc; docx may be missing or incomplete (see $draft_dir/audit/assemble_docx.log)"
+        # Non-fatal: the pipeline continues without a docx.
+        return 0
+    fi
+}
+
+# ==============================================================================
 # Pause: emit handoff for review
 # ==============================================================================
 
@@ -2406,7 +2433,11 @@ PYEOF
         > "$draft_dir/audit/next_actions.log" 2>&1 \
         || log_warn "emit-next-actions failed; next_actions.md may be missing or incomplete"
 
-    local prompt_msg="Manuscript drafted and reviewed. Final pause: read the manuscript at $draft_dir/manuscript.md and the review at $review_path. Before submission, work through $draft_dir/next_actions.md (validator failures + reviewer-flagged criticals + citation orphans aggregated into one checklist)."
+    local docx_note=""
+    if [[ -f "$draft_dir/manuscript.docx" ]]; then
+        docx_note=" The docx is at $draft_dir/manuscript.docx."
+    fi
+    local prompt_msg="Manuscript drafted and reviewed. Final pause: read the manuscript at $draft_dir/manuscript.md and the review at $review_path.${docx_note} Before submission, work through $draft_dir/next_actions.md (validator failures + reviewer-flagged criticals + citation orphans aggregated into one checklist)."
 
     if ! "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" write-handoff "$draft_dir" \
             --phase review \
@@ -2423,6 +2454,7 @@ PYEOF
     echo "" >&2
     echo "PAUSE: review (final)" >&2
     echo "  Manuscript: $draft_dir/manuscript.md" >&2
+    [[ -f "$draft_dir/manuscript.docx" ]] && echo "  Docx:       $draft_dir/manuscript.docx" >&2
     echo "  Review:     $review_path" >&2
     echo "  Validation: $draft_dir/audit/validation.json" >&2
     echo "  Cost:       see $draft_dir/audit/run_metadata.json" >&2
@@ -2635,6 +2667,7 @@ main() {
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \
                         || halt_with "$draft_dir" "review phase failed (adversarial-cli or fallback reviewer)"
                     phase_review_rewrite "$project_root" "$draft_dir" "$model" "$project_id"
+                    phase_assemble_docx "$draft_dir"
                     emit_review_handoff "$draft_dir" \
                         || halt_with "$draft_dir" "review handoff emission failed"
                     ;;
@@ -2648,6 +2681,7 @@ main() {
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \
                         || halt_with "$draft_dir" "review phase failed during resume"
                     phase_review_rewrite "$project_root" "$draft_dir" "$model" "$project_id"
+                    phase_assemble_docx "$draft_dir"
                     emit_review_handoff "$draft_dir" \
                         || halt_with "$draft_dir" "review handoff emission failed during resume"
                     ;;

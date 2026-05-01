@@ -1,0 +1,32 @@
+fix: v0.6.1 — visible figure captions + docx orchestration
+
+Figures pipeline format change (visible captions):
+- _embed_figures_in_text: new format emits `![](figures/fn)` + separate
+  `**Figure N.** Caption text` paragraph (was `![Figure N: caption](fn)`
+  with caption hidden in alt-text, invisible in markdown rendering)
+- Matches table convention: tables already use `**Table N.** Caption`
+- _EMBEDDED_FIGURE_RE split into _NEW + _OLD for backward-compat
+  idempotency (pre-v0.6.1 drafts with old format don't double-inject)
+- Alt-text sanitization simplified: only strip `*` (no `]` needed since
+  alt-text is now empty)
+
+assemble_docx.py compatibility:
+- render_image: skip caption paragraph when alt is empty (v0.6.1 format
+  uses separate **Figure N.** paragraph instead)
+- _is_figure_caption_paragraph: new detector for `**Figure N.**` pattern
+- render_document: paragraph after image matching **Figure N.** or legacy
+  *Description:* gets Caption style in docx
+- Module docstring updated to document both caption formats
+
+Orchestrator wiring:
+- phase_assemble_docx: new phase invoking assemble_docx.py against
+  manuscript.md → manuscript.docx. Non-fatal (pipeline continues if
+  docx generation fails)
+- Wired after phase_review_rewrite, before emit_review_handoff in both
+  the drafting and review resume cases
+- emit_review_handoff: handoff message + PAUSE output include docx path
+  when manuscript.docx exists
+
+Tests: 543 pass (540 baseline + 3 new: v0.6.1 visible-caption docx
+render, _is_figure_caption_paragraph matcher, old-format backward-compat
+idempotency)

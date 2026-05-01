@@ -271,6 +271,68 @@ def test_render_image_block_embeds_picture(assemble_docx, tmp_path) -> None:
     assert any("Figure 1: A test caption" in t for t in para_texts)
 
 
+def test_render_v061_visible_caption_format(assemble_docx, tmp_path) -> None:
+    """v0.6.1: empty alt `![](path)` + `**Figure N.** Caption` paragraph
+    produces Picture + Caption-styled paragraph in docx."""
+    fig_dir = tmp_path / "figures"
+    fig_dir.mkdir()
+    png_path = fig_dir / "fig01_test.png"
+    _write_minimal_png(png_path)
+
+    md = tmp_path / "in.md"
+    md.write_text(
+        "Some prose (Fig. 1).\n\n"
+        "![](figures/fig01_test.png)\n\n"
+        "**Figure 1.** A visible caption with detail.\n\n"
+        "More prose.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.docx"
+    rc = assemble_docx.render_document(md, out)
+    assert rc == 0
+    assert out.is_file()
+
+    from docx import Document
+
+    doc = Document(str(out))
+    n_pictures = len(doc.inline_shapes)
+    assert n_pictures == 1, f"expected 1 picture, found {n_pictures}"
+
+    # Caption paragraph uses Caption style.
+    para_texts = [p.text for p in doc.paragraphs]
+    para_styles = [p.style.name for p in doc.paragraphs]
+    cap_idx = next(
+        (i for i, t in enumerate(para_texts) if "Figure 1." in t),
+        None,
+    )
+    assert cap_idx is not None, f"Caption not found: {para_texts}"
+    assert para_styles[cap_idx] == "Caption", (
+        f"expected Caption style, got {para_styles[cap_idx]!r}"
+    )
+    assert "A visible caption with detail" in para_texts[cap_idx]
+
+    # No alt-text-based caption (empty alt → no extra caption paragraph).
+    assert not any("Figure 1:" in t for t in para_texts)
+
+
+def test_is_figure_caption_paragraph_matcher(assemble_docx) -> None:
+    """v0.6.1: matcher for **Figure N.** visible-caption paragraphs."""
+    assert assemble_docx._is_figure_caption_paragraph(
+        "**Figure 1.** A caption."
+    )
+    assert assemble_docx._is_figure_caption_paragraph(
+        "**Figure 12.** Multi-sentence caption. Second sentence."
+    )
+    # Must start with the marker
+    assert not assemble_docx._is_figure_caption_paragraph(
+        "Figure 1. No bold markers."
+    )
+    # Tables must not match
+    assert not assemble_docx._is_figure_caption_paragraph(
+        "**Table 1.** A table caption."
+    )
+
+
 def test_is_italic_description_paragraph_matcher(assemble_docx) -> None:
     """v0.4 Phase 3: matcher used to upgrade post-image italic Description
     paragraphs to Caption style."""
