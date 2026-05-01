@@ -106,6 +106,10 @@ their natural sentences, not parked at the end.
   figures the manuscript will use.
 - `FIGURES_OUT_DIR` — absolute path of `<DRAFT_DIR>/figures/`. Where
   selected figures land (copy or symlink, paper-order named).
+- `TABLES_INVENTORY_PATH` — absolute path to `tables_inventory.md`
+  produced by `extract_tables.py`. Selection source for the 1–6
+  tables the manuscript will embed. Each entry has a caption, column
+  names, and a content preview (first 3 rows of the markdown table).
 - `REFRAMING_LOG_PATH` — append-only log; entries go here when REPORT
   findings are reframed to fit the throughline.
 - `MODE` — `paper` or `report` (per SPEC §3.2).
@@ -122,9 +126,11 @@ In order: `THROUGHLINE_PATH` (the organizing structure — sub-claims
 become subsections), `REPORT_PATH` (canonical findings — every claim
 in your Results must trace here or to a notebook output),
 `FIGURES_INVENTORY_PATH` (selection source; do not improvise figures
-not in the inventory), `METHODS_PATH` (cross-frame consistency —
-Results must not claim a method that Methods didn't describe), then
-`NOTEBOOKS_DIR` for numerical-claim verification when needed.
+not in the inventory), `TABLES_INVENTORY_PATH` (selection source for
+tables; do not improvise table references not in the inventory),
+`METHODS_PATH` (cross-frame consistency — Results must not claim a
+method that Methods didn't describe), then `NOTEBOOKS_DIR` for
+numerical-claim verification when needed.
 
 ### Escape hatches when expected files are absent
 
@@ -146,6 +152,16 @@ Results must not claim a method that Methods didn't describe), then
   proceed without figure callouts; note in summary: `"no figures in
   project inventory; manuscript will not embed figures."` This is a
   soft warning. Tables (if any in REPORT) can still be referenced.
+- **`TABLES_INVENTORY_PATH` missing** → proceed without table
+  callouts; note in summary: `"tables_inventory.md missing; run
+  extract_tables.py first. Manuscript will not embed tables."` This
+  is a soft warning — the manuscript is still valid, just table-less.
+  Do not improvise table references from REPORT markdown tables
+  directly; the inventory contract ensures deterministic extraction.
+- **`TABLES_INVENTORY_PATH` empty (no tables in project)** →
+  proceed without `(Table N)` callouts; note in summary: `"no tables
+  in project inventory; manuscript will not embed tables."` Figures
+  (if any) are unaffected.
 
 ## What the Results section must cover (and tier-aware framing)
 
@@ -255,9 +271,6 @@ rules:
   inventory lacks, mark in prose `[FIGURE GAP: <description>; needed
   for sub-claim X]` and let the orchestrator emit a `figure-request`
   gap-fill. Do not improvise.
-- **Tables follow the same logic** but the inventory doesn't
-  enumerate them (yet) — pull from REPORT's `| ... | ... |`
-  markdown tables.
 - **Emit `figures_manifest.tsv`** alongside the figure copies. After
   all selected figures are copied to `FIGURES_OUT_DIR` with paper-
   order names, write `<DRAFT_DIR>/figures_manifest.tsv` with a
@@ -283,14 +296,67 @@ rules:
   LLM-emitted-JSON-with-quotes failure mode (you don't have to
   worry about escaping caption strings).
 
+### 4. Table selection (1–6 tables from the tables inventory)
+
+Walk `TABLES_INVENTORY_PATH` against the throughline. Tables follow
+the same selection logic as figures — each selected table must serve
+a specific sub-claim.
+
+- **Each selected table must support a specific sub-claim** of the
+  throughline. If you can't name which sub-claim a table serves, it's
+  not selected.
+- **Caption authority order:** section-heading caption first (from
+  the nearest `###` heading in REPORT.md above the table), then
+  preceding-sentence caption as fallback. The tables inventory ranks
+  these per `extract_tables.py`'s output; respect the ranking.
+- **Aim for 1–6.** Fewer is fine; tables are denser than figures.
+  More than 6 risks making the main paper feel overloaded with
+  tabular data. Large supporting tables (>8 columns or >20 rows)
+  are typically supplementary material.
+- **Missing-table gaps.** If the throughline needs a table the
+  inventory lacks, mark in prose `[TABLE GAP: <description>; needed
+  for sub-claim X]` and let the orchestrator emit a `table-request`
+  gap-fill. Do not improvise tables from notebook cells that
+  REPORT.md didn't synthesize.
+- **Emit `tables_manifest.tsv`** alongside `02_results.md`. Write
+  `<DRAFT_DIR>/tables_manifest.tsv` with a header row + one data
+  row per selected table. Tab-separated; three columns:
+
+      paper_order_n	table_id	inventory_lookup_name
+
+  `paper_order_n` is the integer N referenced in your `(Table N)`
+  callouts. `table_id` is a descriptive slug for the table (e.g.
+  `table01_pathway_gaps`, `table02_concordance`). Unlike figure
+  filenames, tables have no binary files — the slug is for
+  readability only. `inventory_lookup_name` is the table's entry ID
+  from `tables_inventory.md` (e.g. `report_tbl_01`) — the join key
+  the orchestrator uses to resolve content and captions from the
+  inventory at embed-time.
+
+  **Banned-tab discipline:** none of the three values may contain a
+  tab character.
+
+  Caption text is NOT in the manifest — captions live in
+  `tables_inventory.md` and are resolved orchestrator-side via
+  `paper_writer_helpers.py embed-tables`. Same anti-quoting
+  discipline as figures: you don't emit caption strings, the
+  orchestrator resolves them.
+
+  **HALT discipline for tables:** if `TABLES_INVENTORY_PATH` is
+  provided AND `tables_inventory.md` is non-empty AND your draft
+  has `(Table N)` callouts BUT you emitted no `tables_manifest.tsv`,
+  HALT and re-walk the table-selection step. Without the manifest,
+  `phase_embed_tables` cannot inject table content; the assembled
+  docx will be table-less despite prose citing tables.
+
 ## Tool use
 
 `Read`, `Write`, `Bash`, `Grep`, `Glob`.
 
 - **Read / Grep / Glob** — REPORT, throughline, methods, figures
-  inventory, notebook output cells when verifying numbers. **Grep
-  is your verification tool** — every number-claim cross-checked
-  against REPORT and notebooks via Grep.
+  inventory, tables inventory, notebook output cells when verifying
+  numbers. **Grep is your verification tool** — every number-claim
+  cross-checked against REPORT and notebooks via Grep.
 - **Write** — Results markdown to `RESULTS_PATH`; reframing-log
   entries appended to `REFRAMING_LOG_PATH`; figures copied or
   symlinked into `FIGURES_OUT_DIR`.
@@ -372,6 +438,13 @@ Stub headers signal process-conformance, not science.
    figure-less. Document the HALT reason in your closing message
    rather than emit a Results section that selects figures the
    prose never cites.
+6b. **Table callouts match the tables inventory.** Every `(Table N)`
+   reference resolves to a table in `tables_manifest.tsv`. No
+   callouts to tables not selected; no selected tables without
+   callouts. The same HALT discipline applies as for figures: if
+   `TABLES_INVENTORY_PATH` is provided AND non-empty AND your draft
+   has `(Table N)` callouts BUT no `tables_manifest.tsv` was emitted,
+   HALT and re-walk the table-selection step.
 7. **Citations are from the pool only.** Every `[N]` in the prose
    has a matching entry in `references.md` (M10). Claims that
    would need a citation not in the pool are marked
@@ -440,8 +513,8 @@ content fidelity.
 ## Output protocol
 
 1. **Read inputs** in the order specified above (throughline →
-   REPORT → figures inventory → methods → notebooks for verification
-   as needed).
+   REPORT → figures inventory → tables inventory → methods →
+   notebooks for verification as needed).
 2. **Build the section** subsection-by-subsection, organized by
    throughline sub-claims.
 3. **Cross-check every number via Grep** against REPORT.md and
@@ -453,6 +526,12 @@ content fidelity.
    above for the exact schema; the manifest is what
    `phase_embed_figures` consumes to inject image tags after your
    `(Fig. N)` callouts.
+4b. **Select tables (1–6)** from the tables inventory; emit
+   `<DRAFT_DIR>/tables_manifest.tsv` (3 cols, tab-separated, header
+   row + one data row per selected table). See "Table selection"
+   above for the exact schema; the manifest is what
+   `phase_embed_tables` consumes to inject formatted table blocks
+   after your `(Table N)` callouts.
 5. **Append reframing-log entries** for demoted findings
    (orthogonal-to-throughline) and for REPORT-vs-notebook
    discrepancies. Log is append-only: Read the existing file, add
@@ -489,7 +568,8 @@ validator invocation produces spurious failures. Self-review
 **REPAIR_MODE behavior.** If the orchestrator re-invokes you with
 `REPAIR_MODE=true`, the orchestrator passes **all of your original
 drafting-mode inputs** (THROUGHLINE_PATH, REPORT_PATH, METHODS_PATH,
-NOTEBOOKS_DIR, FIGURES_INVENTORY_PATH, etc.) **plus** the four
+NOTEBOOKS_DIR, FIGURES_INVENTORY_PATH, TABLES_INVENTORY_PATH, etc.)
+**plus** the four
 REPAIR_MODE-specific inputs: `NAMED_VALIDATOR` (one of `M7`, `M8`,
 `M10`), `VALIDATOR_OUTPUT_PATH` (the JSON shape from
 `validate_manuscript.py`'s `Violation` records, filtered to the
@@ -520,9 +600,10 @@ of the change>."`
 ```
 02_results.md written, N words; subsections: [<list of subsection
 names actually present>]; figures selected: K (of M in inventory);
-figures_manifest.tsv emitted with K rows; placeholders: [NUMBER
-UNCLEAR ×J, FIGURE GAP ×L, NEEDS CITATION ×P]; reframing-log
-entries appended: Q.
+figures_manifest.tsv emitted with K rows; tables selected: T (of U
+in inventory); tables_manifest.tsv emitted with T rows;
+placeholders: [NUMBER UNCLEAR ×J, FIGURE GAP ×L, NEEDS CITATION ×P];
+reframing-log entries appended: Q.
 ```
 
 Counts and subsection list must be derivable from the file. List

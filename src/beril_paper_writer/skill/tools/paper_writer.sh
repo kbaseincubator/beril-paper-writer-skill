@@ -78,6 +78,8 @@ Subcommand-agnostic options (env vars or flags):
     --no-adversarial   Skip adversarial reviewer; use fallback prompt
     --max-cost-usd <N> Halt with handoff if cumulative LLM spend exceeds N USD
                        (checked before each LLM call; default: no cap)
+    --recaption        Force re-synthesis of LLM figure captions (default: skip
+                       figures with existing audit/figure_caption_<N>.md files)
     --help
 
 State file: <draft_dir>/state.json
@@ -515,7 +517,7 @@ halt_with() {
 }
 
 # ==============================================================================
-# Phase: extract — run extract_methods.py + extract_figures.py
+# Phase: extract — run extract_methods.py + extract_figures.py + extract_tables.py
 # ==============================================================================
 
 phase_extract() {
@@ -547,6 +549,15 @@ phase_extract() {
         "$PYTHON_BIN" "$TOOLS_DIR/extract_figures.py" "$project_root" \
             --output-dir "$draft_dir" 2>&1 | tee -a "$draft_dir/audit/extract_figures.log" \
             || log_warn "extract_figures.py exited non-zero; figures inventory may be empty (not a hard failure)."
+    fi
+
+    if [[ -f "$draft_dir/tables_inventory.md" ]]; then
+        log_step "tables_inventory.md exists, skipping extract_tables.py"
+    else
+        log_step "Running extract_tables.py"
+        "$PYTHON_BIN" "$TOOLS_DIR/extract_tables.py" "$project_root" \
+            --output-dir "$draft_dir" 2>&1 | tee -a "$draft_dir/audit/extract_tables.log" \
+            || log_warn "extract_tables.py exited non-zero; tables inventory may be empty (not a hard failure)."
     fi
 
     log_ok "extract phase complete"
@@ -888,6 +899,9 @@ phase_results() {
     local figures_inventory="$draft_dir/figures_inventory.md"
     [[ ! -f "$figures_inventory" ]] && figures_inventory=""
 
+    local tables_inventory="$draft_dir/tables_inventory.md"
+    [[ ! -f "$tables_inventory" ]] && tables_inventory=""
+
     local mode tier
     mode="$(read_state_field "$draft_dir" "mode")"; [[ -z "$mode" ]] && mode="paper"
     tier="$(read_state_field "$draft_dir" "tier")"; [[ -z "$tier" ]] && tier="STRONG"
@@ -896,6 +910,12 @@ phase_results() {
     if [[ -n "$figures_inventory" ]]; then
         figures_clause="
 - \`FIGURES_INVENTORY_PATH\` = \`$figures_inventory\`"
+    fi
+
+    local tables_clause=""
+    if [[ -n "$tables_inventory" ]]; then
+        tables_clause="
+- \`TABLES_INVENTORY_PATH\` = \`$tables_inventory\`"
     fi
 
     local user_prompt
@@ -912,11 +932,11 @@ phase_results() {
 - \`METHODS_PROVENANCE_PATH\` = \`$draft_dir/methods_provenance.md\`
 - \`REPORT_PATH\` = \`$project_root/REPORT.md\`
 - \`RESEARCH_PLAN_PATH\` = \`$project_root/RESEARCH_PLAN.md\`
-- \`REFRAMING_LOG_PATH\` = \`$draft_dir/reframing_log.md\`$figures_clause
+- \`REFRAMING_LOG_PATH\` = \`$draft_dir/reframing_log.md\`$figures_clause$tables_clause
 - \`MODE\` = \`$mode\`
 - \`TIER\` = \`$tier\`
 
-Write RESULTS_OUT_PATH via the Write tool. Emit closing-message template naming the K selected figures."
+Write RESULTS_OUT_PATH via the Write tool. Emit closing-message template naming the K selected figures and T selected tables."
 
     invoke_claude_with_retry \
         "$PROMPTS_DIR/results.v1.md" "$user_prompt" "$model" \
@@ -1438,6 +1458,14 @@ phase_caption_synthesis() {
             continue
         fi
 
+        # v0.6 backlog 0c: skip if caption already synthesized (idempotency).
+        # Re-running the pipeline should not re-invoke LLM for figures
+        # whose captions already exist. Use --recaption flag to force.
+        if [[ -f "$output_path" && "${RECAPTION:-}" != "true" ]]; then
+            log_step "Caption exists for figure $fig_id at $output_path; skipping (use --recaption to force)."
+            continue
+        fi
+
         log_step "Synthesizing caption for figure $fig_id"
 
         # Read the bundle JSON into a variable for inlining; per the
@@ -1548,6 +1576,75 @@ phase_embed_figures() {
     fi
 
     log_ok "embed_figures phase complete"
+}
+
+# ==============================================================================
+# Phase: check_tables_manifest — tables_manifest.tsv cross-walk (advisory)
+# ==============================================================================
+#
+# v0.6 Tier 9. Mirrors phase_check_figures_manifest. Validates the
+# tables_manifest.tsv contract from the artifact side: schema,
+# tables_inventory.md cross-reference, (Table N) callout cross-walk,
+# wide-table warning, and duplicate detection. Always exits 0; warnings
+# surface in next_actions.md.
+
+phase_check_tables_manifest() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_tables_manifest (advisory cross-walk)"
+
+    local tbl_warnings_file="$draft_dir/audit/tables_manifest_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_tables_manifest.py" "$draft_dir" \
+        --inventory "$draft_dir/tables_inventory.md" \
+        2> "$tbl_warnings_file" || true
+
+    if grep -q "^\[check_tables_manifest\] WARN" "$tbl_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "^\[check_tables_manifest\] WARN" "$tbl_warnings_file")
+        log_warn "Tables-manifest cross-walk: $n_warn warning(s) (will surface in next_actions.md):"
+        grep "^\[check_tables_manifest\] WARN" "$tbl_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $tbl_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_tables_manifest phase complete"
+}
+
+# ==============================================================================
+# Phase: embed_tables — inject **Table N.** caption + markdown table after callouts
+# ==============================================================================
+#
+# v0.6 Tier 9. Mirrors phase_embed_figures. Walks 02_results.md /
+# 01_methods.md / 03_discussion.md for (Table N) callouts; for each
+# first-occurrence per N, injects a formatted **Table N.** block with
+# the caption and markdown table content from tables_inventory.md.
+# Idempotent (re-running does not double-inject); safe to invoke from
+# rewrite-loop re-assembly paths.
+
+phase_embed_tables() {
+    local draft_dir="$1"
+
+    log_phase "Phase: embed_tables (inject table blocks)"
+
+    local embed_log="$draft_dir/audit/embed_tables.log"
+    "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" embed-tables "$draft_dir" \
+        > "$embed_log" 2>&1 || true
+
+    # Surface the stdout summary line + count any WARNs.
+    if [[ -f "$embed_log" ]]; then
+        local summary
+        summary=$(grep -E '^embedded: ' "$embed_log" | tail -1)
+        [[ -n "$summary" ]] && log_step "$summary"
+        local n_warn
+        n_warn=$(grep -c '^WARN:' "$embed_log" || true)
+        if [[ "$n_warn" -gt 0 ]]; then
+            log_warn "embed_tables emitted $n_warn WARN(s) (see $embed_log):"
+            grep '^WARN:' "$embed_log" | head -3 | sed 's/^/  /' >&2
+        fi
+    fi
+
+    log_ok "embed_tables phase complete"
 }
 
 # ==============================================================================
@@ -2062,13 +2159,15 @@ for k in d.get('findings_by_section', {}).keys():
         done <<< "$sections"
 
         # Re-assemble manuscript + re-run validators (rewrite changed sections).
-        # phase_embed_figures is idempotent — re-running after a rewrite-loop
-        # rewrite of 02_results.md / 01_methods.md / 03_discussion.md
-        # ensures any new (Fig. N) callouts get embedded; figures already
-        # embedded are not double-injected (per _EMBEDDED_FIGURE_RE check).
-        log_step "Pass $pass_num: re-embedding figures + re-assembling manuscript"
+        # phase_embed_figures and phase_embed_tables are idempotent — re-running
+        # after a rewrite-loop rewrite of 02_results.md / 01_methods.md /
+        # 03_discussion.md ensures any new (Fig. N) or (Table N) callouts get
+        # embedded; already-embedded items are not double-injected.
+        log_step "Pass $pass_num: re-embedding figures + tables + re-assembling manuscript"
         phase_embed_figures "$draft_dir" || \
-            log_warn "Pass $pass_num re-embed failed; continuing"
+            log_warn "Pass $pass_num re-embed figures failed; continuing"
+        phase_embed_tables "$draft_dir" || \
+            log_warn "Pass $pass_num re-embed tables failed; continuing"
         phase_assemble "$draft_dir" || \
             log_warn "Pass $pass_num re-assemble failed; continuing"
 
@@ -2354,6 +2453,7 @@ main() {
             --no-stream)     NO_STREAM=1; shift ;;
             --no-adversarial) NO_ADVERSARIAL=1; shift ;;
             --max-cost-usd)   MAX_COST_USD="$2"; shift 2 ;;
+            --recaption)      RECAPTION="true"; export RECAPTION; shift ;;
             -*) log_error "Unknown flag: $1"; usage; exit 1 ;;
             *)
                 if [[ -z "$positional" ]]; then
@@ -2454,6 +2554,22 @@ main() {
                             "phase=drafting but 00_throughline.md is missing; state corrupted" \
                             "Either edit state.json's phase back to throughline_pick and re-run continue --pick, or start a fresh draft."
                     fi
+
+                    # Ensure directories exist (phase_init only runs on draft verb).
+                    mkdir -p "$draft_dir/audit" "$draft_dir/figures" "$draft_dir/reviews"
+
+                    # Ensure extract outputs exist (extract phase only runs on
+                    # draft verb or init resume; a reset-to-drafting resume
+                    # skips it). Each sub-extractor is idempotent (skips if
+                    # its output file already exists).
+                    if [[ ! -f "$draft_dir/methods_provenance.md" ]] \
+                       || [[ ! -f "$draft_dir/figures_inventory.md" ]] \
+                       || [[ ! -f "$draft_dir/tables_inventory.md" ]]; then
+                        log_step "One or more extract outputs missing; re-running extract phase (idempotent)"
+                        phase_extract "$project_root" "$draft_dir" \
+                            || halt_with "$draft_dir" "extract phase failed during resume"
+                    fi
+
                     phase_citation_pool "$project_root" "$draft_dir" "$model" \
                         || halt_with "$draft_dir" "citation_pool.v1 or formatter step failed; see audit/citation_pool_validate.log"
                     phase_methods       "$project_root" "$draft_dir" "$model" "$project_id" \
@@ -2476,6 +2592,8 @@ main() {
                     phase_caption_synthesis "$project_root" "$draft_dir" "$model"
                     phase_check_caption_provenance "$draft_dir"
                     phase_embed_figures "$draft_dir"
+                    phase_check_tables_manifest "$draft_dir"
+                    phase_embed_tables "$draft_dir"
                     phase_check_scope_coherence "$draft_dir"
                     phase_check_overclaim "$draft_dir"
                     phase_assemble      "$draft_dir" \
@@ -2489,6 +2607,9 @@ main() {
                         || halt_with "$draft_dir" "review handoff emission failed"
                     ;;
                 review)
+                    # Ensure directories exist (phase_init only runs on draft verb).
+                    mkdir -p "$draft_dir/audit" "$draft_dir/figures" "$draft_dir/reviews"
+
                     # Re-run review phase only (idempotent — review_1 is skipped if present).
                     # Then run the rewrite loop in case the user wants to resume from a previously
                     # interrupted rewrite cycle. Both phases are no-ops when their output exists.

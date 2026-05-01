@@ -81,6 +81,23 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
         action="store_true",
         help="Skip adversarial reviewer; use fallback inline reviewer.",
     )
+    p.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help=(
+            "Halt with handoff if cumulative LLM spend exceeds N USD. "
+            "Checked before each LLM call. Default: no cap."
+        ),
+    )
+    p.add_argument(
+        "--recaption",
+        action="store_true",
+        help=(
+            "Force re-synthesis of LLM figure captions. Default: skip "
+            "figures with existing audit/figure_caption_<N>.md files."
+        ),
+    )
     p.set_defaults(func=run)
     return p
 
@@ -127,6 +144,10 @@ def run(args: argparse.Namespace) -> int:
         argv += ["--no-stream"]
     if args.no_adversarial:
         argv += ["--no-adversarial"]
+    if args.max_cost_usd is not None:
+        argv += ["--max-cost-usd", str(args.max_cost_usd)]
+    if args.recaption:
+        argv += ["--recaption"]
 
     print(f"▸ Running: {' '.join(argv)}", file=sys.stderr)
     print("", file=sys.stderr)

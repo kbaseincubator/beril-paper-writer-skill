@@ -95,6 +95,23 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
         action="store_true",
         help="Skip adversarial reviewer; use fallback inline reviewer.",
     )
+    p.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help=(
+            "Halt with handoff if cumulative LLM spend exceeds N USD. "
+            "Checked before each LLM call. Default: no cap."
+        ),
+    )
+    p.add_argument(
+        "--recaption",
+        action="store_true",
+        help=(
+            "Force re-synthesis of LLM figure captions. Default: skip "
+            "figures with existing audit/figure_caption_<N>.md files."
+        ),
+    )
     p.set_defaults(func=run)
     return p
 
@@ -315,6 +332,8 @@ def _resume_via_paper_writer(
     model: str | None,
     no_stream: bool,
     no_adversarial: bool,
+    max_cost_usd: float | None = None,
+    recaption: bool = False,
 ) -> int:
     """Dispatch to paper_writer.sh resume <draft_dir> with forwarded flags."""
     sh_path = _locate_skill_resource("tools", "paper_writer.sh")
@@ -325,6 +344,10 @@ def _resume_via_paper_writer(
         argv += ["--no-stream"]
     if no_adversarial:
         argv += ["--no-adversarial"]
+    if max_cost_usd is not None:
+        argv += ["--max-cost-usd", str(max_cost_usd)]
+    if recaption:
+        argv += ["--recaption"]
     print(f"▸ Running: {' '.join(argv)}", file=sys.stderr)
     return subprocess.run(argv).returncode
 
@@ -407,18 +430,27 @@ def run(args: argparse.Namespace) -> int:
         print(f"✓ state.json updated: phase=drafting, throughline={args.pick}", file=sys.stderr)
 
         # Now dispatch to paper_writer.sh resume to run the drafting phases.
-        return _resume_via_paper_writer(draft_dir, args.model, args.no_stream, args.no_adversarial)
+        return _resume_via_paper_writer(
+            draft_dir, args.model, args.no_stream, args.no_adversarial,
+            max_cost_usd=getattr(args, "max_cost_usd", None),
+            recaption=getattr(args, "recaption", False),
+        )
 
     elif st.phase in ("init", "drafting", "review"):
         # paper_writer.sh handles each of these idempotently.
-        return _resume_via_paper_writer(draft_dir, args.model, args.no_stream, args.no_adversarial)
+        return _resume_via_paper_writer(
+            draft_dir, args.model, args.no_stream, args.no_adversarial,
+            max_cost_usd=getattr(args, "max_cost_usd", None),
+            recaption=getattr(args, "recaption", False),
+        )
 
     elif st.phase == "assembled":
         print("✓ Already complete (phase=assembled).", file=sys.stderr)
         manuscript = draft_dir / "manuscript.md"
         if manuscript.is_file():
             print(f"  Manuscript: {manuscript}", file=sys.stderr)
-        review = next(iter((draft_dir / "reviews").glob("draft_*_review_*.md")), None)
+        reviews_dir = draft_dir / "reviews"
+        review = next(iter(reviews_dir.glob("draft_*_review_*.md")), None) if reviews_dir.is_dir() else None
         if review:
             print(f"  Review:     {review}", file=sys.stderr)
         return 0

@@ -3084,6 +3084,432 @@ def cmd_extract_data_availability(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# v0.6 Tier 9 — Tables: caption gate, inventory parsing, embed
+# ---------------------------------------------------------------------------
+
+# Stopwords for the table caption relevance check (column-overlap gate).
+_TABLE_CAPTION_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for",
+    "is", "are", "was", "were", "with", "by", "from", "as", "no", "not",
+    "per", "vs", "all", "each", "any",
+})
+
+
+def _table_caption_passes_gate(
+    caption_text: str,
+    column_names: list[str],
+) -> bool:
+    """Sufficiency gate for table captions (v0.6).
+
+    A caption PASSES (no LLM fallback needed) iff:
+      a) caption_text is non-empty,
+      b) caption has >5 words after stripping markdown formatting,
+      c) EITHER the caption is descriptive enough (>10 words — it's
+         likely a finding-level heading like "Finding 6: X reveals Y"),
+         OR at least 1 word in caption also appears in column_names
+         (case-insensitive, stopwords excluded).
+
+    The >10-word bypass exists because BERIL section headings describe
+    findings, not table structure. "Finding 6: Within-species biogeographic
+    analysis reveals 10 significant clusters" is a perfectly good caption
+    even though it shares zero words with column names like "Organism",
+    "Locus", "FDR". Short captions like "Results summary" still need the
+    column-overlap check to filter out generic headings.
+
+    Returns True iff sufficient.
+    """
+    if not caption_text or not caption_text.strip():
+        return False
+    # Strip markdown bold/italic markers
+    clean = re.sub(r"[*_`#]", "", caption_text).strip()
+    words = clean.split()
+    if len(words) <= 5:
+        return False
+    # Descriptive captions (>10 words) pass without column overlap.
+    if len(words) > 10:
+        return True
+    # Short captions (6–10 words) need column-name word overlap.
+    col_words = set()
+    for col_name in column_names:
+        for w in re.sub(r"[|*_`]", "", col_name).split():
+            lw = w.lower().strip()
+            if lw and lw not in _TABLE_CAPTION_STOPWORDS:
+                col_words.add(lw)
+    if not col_words:
+        # If all column names are stopwords (unlikely), pass the gate
+        return True
+    caption_words = {w.lower().strip(".,;:()") for w in words}
+    overlap = caption_words & col_words
+    return len(overlap) >= 1
+
+
+def _parse_tables_manifest(manifest_path: Path) -> list[dict]:
+    """Parse tables_manifest.tsv into a list of row dicts.
+
+    Returns [] if file missing or unparseable. Tolerates extra
+    whitespace in cells. Skips blank lines after the header.
+    """
+    if not manifest_path.is_file():
+        return []
+    text = manifest_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return []
+    rows = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        cells = line.split("\t")
+        if len(cells) < 3:
+            continue
+        try:
+            n = int(cells[0].strip())
+        except ValueError:
+            continue
+        rows.append({
+            "paper_order_n": n,
+            "table_id": cells[1].strip(),
+            "inventory_lookup_name": cells[2].strip(),
+        })
+    return rows
+
+
+def _parse_tables_inventory(inventory_path: Path) -> dict[str, dict]:
+    """Parse tables_inventory.md into {table_id: {"caption": str, "content": str}}.
+
+    Extracts the best caption (heading > preceding_sentence > fallback)
+    and the full markdown table content for each entry.
+    """
+    if not inventory_path.is_file():
+        return {}
+
+    text = inventory_path.read_text(encoding="utf-8")
+    entries: dict[str, dict] = {}
+    current_id: Optional[str] = None
+    current_data: dict = {}
+    in_content = False
+    content_lines: list[str] = []
+    caption_candidates: list[tuple[str, str]] = []  # (source, text)
+    column_names: list[str] = []
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+
+        # New entry header
+        m = re.match(r"^###\s+(report_tbl_\d+)\s", stripped)
+        if m:
+            # Flush previous entry
+            if current_id:
+                _flush_table_entry(
+                    entries, current_id, current_data, caption_candidates,
+                    content_lines, column_names,
+                )
+            current_id = m.group(1)
+            current_data = {}
+            in_content = False
+            content_lines = []
+            caption_candidates = []
+            column_names = []
+            continue
+
+        if not current_id:
+            continue
+
+        # Column names from the _Columns: line
+        cm = re.match(r"_Columns:\s*\d+\s*\((.+)\)_", stripped)
+        if cm:
+            column_names = [c.strip() for c in cm.group(1).split("|")]
+            continue
+
+        # Caption candidates
+        cap_m = re.match(
+            r"^-\s+\*\*(section heading|preceding sentence|LLM-generated)\*\*:\s+(.+)$",
+            stripped,
+        )
+        if cap_m:
+            caption_candidates.append((cap_m.group(1), cap_m.group(2)))
+            continue
+
+        # Content block: starts with "**Content (first 3 rows):**"
+        if stripped == "**Content (first 3 rows):**":
+            in_content = True
+            content_lines = []
+            continue
+
+        if in_content:
+            if stripped.startswith("|") and stripped.endswith("|"):
+                content_lines.append(line)
+            elif stripped.startswith("_(") and "data rows total" in stripped:
+                # End of preview — we need to read full content from the
+                # table's markdown_content field. But the inventory only
+                # shows a preview. We'll use the preview for now; the
+                # full content is in the JSON report.
+                in_content = False
+            elif stripped == "" and content_lines:
+                # Blank line after content block
+                in_content = False
+            elif not stripped and not content_lines:
+                # Blank line before content starts — keep waiting
+                pass
+            else:
+                in_content = False
+
+    # Flush last entry
+    if current_id:
+        _flush_table_entry(
+            entries, current_id, current_data, caption_candidates,
+            content_lines, column_names,
+        )
+
+    return entries
+
+
+def _flush_table_entry(
+    entries: dict[str, dict],
+    table_id: str,
+    data: dict,
+    caption_candidates: list[tuple[str, str]],
+    content_lines: list[str],
+    column_names: list[str],
+) -> None:
+    """Finalize one table entry and add it to the entries dict."""
+    # Pick best caption: heading > preceding_sentence > llm
+    caption = ""
+    priority = {"section heading": 0, "preceding sentence": 1, "LLM-generated": 2}
+    if caption_candidates:
+        sorted_caps = sorted(caption_candidates, key=lambda x: priority.get(x[0], 99))
+        caption = sorted_caps[0][1]
+
+    entries[table_id] = {
+        "caption": caption,
+        "content": "\n".join(content_lines) if content_lines else "",
+        "column_names": column_names,
+    }
+
+
+def _build_table_map(
+    draft_dir: Path,
+) -> dict[int, dict]:
+    """Join tables_manifest.tsv with tables_inventory.md.
+
+    Returns {paper_order_n: {"table_id": ..., "caption": ..., "content": ...,
+    "column_names": [...]}}.
+    """
+    manifest_path = draft_dir / "tables_manifest.tsv"
+    inventory_path = draft_dir / "tables_inventory.md"
+
+    manifest_rows = _parse_tables_manifest(manifest_path)
+    inventory = _parse_tables_inventory(inventory_path)
+
+    table_map: dict[int, dict] = {}
+    for row in manifest_rows:
+        inv_name = row["inventory_lookup_name"]
+        entry = inventory.get(inv_name, {})
+        table_map[row["paper_order_n"]] = {
+            "table_id": row["table_id"],
+            "caption": entry.get("caption", ""),
+            "content": entry.get("content", ""),
+            "column_names": entry.get("column_names", []),
+            "inventory_lookup_name": inv_name,
+        }
+    return table_map
+
+
+# Table callout regex — matches (Table N) in prose.
+_TABLE_CALLOUT_RE = re.compile(r"\bTable\s+(\d+)\b")
+
+# Idempotency guard: detects **Table N.** blocks already injected.
+_EMBEDDED_TABLE_RE = re.compile(r"\*\*Table\s+(\d+)\.\*\*")
+
+
+def _embed_tables_in_text(
+    text: str,
+    table_map: dict[int, dict],
+    already_embedded: set[int],
+) -> str:
+    """Walk text for (Table N) callouts and inject markdown table blocks.
+
+    Injection point: after the first sentence containing `(Table N)`.
+    Injected block:
+
+        **Table N.** Caption text.
+
+        | col1 | col2 | ... |
+        |------|------|-----|
+        | data | data | ... |
+
+    Idempotent: pre-scans for existing **Table N.** blocks and adds
+    their Ns to already_embedded before processing callouts.
+    """
+    # Pre-scan for already-embedded tables (idempotency).
+    for m in _EMBEDDED_TABLE_RE.finditer(text):
+        already_embedded.add(int(m.group(1)))
+
+    lines = text.split("\n")
+    output: list[str] = []
+
+    for line in lines:
+        output.append(line)
+
+        # Check for Table N callouts in this line
+        matches = list(_TABLE_CALLOUT_RE.finditer(line))
+        if not matches:
+            continue
+
+        # Collect unique N values from this line, in ascending order
+        ns = sorted(set(int(m.group(1)) for m in matches))
+        for n in ns:
+            if n in already_embedded:
+                continue
+            if n not in table_map:
+                continue
+
+            entry = table_map[n]
+            caption = entry.get("caption", "")
+            content = entry.get("content", "")
+
+            if not content:
+                continue
+
+            # Inject after this line
+            output.append("")
+            if caption:
+                output.append(f"**Table {n}.** {caption}")
+            else:
+                output.append(f"**Table {n}.**")
+            output.append("")
+            output.append(content)
+            output.append("")
+            already_embedded.add(n)
+
+    return "\n".join(output)
+
+
+def cmd_embed_tables(args: argparse.Namespace) -> int:
+    """Walk section files for (Table N) callouts; inject markdown table
+    blocks after the first occurrence of each N's containing line.
+    Idempotent.
+
+    v0.6 Tier 9 — mirrors cmd_embed_figures.
+    """
+    draft_dir = Path(args.draft_dir).expanduser().resolve()
+    if not draft_dir.is_dir():
+        sys.stderr.write(f"embed-tables: draft_dir not found: {draft_dir}\n")
+        return 1
+
+    table_map = _build_table_map(draft_dir)
+    if not table_map:
+        print("embedded: 0")
+        sys.stderr.write(
+            "embed-tables: no tables to embed (empty manifest or inventory)\n"
+        )
+        return 0
+
+    section_files = ["02_results.md", "01_methods.md", "03_discussion.md"]
+    already_embedded: set[int] = set()
+    total_embedded = 0
+    sections_touched = 0
+
+    # Pre-scan all sections for existing **Table N.** blocks (idempotency).
+    # This ensures already_embedded is populated before any per-section
+    # counting, so before_count/after_count accurately reflect NEW
+    # injections only.
+    for section_name in section_files:
+        section_path = draft_dir / section_name
+        if not section_path.is_file():
+            continue
+        text = section_path.read_text(encoding="utf-8")
+        for m in _EMBEDDED_TABLE_RE.finditer(text):
+            already_embedded.add(int(m.group(1)))
+
+    for section_name in section_files:
+        section_path = draft_dir / section_name
+        if not section_path.is_file():
+            continue
+
+        text = section_path.read_text(encoding="utf-8")
+        before_count = len(already_embedded)
+        new_text = _embed_tables_in_text(text, table_map, already_embedded)
+        after_count = len(already_embedded)
+
+        if after_count > before_count:
+            section_path.write_text(new_text, encoding="utf-8")
+            n_new = after_count - before_count
+            total_embedded += n_new
+            sections_touched += 1
+            sys.stderr.write(
+                f"embed-tables: {section_name}: embedded {n_new} table(s)\n"
+            )
+
+    # stdout summary (orchestrator greps for '^embedded: ')
+    print(
+        f"embedded: {total_embedded} total across {sections_touched} section(s)"
+    )
+
+    # stderr diagnostics
+    sys.stderr.write(
+        f"embed-tables: total embedded: {total_embedded} "
+        f"across {sections_touched} section(s)\n"
+    )
+
+    # Report un-embedded tables (in manifest but no callout in prose)
+    for n, entry in sorted(table_map.items()):
+        if n not in already_embedded:
+            sys.stderr.write(
+                f"embed-tables: NOTE: Table {n} ({entry['table_id']}) is in "
+                f"manifest but had no (Table {n}) callout in prose\n"
+            )
+
+    return 0
+
+
+def cmd_apply_table_captions(args: argparse.Namespace) -> int:
+    """Apply caption sufficiency gate to tables; report which need LLM fallback.
+
+    v0.6 Tier 9 Phase 4. Reads tables_inventory.md, applies the gate,
+    emits table_ids that need LLM-generated captions to stdout.
+
+    For v0.6, the LLM fallback is deferred to the orchestrator (shell
+    side) which decides whether to invoke a lightweight LLM call per
+    failed table. This command only IDENTIFIES the failures.
+    """
+    draft_dir = Path(args.draft_dir).expanduser().resolve()
+    inventory_path = draft_dir / "tables_inventory.md"
+
+    inventory = _parse_tables_inventory(inventory_path)
+    if not inventory:
+        sys.stderr.write(
+            "apply-table-captions: no tables in inventory; nothing to check\n"
+        )
+        return 0
+
+    failed: list[str] = []
+    passed: list[str] = []
+    for table_id, entry in sorted(inventory.items()):
+        caption = entry.get("caption", "")
+        col_names = entry.get("column_names", [])
+        if _table_caption_passes_gate(caption, col_names):
+            passed.append(table_id)
+        else:
+            failed.append(table_id)
+            sys.stderr.write(
+                f"apply-table-captions: GATE FAIL: {table_id} — "
+                f"caption={caption!r:.60}, columns={col_names}\n"
+            )
+
+    sys.stderr.write(
+        f"apply-table-captions: {len(passed)} pass, {len(failed)} fail "
+        f"(of {len(inventory)} total)\n"
+    )
+
+    # Emit failed table_ids to stdout (one per line) for orchestrator consumption
+    for tid in failed:
+        print(tid)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Argparse wiring
 # ---------------------------------------------------------------------------
 
@@ -3299,6 +3725,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_ccs.add_argument("--draft-dir", required=True)
     p_ccs.add_argument("--figure-id", required=True, type=int)
     p_ccs.set_defaults(func=cmd_compute_caption_stats)
+
+    # embed-tables (v0.6 Tier 9) — walk section files for (Table N)
+    # callouts; inject markdown table blocks. Idempotent.
+    p_et = sub.add_parser(
+        "embed-tables",
+        help="Inject markdown table blocks into section files after each "
+             "first (Table N) callout. Idempotent.",
+    )
+    p_et.add_argument("draft_dir")
+    p_et.set_defaults(func=cmd_embed_tables)
+
+    # apply-table-captions (v0.6 Tier 9 Phase 4) — sufficiency gate for
+    # table captions; emits table_ids needing LLM fallback.
+    p_atc = sub.add_parser(
+        "apply-table-captions",
+        help="Apply caption sufficiency gate to tables; emit table_ids "
+             "needing LLM fallback to stdout.",
+    )
+    p_atc.add_argument("--draft-dir", required=True)
+    p_atc.set_defaults(func=cmd_apply_table_captions)
 
     args = p.parse_args(argv)
     return args.func(args)

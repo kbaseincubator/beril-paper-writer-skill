@@ -1,0 +1,121 @@
+v0.2.0 — discipline-hardening + auto-repair tier
+
+Three architectural tiers landed since v0.1.0 (88eac762):
+
+Tier 1 — Cross-walk post-processors (advisory; $0 smoke)
+========================================================
+- tools/check_scope_coherence.py — Discussion ↔ Results scope cross-walk
+  + would-NOT-include bullet match. Literature-attribution skip,
+  distinctive-keyword filtering, top-8 keyword 3-hit threshold.
+- tools/check_overclaim.py — Abstract/Discussion strong-verb vs
+  ⚠ partial / ✗ contradicts evidence-map cross-walk. ≥2-distinctive
+  overlap gate eliminates cross-claim FPs. Marks
+  [caveat-acknowledged] when sentence inline contains caveat
+  vocabulary or numerical anchors.
+- Wired in paper_writer.sh between phase_finalize_citations and
+  phase_assemble. Smoke against draft_1: 4+4=8 advisory WARNs, all
+  real-signal except 1 documented borderline FP.
+
+Tier 3 — REPAIR_MODE harness + review-rewrite loop ($6.36 live retest)
+======================================================================
+- phase_repair_validators in paper_writer.sh — reads
+  audit/validation.json, dispatches each failed M2-M10 validator to
+  the section prompt that owns repairs per LAYOUT.md:419 dispatch
+  table, in REPAIR_MODE with 4 documented inputs. Bounded retry
+  (2 dispatches/validator). M1 / M4 escalate per LAYOUT, not
+  REPAIR_MODE. M10 has location-based tie-breaker.
+- phase_review_rewrite — parses latest review.md for
+  Critical+Important (pass 1) or Critical-only (pass 2) findings,
+  dispatches rewrite.v1.md per primary section with FINDING_IDS
+  JSON array, re-assembles + re-validates after each pass, runs
+  reviewer pass 2 (and 3 if needed). SPEC §8.3 hard cap of 2
+  rewrite passes enforced.
+- tools/check_repair_scope.py — fourth post-processor in the pattern.
+  Three checks per repair attempt: pre/post byte-identical
+  (Write no-op), bounded diff via difflib (≥30% WARN, ≥60% strong),
+  validator regression (any pre.pass → post.fail).
+- 5 new helper subcommands: prepare-repair, check-repair-status,
+  list-failed-validators, parse-review, count-review-criticals.
+- emit-next-actions extended with REPAIR_MODE outcomes + Review-
+  rewrite outcomes sections, escalations / repaired / loop-trace
+  prioritized.
+
+Tier 5 — Defensive features ($0 smoke)
+======================================
+- paper_writer_helpers.py extract-data-availability — replaces v0.1's
+  [TBD] markers in 07_data_availability.md with real values. K-BERDL
+  databases extracted from methods_provenance.md SQL via regex on
+  FROM <db>.<table> patterns (deterministic). Public accessions via
+  curated pattern set (Fitness Browser, GTDB, NMDC, AlphaEarth,
+  GapMind, eggNOG, Bakta, STRING, PubMed, PaperBLAST) + typed
+  accessions (BioProject, GEO, SRA, GenBank, DOI, PMID — normalized
+  to strip type-prefix). Falls back to [TBD] if extraction empty.
+  Smoke on functional_dark_matter: 3 K-BERDL databases + 9 named
+  sources + 17 PMIDs.
+- --max-cost-usd N CLI flag — cost circuit breaker.
+  invoke_claude_with_retry checks cumulative audit/*.metadata.json
+  estimated_cost_usd before each LLM call; halts via halt_with if
+  cap exceeded. New helper: paper_writer_helpers.py cumulative-cost.
+
+Bug fix — review-finding parser tolerance
+=========================================
+fallback_reviewer.v1 emits ≥3 finding-header shapes:
+  Form A: **C1: Abstract line 18 — "..."**
+  Form B: - **C1: Abstract functional hypotheses claim (line 20)** — "..."
+  Form C: - **C3: "Multi-dimensional ..." (Abstract line 18, ...)** — ...
+v0.2 retest exposed Forms B+C; parser silently returned 0/3 Criticals
+on review_2.md and terminated rewrite loop one cycle early. Fix:
+full-header-line matching + section-name scan over header + next 6
+body lines (header-first, body-fallback). Tested against both shipped
+review files; no regression on Form A; 3/3 on Forms B+C.
+
+State schema — unchanged from v0.1
+==================================
+STATE_SCHEMA_VERSION = "0.1" unchanged in v0.2. Existing draft
+directories work without migration. v0.1.0 release notes' forward-
+looking comment ("v0.2 will bump") was incorrect; v0.2 added new
+audit files but did not modify state.json structure. Schema bump +
+migration tool deferred to whichever future tier modifies state.json
+(likely Item 4.3 throughline re-evaluation persistence).
+
+Live retest results (2026-04-27)
+================================
+Targeted retest on draft_1 exercising Tier 3 paths:
+- $6.36 across 14 calls / ~17 min wall clock
+- phase_repair_validators no-op (0 validator failures pre-run)
+- phase_review_rewrite pass 1 dispatched 4 sections (abstract C1+I3,
+  results I1+I2+I4, intro I5, discussion I6) — all wrote
+- Abstract diff confirms scoped C1 fix (NMDC compositional-coupling
+  caveat added, mechanism disclaimer softened)
+- Loop terminated 1 cycle short due to parser bug, fixed post-retest
+
+Live coverage gap acknowledged: full v0.2 pipeline (Tier 1 inside
+real phase_assemble, Tier 5 inside real phase_data_avail, cost
+breaker tripping live) not exercised end-to-end. First v0.2 fresh-
+draft run is the final smoke gate.
+
+Files changed
+=============
+new
+  RELEASE_NOTES_v0_2.md
+  smoke-test/v0_2_tier3_draft1_retest_runbook.sh
+  src/beril_paper_writer/skill/tools/check_overclaim.py
+  src/beril_paper_writer/skill/tools/check_repair_scope.py
+  src/beril_paper_writer/skill/tools/check_scope_coherence.py
+
+modified
+  pyproject.toml                                                 (version 0.1.0.dev0 → 0.2.0)
+  smoke-test/v0_2_punch_list.md                                  (post-v0.2 future tiers section + Tier 7 design notes)
+  src/beril_paper_writer/__init__.py                              (__version__ 0.1.0 → 0.2.0)
+  src/beril_paper_writer/skill/tools/paper_writer.sh              (+5 phase fns: phase_check_scope_coherence, phase_check_overclaim, phase_repair_validators, repair_one_validator, _emit_repair_inputs_block, phase_review_rewrite, dispatch_rewrite_for_section, run_reviewer_pass; refactored run_fallback_reviewer; +--max-cost-usd; phase_data_avail rewritten)
+  src/beril_paper_writer/skill/tools/paper_writer_helpers.py      (+8 subcommands; emit-next-actions extended w/ REPAIR_MODE + Review-rewrite + Scope-coherence + Overclaim sections)
+
+What v0.3 owes
+==============
+Highest priority: Tier 2 (figures + docx). Then Tier 7 (mermaid
+diagrams; depends on Tier 2.3 docx assembler). Then Tier 4
+(interactive checkpoints) when augmentation stream gains a 2nd user.
+TODO #21: tighten fallback_reviewer.v1.md to mandate one canonical
+finding-header form.
+
+Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>

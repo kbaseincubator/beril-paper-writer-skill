@@ -1,0 +1,61 @@
+v0.2.1 — three live-test-surfaced bugs fixed
+
+A same-day partial integration test on draft_1 surfaced three bugs
+that synthetic fixtures + targeted retest had missed. Cost of the
+live discovery: ~$3.74. All three fixes are small and deterministic.
+
+Bug 1 — Stale review-file reuse (phase_review_rewrite)
+======================================================
+phase_review_rewrite's call to run_reviewer_pass for pass 2 hit the
+idempotency check (if [[ -f "$review_out" ]]) when a prior
+draft_1_review_2.md existed from an earlier resume. Skipped the
+fresh review. Pass 2 then operated against stale findings.
+
+Fix: in phase_review_rewrite, rm -f the next_review_path before
+calling run_reviewer_pass. Initial phase_review keeps its
+idempotency for review_1; only the rewrite loop forces fresh.
+
+Bug 2 — Stale "not auto-fixing in MVP" log message (phase_assemble)
+==================================================================
+phase_assemble logged "not auto-fixing in MVP" when validate_manuscript
+reported failures. Stale wording from before Tier 3 landed; v0.2 does
+auto-fix via phase_repair_validators (next phase in the flow).
+
+Fix: log message updated to "deferring to phase_repair_validators".
+
+Bug 3 — emit_review_handoff picks wrong review file
+===================================================
+The final pause's review_path lookup used `ls reviews/draft_*_review_*.md
+| head -1`. Alphabetic sort picks _1 first even when _2 / _3 exist.
+User sees stale review file in the final handoff.
+
+Fix: replaced ls|head with a Python one-liner that extracts the
+numeric suffix and picks the highest. Portable across macOS / Linux
+without GNU sort -V dependency.
+
+v0.3 architectural insight (not a bug, scoping note)
+====================================================
+The partial test's M10 (orphan citation) repair attempts failed
+twice — discussion.v1 in REPAIR_MODE can't actually fix M10 because
+the usual remediation is editing references.md, which is outside
+any section prompt's scope. The escalation worked correctly; ~$0.83
+spent on attempts that couldn't succeed. v0.3 should route M10 to
+a citation-pool-aware repair path rather than a section prompt.
+Backlog only, not a v0.2 blocker.
+
+Files changed
+=============
+modified
+  pyproject.toml                                                 (0.2.0 → 0.2.1)
+  src/beril_paper_writer/__init__.py                              (__version__ 0.2.0 → 0.2.1)
+  src/beril_paper_writer/skill/tools/paper_writer.sh              (3 fixes inline)
+  RELEASE_NOTES_v0_2.md                                           (v0.2.1 patch section)
+
+Cost summary (cumulative v0.2 dev)
+==================================
+v0.1.0 ship              $4.20  (1 fresh draft on functional_dark_matter)
+Tier 3 targeted retest   $2.45  (rewrite-loop pass 1 only)
+Tier 5 partial test      $1.61  (M10 repair + pass 2 + reviewer 3)
+Total                    $8.27
+
+Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
