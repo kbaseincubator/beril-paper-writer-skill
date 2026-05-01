@@ -20,6 +20,17 @@ Live-retest fixes:
   re-run phase_extract when inventory files missing (extract only
   runs on draft verb; reset-to-drafting resume skipped it)
 - Also added mkdir guard to review resume case
+- |fit| pipe-escaping: _escape_inner_pipes() backslash-escapes pipe
+  chars inside cell values in markdown_content output (was breaking
+  table rendering — 12 pipes in header vs 10 in separator)
+- results.v1 CRITICAL anti-pattern block: explicit prohibition of
+  inlining ![...]() image tags or **Table N.** blocks (bypass caption
+  synthesis + sufficiency gate; v0.7 will add mechanical post-check)
+- install_skill.py: added extract_tables.py, check_tables_manifest.py,
+  check_figures_manifest.py to _EXECUTABLE_FILES
+- Throughline picker: handoff emits picker_description (≤120 char
+  pre-formatted line); slash command uses it verbatim (fixes Claude
+  Code AskUserQuestion "N lines hidden" truncation)
 
 Backlog (0a/0c/0d from v0.4/v0.5):
 - --max-cost-usd + --recaption on Python CLI (draft.py, continue_run.py)
@@ -27,3 +38,10 @@ Backlog (0a/0c/0d from v0.4/v0.5):
 - continue_run.py: reviews/ dir guard on phase=assembled
 
 Tests: 540 pass (430 base + 110 new tables tests)
+
+Known v0.7 backlog:
+- Mechanical post-check for inline figure/table content in results.v1
+  output (strip ![...]() and **Table N.** blocks, force embed phases)
+- assemble_docx.py wiring as orchestrator phase
+- /beril-paper-writer-revise command for iterative user-driven revision
+  on assembled manuscript (not just throughline)

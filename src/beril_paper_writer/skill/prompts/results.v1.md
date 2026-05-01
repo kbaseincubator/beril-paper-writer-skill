@@ -88,6 +88,17 @@ percentages per M8 (`95 of the 3,705 ... (2.6%, 95% CI 2.1–3.1)`),
 M7 (not bare `p < 0.05`), (d) figure and table callouts appear in
 their natural sentences, not parked at the end.
 
+**CRITICAL — do NOT embed figures or tables inline.** Your job is to
+write `(Fig. N)` and `(Table N)` callouts in prose. The orchestrator's
+downstream phases (`phase_embed_figures`, `phase_embed_tables`) inject
+the actual content — `![Figure N: caption](figures/filename)` image
+tags and `**Table N.** Caption` + pipe-table blocks — based on your
+callouts. If you write `![...]()` image tags or `**Table N.**` blocks
+yourself, the embed phases skip them (idempotency), and the caption
+synthesis pipeline never runs, producing figures without ICMJE captions
+and tables without sufficiency-gated captions. Write ONLY the callout
+markers. This rule has no exceptions.
+
 ## Inputs the user prompt will pass
 
 - `PROJECT_ROOT` — path to the BERIL project (`projects/<id>/`).

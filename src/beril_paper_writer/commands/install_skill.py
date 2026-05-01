@@ -50,10 +50,13 @@ _EXECUTABLE_FILES = (
     "tools/check_throughline_glyphs.py",
     "tools/extract_methods.py",
     "tools/extract_figures.py",
+    "tools/extract_tables.py",
     "tools/citation_pool.py",
     "tools/validate_manuscript.py",
     "tools/assemble_docx.py",
     "tools/aggregate_metadata.py",
+    "tools/check_figures_manifest.py",
+    "tools/check_tables_manifest.py",
 )
 
 

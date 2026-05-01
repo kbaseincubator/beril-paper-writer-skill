@@ -650,13 +650,45 @@ import json, re, sys
 src, dst = sys.argv[1], sys.argv[2]
 with open(src, encoding="utf-8") as f:
     text = f.read()
+
+# Parse glyph counts from the evidence map (✓ and ⚠ symbols) to build
+# a one-line summary for the AskUserQuestion picker.
+def _summarize_glyphs(block: str) -> str:
+    direct = block.count("✓")
+    partial = block.count("⚠")
+    unsup = block.count("✗")
+    parts = []
+    if direct:
+        parts.append(f"{direct} ✓ direct")
+    if partial:
+        parts.append(f"{partial} ⚠ partial")
+    if unsup:
+        parts.append(f"{unsup} ✗ unsupported")
+    return "; ".join(parts) if parts else ""
+
 choices = []
-for m in re.finditer(r"^## Candidate (TL\d+):\s*(.+)$", text, re.MULTILINE):
+# Split into per-candidate blocks for glyph counting
+blocks = re.split(r"(?=^## Candidate TL\d+:)", text, flags=re.MULTILINE)
+for block in blocks:
+    m = re.match(r"^## Candidate (TL\d+):\s*(.+)$", block, re.MULTILINE)
+    if not m:
+        continue
     cid = m.group(1)
     label = m.group(2).strip()
-    if len(label) > 140:
-        label = label[:137] + "..."
-    choices.append({"id": cid, "label": label})
+    if len(label) > 100:
+        label = label[:97] + "..."
+    glyph_summary = _summarize_glyphs(block)
+    # One-line description for the picker: label + glyph summary
+    picker_desc = label
+    if glyph_summary:
+        picker_desc = f"{label} ({glyph_summary})"
+    if len(picker_desc) > 120:
+        picker_desc = picker_desc[:117] + "..."
+    choices.append({
+        "id": cid,
+        "label": label,
+        "picker_description": picker_desc,
+    })
 with open(dst, "w", encoding="utf-8") as f:
     json.dump(choices, f, ensure_ascii=False, indent=2)
 print(f"wrote {len(choices)} candidates → {dst}", file=sys.stderr)

@@ -148,13 +148,15 @@ is up.)
 For each candidate in `choices`:
 
 - `option`: the candidate id (e.g., `TL1`, `TL2`)
-- `description`: a **single short line** — start with the candidate's
-  H2-line title (e.g., "Multi-evidence prioritization for
-  experimental targets"), truncated to ~100 chars total. If a glyph-
-  cross-walk advisory warning applies to this candidate, append
-  `[⚠ cross-walk]` to the line so it stays one line. **Do NOT include
-  evidence-map rows, weakness-inventory bullets, or multi-paragraph
-  context — that is what the candidates file is for.**
+- `description`: use the `picker_description` field from the handoff
+  JSON **VERBATIM**. This is pre-formatted to ≤120 chars with the
+  candidate title + glyph summary. **Do NOT compose your own
+  description. Do NOT read throughline_candidates.md and add evidence-
+  map rows, weakness-inventory bullets, or multi-paragraph context.
+  Claude Code's AskUserQuestion widget truncates descriptions >1 line
+  with a "N lines hidden" collapse that the user cannot expand.
+  The full candidate content is in throughline_candidates.md — that is
+  where the user reads it, not in the picker widget.**
 
 Question framing (the AskUserQuestion's prompt to the user):
 
