@@ -303,6 +303,59 @@ def _parse_data_cells(row_line: str, n_cols: int) -> list[str]:
     return trimmed[:n_cols]
 
 
+def _escape_inner_pipes(line: str, n_cols: int) -> str:
+    """Escape ``|`` characters inside cell values so the rendered markdown
+    table has the correct column count.
+
+    The ``|fit|`` trap: a cell value like ``|fit|`` is indistinguishable
+    from two cell boundaries unless we know the expected column count.
+    Strategy: split on ``|``, identify ``(empty, word, empty)`` triplets
+    that inflate the count beyond *n_cols*, merge them back as
+    ``\\|word\\|``, and reassemble.
+
+    If the raw split already matches *n_cols* (no pipe-in-cell values),
+    returns the line unchanged.
+    """
+    inner = line.strip()
+    has_leading = inner.startswith("|")
+    has_trailing = inner.endswith("|")
+    if has_leading:
+        inner = inner[1:]
+    if has_trailing:
+        inner = inner[:-1]
+
+    raw = inner.split("|")
+    if len(raw) <= n_cols:
+        return line  # no inflation — no fix needed
+
+    # Merge |foo| triplets (empty, short-word, empty) → backslash-escaped
+    merged: list[str] = []
+    i = 0
+    while i < len(raw):
+        cell = raw[i].strip()
+        if (
+            cell == ""
+            and i + 2 < len(raw)
+            and raw[i + 1].strip() != ""
+            and len(raw[i + 1].strip()) < 10
+            and raw[i + 2].strip() == ""
+        ):
+            word = raw[i + 1].strip()
+            # Preserve original spacing from the middle cell
+            merged.append(f" \\|{word}\\| ")
+            i += 3
+        else:
+            merged.append(raw[i])
+            i += 1
+
+    result = "|".join(merged)
+    if has_leading:
+        result = "|" + result
+    if has_trailing:
+        result = result + "|"
+    return result
+
+
 def scan_report_tables(text: str) -> list[dict]:
     """Scan markdown text for pipe-delimited tables.
 
@@ -534,8 +587,19 @@ def extract_tables(project_dir: Path) -> TableInventoryReport:
         else:
             column_types = ["text"] * column_count
 
-        # Full markdown content (verbatim)
-        markdown_content = "\n".join(tbl["lines"])
+        # Full markdown content — with inner-pipe escaping so downstream
+        # markdown renderers see the correct column count.  The separator
+        # line is left untouched (it has no cell values).
+        escaped_lines: list[str] = []
+        for li, raw_line in enumerate(tbl["lines"]):
+            if li == 1:
+                # separator row — pass through
+                escaped_lines.append(raw_line)
+            else:
+                escaped_lines.append(
+                    _escape_inner_pipes(raw_line, column_count)
+                )
+        markdown_content = "\n".join(escaped_lines)
 
         # Section heading (nearest heading above the table)
         # line_start is 1-based; convert to 0-based for array indexing

@@ -1,7 +1,8 @@
 feat: v0.6.0 — Tier 9 Tables pipeline + backlog fixes
 
 Tables pipeline (mirrors v0.3 figures architecture):
-- extract_tables.py: scan REPORT.md pipe-tables, |fit| trap handling,
+- extract_tables.py: scan REPORT.md pipe-tables, |fit| trap handling
+  (triplet detection + backslash-escape in content output),
   tables_inventory.md with caption candidates + column types + previews
 - results.v1.md: TABLES_INVENTORY_PATH input, table selection (1-6),
   tables_manifest.tsv emission, HALT discipline, self-review 6b
@@ -13,6 +14,12 @@ Tables pipeline (mirrors v0.3 figures architecture):
 - Orchestrator: phase_extract runs extract_tables.py, phase_results
   passes TABLES_INVENTORY_PATH, phase_check_tables_manifest +
   phase_embed_tables in main flow and rewrite loop
+
+Live-retest fixes:
+- Resume path (drafting case): mkdir -p audit/figures/reviews +
+  re-run phase_extract when inventory files missing (extract only
+  runs on draft verb; reset-to-drafting resume skipped it)
+- Also added mkdir guard to review resume case
 
 Backlog (0a/0c/0d from v0.4/v0.5):
 - --max-cost-usd + --recaption on Python CLI (draft.py, continue_run.py)
