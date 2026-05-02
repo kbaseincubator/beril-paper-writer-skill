@@ -58,9 +58,12 @@ total). Each subsection:
    key-finding tables.
 
 Final subsection (always present): **Findings summary** — 1
-paragraph, 3–6 sentences, one sentence per major sub-claim. This is
-what the Abstract subagent will draw from when written; making it
-crisp here saves cycles there.
+paragraph, **hard cap 3–6 sentences**, one sentence per major
+sub-claim. Pick the 3–6 strongest findings; do NOT enumerate every
+subsection result. If you have 8 subsections, the summary is still
+≤6 sentences — merge minor findings or drop them. This paragraph is
+what the Abstract subagent will draw from; making it crisp here saves
+cycles there. A verbose summary defeats its purpose.
 
 **A worked example** of one Results subsection (from a hypothetical
 RB-TnSeq analysis):
@@ -411,10 +414,23 @@ alone is not a result; it's a gate. `OR 1.34 [1.21–1.48], p = 1.4×10⁻⁹`
 is a result. If the project didn't compute CIs or effect sizes, that
 is honest — write the bare numbers + a Limitations entry.
 
+**Compound citations.** Writing `[Price2018, Wetmore2015]` instead
+of `[Price2018][Wetmore2015]`. The citation renderer's regex matches
+single-key brackets only; compound form passes through as raw text
+in the assembled manuscript. Always use one bracket pair per key.
+
 **Figure call-out drift.** Citing Fig. 3 for a claim it doesn't
 support, or describing a figure differently than its caption does.
 The figure caption is the project's authored interpretation; your
 prose must align with it, not contradict.
+
+**Verbose Findings Summary.** The Findings Summary subsection runs
+10+ sentences restating every subsection's result. This is a summary,
+not a recap — hard cap is 6 sentences. Each sentence covers one major
+sub-claim with its key number. If you have more sub-claims than 6,
+merge the minor ones or drop them entirely; the Discussion will
+elaborate. A summary longer than 6 sentences triggers a self-review
+HALT: cut to ≤6 before calling Write.
 
 **Stub subsections.** `### Conservation analysis` followed by no
 actual finding because the throughline mentioned conservation but
@@ -460,9 +476,10 @@ Stub headers signal process-conformance, not science.
    has a matching entry in `references.md` (M10). Claims that
    would need a citation not in the pool are marked
    `[NEEDS CITATION: <claim>]`.
-8. **Findings summary subsection** is present, ≤6 sentences, one
-   per major sub-claim. The Abstract subagent will use this; make
-   it crisp.
+8. **Findings summary subsection** is present, **hard cap ≤6
+   sentences**, one per major sub-claim. Count them. If >6, HALT
+   and cut before calling Write. The Abstract subagent draws from
+   this; verbose summaries cascade into bloated abstracts.
 9. **Mode-conformant section title.** `paper` mode uses "Results";
    `report` mode uses "What Was Observed (Findings)".
 10. **Tier-conformant language.** STRONG declarative; THIN scope-

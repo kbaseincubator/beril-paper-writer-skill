@@ -1,0 +1,38 @@
+v0.6.2: Opus model selection + prompt tightening + assembly fixes
+
+Per-section model selection (Opus for narrative, Sonnet for mechanical):
+- paper_writer.sh: --model-writing flag + PAPER_WRITER_MODEL_WRITING env var
+- Default: claude-opus-4-6 for Intro, Discussion, Abstract, Reframer,
+  repair_validators, and review_rewrite phases
+- Default: claude-sonnet-4-5 for Methods, Results, plan, citation_pool
+- Backward compatible: --model still controls mechanical sections
+
+Prompt engineering:
+- intro.v1.md: Continuous flowing prose (no visible subsection headers);
+  approach-in-brief tightened to exactly 3 sentences; compound-citation
+  and subsection-header anti-patterns added; self-review items updated
+- abstract.v1.md: Results subsection "pick 3 strongest findings" (was
+  enumerate all); Conclusions requires "so what" sentence connecting to
+  experimental impact; background/methods tightened to 2-3 sentences;
+  kitchen-sink and flat-conclusions anti-patterns added
+- results.v1.md: Findings Summary hard cap 3-6 sentences enforced with
+  HALT trigger; verbose-summary anti-pattern added; compound-citation
+  anti-pattern added
+- discussion.v1.md: Synthesis paragraph required after Findings-in-context
+  subsections; compound-citation anti-pattern added; word budget guidance
+  (800-1500 STRONG, 600-1200 THIN, 500-1000 EXPLORATORY); worked example
+  fixed to use [Key1][Key2] not [Key1, Key2]
+- _SKELETON.md: Rule 9 added — no LLM-generated attribution lines in
+  section output
+
+Script fixes:
+- paper_writer.sh: Adversarial CLI binary name fixed (beril-adversarial,
+  not beril-adversarial-cli)
+- paper_writer.sh: Assembly phase strips stray Co-Authored-By lines from
+  manuscript.md (LLM spontaneously generates them in section files)
+- citation_pool.py: Compound citation splitter — [Key1, Key2] → [Key1][Key2]
+  applied at both extract_citekeys and render-with-numbers stages
+
+Tests: 543 passed
+
+Co-Authored-By: Claude <noreply@anthropic.com>

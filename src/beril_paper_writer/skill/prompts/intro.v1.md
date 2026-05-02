@@ -43,23 +43,29 @@ the closing-message template (below).
 
 ## Output format (Introduction structure)
 
-Markdown prose under standard IMRAD Introduction structure. Paper
-mode subsections:
+Markdown prose under standard IMRAD Introduction structure. **Write
+as continuous flowing prose — NO subsection headers.** Most journals
+render Introduction as unbroken text. Internally, organize the
+content into three conceptual blocks, but do NOT emit `###` headers
+or any subsection markers:
 
-1. **Background and motivation** — 1–2 paragraphs. The field
-   context this paper sits in. Cite from the pool for
-   foundational work and the most-recent key references. Keep
-   tight; this is not a literature review.
-2. **Gap and research question** — 1 paragraph. What's been done
-   that's adjacent to this work (cite); what gap remains; the
-   specific research question the project addresses. The question
-   must match the throughline's claim — phrase it as a question
-   the throughline answers.
-3. **Approach in brief** — 1 paragraph. One-sentence preview of
-   methods (don't replicate Methods); one-sentence preview of the
-   key finding (don't replicate Results); one-sentence preview of
-   what the paper contributes to the field. This is the
+1. **Background and motivation** (conceptual block, no header) —
+   1–2 paragraphs. The field context this paper sits in. Cite from
+   the pool for foundational work and the most-recent key
+   references. Keep tight; this is not a literature review.
+2. **Gap and research question** (conceptual block, no header) —
+   1 paragraph. What's been done that's adjacent to this work
+   (cite); what gap remains; the specific research question the
+   project addresses. The question must match the throughline's
+   claim — phrase it as a question the throughline answers.
+3. **Approach in brief** (conceptual block, no header) —
+   **EXACTLY 3 sentences.** One sentence previewing methods (don't
+   replicate Methods); one sentence previewing the key finding
+   (don't replicate Results); one sentence stating what the paper
+   contributes to the field with a scope-disclaimer. This is the
    "exactly what the paper delivers, no more, no less" paragraph.
+   If your approach-in-brief block exceeds 5 sentences, you have
+   drifted into Results territory. Cut.
 
 For `MODE = report`: section title is "Background and Question" per
 SPEC §3.2.2. Single section, descriptive only — no
@@ -237,8 +243,10 @@ pool was sized for Discussion.
 
 Walk the section structure against `MODE`:
 
-- `paper` → three subsections (Background and motivation / Gap and
-  research question / Approach in brief).
+- `paper` → three conceptual blocks (Background and motivation /
+  Gap and research question / Approach in brief) written as
+  **continuous prose without subsection headers**. The `## Introduction`
+  top-level header is the only visible header.
 - `report` → single "Background and Question" section per SPEC
   §3.2.2. No Approach-in-brief contribution framing; replace with
   one-line pointer to "What Was Done."
@@ -304,6 +312,19 @@ Generic, applies to any paper, says nothing about this paper's
 specific contribution. The motivation must name a *specific*
 field gap the *specific* project addresses.
 
+**Compound citations in one bracket.** `[Price2018, Wetmore2015]`
+breaks the citation-renumbering pipeline, which expects one key
+per bracket pair. Use `[Price2018][Wetmore2015]` (adjacent
+brackets, no space) for multi-citation references. The
+`render-with-numbers` step matches `[single_key]` individually
+and cannot parse comma-separated keys inside one bracket pair.
+
+**Subsection headers in Introduction.** Do NOT emit `###
+Background and motivation` or `### Gap and research question` or
+`### Approach in brief` as visible headers. These are internal
+organizational guidance, not output format. Write continuous
+flowing prose with paragraph breaks between the conceptual blocks.
+
 ## Self-review pass (before calling Write)
 
 1. **Drafting order respected.** Discussion was settled before this
@@ -321,10 +342,12 @@ field gap the *specific* project addresses.
 5. **Every citation supports a specific claim**, not a generic
    appeal to authority. Walk every `[bib_key]` and name what it supports.
 6. **Methods preview is one sentence**; Results preview is one
-   sentence. No re-statement of either.
+   sentence. No re-statement of either. Approach-in-brief block
+   is exactly 3 sentences total.
 7. **Mode-conformant section title.** `paper` → "Introduction" or
    "Background and Significance"; `report` → "Background and
-   Question."
+   Question." **No subsection headers** within Introduction —
+   continuous flowing prose only.
 8. **Tier-conformant language.** STRONG declarative; THIN scoped;
    EXPLORATORY cautious-descriptive without novelty positioning.
 9. **No findings beyond what Results / Discussion establish.** No

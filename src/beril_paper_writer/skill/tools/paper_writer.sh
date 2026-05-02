@@ -42,8 +42,11 @@ set -uo pipefail
 # Defaults
 # ==============================================================================
 
-# Pin Sonnet for cost discipline; opus is overrideable via --model.
+# Pin Sonnet for mechanical sections (Methods, Results, plan, citation_pool).
+# Opus for narrative-intensive sections (Intro, Discussion, Abstract, Reframer).
+# Both overrideable via --model / --model-writing (or env vars).
 DEFAULT_MODEL="claude-sonnet-4-5-20250929"
+DEFAULT_MODEL_WRITING="claude-opus-4-6-20250918"
 
 # Tool grant for claude -p — every prompt should have access to these.
 # Bash, WebSearch, and Agent are required by some prompts (citation_pool
@@ -71,7 +74,12 @@ Usage:
     paper_writer.sh resume <draft_dir>             Resume from state.json's current phase.
 
 Subcommand-agnostic options (env vars or flags):
-    --model <id>       Override default model (env: PAPER_WRITER_MODEL)
+    --model <id>       Override default model for mechanical sections: Methods,
+                       Results, plan, citation_pool (env: PAPER_WRITER_MODEL;
+                       default: claude-sonnet-4-5-20250929)
+    --model-writing <id>  Override model for narrative sections: Introduction,
+                       Discussion, Abstract, Reframer (env: PAPER_WRITER_MODEL_WRITING;
+                       default: claude-opus-4-6-20250918)
     --depth <level>    quick | standard | deep (env: PAPER_WRITER_DEPTH; default: standard)
     --mode <m>         paper | report (env: PAPER_WRITER_MODE; default: tier-driven)
     --no-stream        Disable stream_progress.py (no Write verification)
@@ -1747,6 +1755,16 @@ EOF
         done
     } > "$manuscript"
 
+    # Strip LLM-generated attribution lines that individual section agents
+    # sometimes emit spontaneously (e.g. "Co-Authored-By: Claude ...").
+    # Authorship belongs only in the orchestrator-owned title block.
+    if grep -qiE '^Co-Authored-By:' "$manuscript" 2>/dev/null; then
+        local n_attr
+        n_attr="$(grep -ciE '^Co-Authored-By:' "$manuscript")"
+        sed -i'' -e '/^[Cc]o-[Aa]uthored-[Bb]y:/d' "$manuscript"
+        log_step "Stripped $n_attr stray Co-Authored-By line(s) from assembled manuscript"
+    fi
+
     log_step "Running validate_manuscript.py"
     local mode
     mode="$(read_state_field "$draft_dir" "mode")"; [[ -z "$mode" ]] && mode="paper"
@@ -2057,17 +2075,17 @@ run_reviewer_pass() {
         return 0
     fi
 
-    if command -v beril-adversarial-cli &>/dev/null; then
-        log_step "Invoking beril-adversarial-cli --type paper (pass $review_number)"
-        beril-adversarial-cli --type paper "$project_id" \
+    if command -v beril-adversarial &>/dev/null; then
+        log_step "Invoking beril-adversarial --type paper (pass $review_number)"
+        beril-adversarial --type paper "$project_id" \
             > "$review_out" 2>&1 || \
-            log_warn "beril-adversarial-cli exited non-zero on pass $review_number; review may be partial"
+            log_warn "beril-adversarial exited non-zero on pass $review_number; review may be partial"
         if [[ ! -s "$review_out" ]]; then
             log_warn "Adversarial review file empty; falling back to inline reviewer"
             run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
         fi
     else
-        log_warn "beril-adversarial-cli not on PATH; using fallback inline reviewer (pass $review_number)"
+        log_warn "beril-adversarial not on PATH; using fallback inline reviewer (pass $review_number)"
         run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
     fi
 }
@@ -2512,6 +2530,7 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --model)          DEFAULT_MODEL="$2"; shift 2 ;;
+            --model-writing)  DEFAULT_MODEL_WRITING="$2"; shift 2 ;;
             --depth)          PAPER_WRITER_DEPTH="$2"; export PAPER_WRITER_DEPTH; shift 2 ;;
             --mode)           PAPER_WRITER_MODE="$2"; export PAPER_WRITER_MODE; shift 2 ;;
             --no-stream)     NO_STREAM=1; shift ;;
@@ -2530,6 +2549,10 @@ main() {
     done
 
     local model="${PAPER_WRITER_MODEL:-$DEFAULT_MODEL}"
+    local model_writing="${PAPER_WRITER_MODEL_WRITING:-$DEFAULT_MODEL_WRITING}"
+
+    log_step "Model (mechanical): $model"
+    log_step "Model (writing):    $model_writing"
 
     if [[ -z "$positional" ]]; then
         log_error "$verb requires a positional argument."
@@ -2640,13 +2663,13 @@ main() {
                         || halt_with "$draft_dir" "methods.v1 failed after retry exhaustion"
                     phase_results       "$project_root" "$draft_dir" "$model" \
                         || halt_with "$draft_dir" "results.v1 failed after retry exhaustion"
-                    phase_discussion    "$project_root" "$draft_dir" "$model" \
+                    phase_discussion    "$project_root" "$draft_dir" "$model_writing" \
                         || halt_with "$draft_dir" "discussion.v1 failed after retry exhaustion"
-                    phase_intro         "$project_root" "$draft_dir" "$model" \
+                    phase_intro         "$project_root" "$draft_dir" "$model_writing" \
                         || halt_with "$draft_dir" "intro.v1 failed after retry exhaustion"
-                    phase_abstract      "$project_root" "$draft_dir" "$model" \
+                    phase_abstract      "$project_root" "$draft_dir" "$model_writing" \
                         || halt_with "$draft_dir" "abstract.v1 failed after retry exhaustion"
-                    phase_reframe_drift_audit "$project_root" "$draft_dir" "$model" \
+                    phase_reframe_drift_audit "$project_root" "$draft_dir" "$model_writing" \
                         || halt_with "$draft_dir" "reframer.v1 drift audit failed; inspect audit/reframer.metadata.json"
                     phase_data_avail    "$project_root" "$draft_dir" "$project_id" \
                         || halt_with "$draft_dir" "data_availability template fill failed (orchestrator-side, no LLM); inspect tools/paper_writer_helpers.py"
@@ -2662,11 +2685,11 @@ main() {
                     phase_check_overclaim "$draft_dir"
                     phase_assemble      "$draft_dir" \
                         || halt_with "$draft_dir" "assemble (concat + validate_manuscript) failed"
-                    phase_repair_validators "$project_root" "$draft_dir" "$model" "$project_id"
+                    phase_repair_validators "$project_root" "$draft_dir" "$model_writing" "$project_id"
                     set_state_phase     "$draft_dir" "review"
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \
                         || halt_with "$draft_dir" "review phase failed (adversarial-cli or fallback reviewer)"
-                    phase_review_rewrite "$project_root" "$draft_dir" "$model" "$project_id"
+                    phase_review_rewrite "$project_root" "$draft_dir" "$model_writing" "$project_id"
                     phase_assemble_docx "$draft_dir"
                     emit_review_handoff "$draft_dir" \
                         || halt_with "$draft_dir" "review handoff emission failed"
@@ -2680,7 +2703,7 @@ main() {
                     # interrupted rewrite cycle. Both phases are no-ops when their output exists.
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \
                         || halt_with "$draft_dir" "review phase failed during resume"
-                    phase_review_rewrite "$project_root" "$draft_dir" "$model" "$project_id"
+                    phase_review_rewrite "$project_root" "$draft_dir" "$model_writing" "$project_id"
                     phase_assemble_docx "$draft_dir"
                     emit_review_handoff "$draft_dir" \
                         || halt_with "$draft_dir" "review handoff emission failed during resume"

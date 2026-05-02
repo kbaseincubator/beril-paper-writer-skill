@@ -53,6 +53,14 @@ throughline's claims. Subsections (paper mode):
    from the pool; mark `[NEEDS CITATION: <claim>]` only when the
    pool truly lacks coverage and you've exhausted the pool's
    options.
+2b. **Synthesis paragraph** — After the Findings-in-context
+   subsections and before Conflicting findings, write one paragraph
+   (3–5 sentences) that synthesizes across the thematic subsections:
+   what pattern emerges when taken together? This is the Discussion's
+   intellectual contribution — not restating findings, but connecting
+   them into a coherent interpretation within the throughline's scope.
+   If no cross-theme synthesis is possible (findings are genuinely
+   independent), say so explicitly in one sentence and move on.
 3. **Conflicting findings** — explicit subsection if the citation
    pool has any `assessment: contradicts` entries, OR if the
    throughline's evidence map flagged contradicting evidence within
@@ -78,7 +86,7 @@ followed by Limitations and Next Steps.
 
 Our finding that 95 dark genes show strong fitness phenotypes
 preferentially in stress conditions converges with prior cross-
-organism analyses of fitness data [Price2018, Wetmore2015], which
+organism analyses of fitness data [Price2018][Wetmore2015], which
 reported similar stress-condition enrichment for unannotated genes in
 *E. coli* [Price2018] and across the Wetmore et al. 32-organism panel
 [Wetmore2015]. The effect size we observe (OR 1.34 [1.21–1.48]) is
@@ -334,6 +342,11 @@ would be needed, what analysis would test it, what experimental
 validation would be definitive. Vague is rejected; specific is the
 standard.
 
+**Compound citations.** Writing `[Price2018, Wetmore2015]` instead
+of `[Price2018][Wetmore2015]`. The citation renderer's regex matches
+single-key brackets only; compound form passes through as raw text
+in the assembled manuscript. Always use one bracket pair per key.
+
 **Re-introducing numbers.** Discussion restates Results' numbers,
 or introduces new ones from notebooks. Either is wrong: Discussion
 references Results' findings ("the 95 conditions reported in §3.2")
@@ -365,6 +378,14 @@ without re-stating numbers; new numbers belong in Results.
 10. **Mode/tier-conformant.** `report` mode → "Observations and
     Open Questions"; EXPLORATORY tier → no causal claims, no
     novelty positioning.
+11. **Synthesis paragraph present.** After Findings-in-context
+    subsections, one paragraph ties themes together. If missing,
+    add before calling Write.
+12. **Word budget.** Discussion should be 800–1500 words for STRONG
+    tier, 600–1200 for THIN, 500–1000 for EXPLORATORY. Count before
+    Write; if over budget, tighten — verbose Discussions dilute the
+    intellectual contribution. This is guidance, not a HALT
+    trigger — ±20% is acceptable if the content is substantive.
 
 **Anti-example pairs** — overclaim and grounded prose side by side:
 

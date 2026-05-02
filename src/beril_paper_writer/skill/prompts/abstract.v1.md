@@ -35,18 +35,26 @@ the closing-message template (below).
 For `MODE = paper`: structured Abstract per ICMJE IV.A.3.b. Four
 required subsections in this order:
 
-1. **Background / Objective** — 2–4 sentences. Field context + the
+1. **Background / Objective** — 2–3 sentences. Field context + the
    specific question the paper addresses. Match the Introduction's
    research question (not a paraphrase that drifts).
-2. **Methods** — 2–4 sentences. Specific methods named (analysis
+2. **Methods** — 2–3 sentences. Specific methods named (analysis
    type, software, sample size). No version numbers in Abstract;
    they live in Methods §"Software and Versions."
-3. **Results** — 3–5 sentences. The headline findings with key
-   numerical claims (n, effect size, p or q). Numbers must
-   match Results exactly.
-4. **Conclusions** — 1–3 sentences. The contribution, scoped to
+3. **Results** — 3–4 sentences. **Pick the 3 strongest findings**
+   from the Results' Findings Summary — not all of them. The
+   abstract previews the paper; it does not substitute for it. Each
+   sentence carries one key numerical claim (n, effect size, p or
+   q). Numbers must match Results exactly. If the project has 8
+   findings, the abstract highlights the 3 most important; the
+   reader will find the rest in Results.
+4. **Conclusions** — 2–3 sentences. The contribution, scoped to
    what Discussion actually concluded. Same scope discipline as
-   Introduction's contribution sentence.
+   Introduction's contribution sentence. **Must include a "so
+   what" sentence** connecting the contribution to experimental
+   impact — what can a bench scientist DO with this result? Do not
+   end Conclusions with a restatement of what was produced; end
+   with why it matters.
 
 Subsection headers are bold-and-italic per ICMJE convention:
 `**_Background:_**`, `**_Methods:_**`, `**_Results:_**`,
@@ -320,6 +328,21 @@ content, not formatting tricks.
 patterns in the data and found some interesting things." Goes too
 far in the EXPLORATORY direction; the Abstract still has to say
 *what* was explored and *what* was found. Cautious ≠ vague.
+
+**Kitchen-sink Results subsection.** Cramming every finding into
+the Abstract's Results subsection (8+ numerical claims, 6+ distinct
+findings). The Abstract is a preview, not a compressed Results
+section. Pick the 3 strongest findings; leave the rest for the
+body. If your Results subsection exceeds 5 sentences, you are
+writing a miniature Results section, not an abstract.
+
+**Flat Conclusions.** "Multi-dimensional scoring produces a
+defensible ranked catalog with experimentally actionable functional
+hypotheses." This tells the reader what was produced but not why
+they should care. End Conclusions with the experimental payoff:
+what specific experiments become possible, what class of questions
+this enables. The reader should finish the abstract knowing both
+what was delivered and what to do with it.
 
 ## Self-review pass (before calling Write)
 

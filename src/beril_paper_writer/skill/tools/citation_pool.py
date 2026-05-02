@@ -875,6 +875,28 @@ def _cmd_load(args: argparse.Namespace) -> int:
 # pre-edit numeric citations.
 _CITEKEY_PATTERN = re.compile(r"\[([A-Z][a-zA-Z]*\d{4}(?:[a-z]|_\d+)?)\]")
 
+# Compound-citation pattern: matches `[Key1, Key2]` or `[Key1, Key2, Key3]`
+# etc. where each key matches _CITEKEY_PATTERN's inner group. The LLM
+# sometimes emits comma-separated bib_keys in a single bracket pair; this
+# regex lets us split them into individual `[Key1][Key2]` form before
+# per-key substitution runs.
+_COMPOUND_CITE_RE = re.compile(
+    r"\[("
+    r"[A-Z][a-zA-Z]*\d{4}(?:[a-z]|_\d+)?"     # first key
+    r"(?:\s*,\s*"                                 # comma separator
+    r"[A-Z][a-zA-Z]*\d{4}(?:[a-z]|_\d+)?"       # subsequent key(s)
+    r")+"                                          # at least one comma = compound
+    r")\]"
+)
+
+
+def _split_compound_citations(text: str) -> str:
+    """Normalize ``[Key1, Key2]`` → ``[Key1][Key2]`` so per-key substitution works."""
+    def _expand(m: re.Match) -> str:
+        keys = [k.strip() for k in m.group(1).split(",")]
+        return "".join(f"[{k}]" for k in keys)
+    return _COMPOUND_CITE_RE.sub(_expand, text)
+
 # IMRAD ordering for citation-number assignment. The same order is used
 # for first-citation discovery walking. Results-before-Discussion
 # matches journal convention.
@@ -916,6 +938,9 @@ def extract_citekeys_in_first_citation_order(
         if not section_path.is_file():
             continue
         text = section_path.read_text(encoding="utf-8")
+        # Normalize compound citations [Key1, Key2] → [Key1][Key2] so
+        # the per-key regex catches each one individually.
+        text = _split_compound_citations(text)
         # Track paragraph number (1-based) by counting blank-line separators.
         paragraph_n = 1
         for line in text.split("\n"):
@@ -1051,6 +1076,11 @@ def _cmd_render_with_numbers(args: argparse.Namespace) -> int:
     raw = json.loads(pool_path.read_text(encoding="utf-8"))
     pool = CitationPool.from_dict(raw)
     text = section_path.read_text(encoding="utf-8")
+
+    # Normalize compound citations [Key1, Key2] → [Key1][Key2] before
+    # per-key substitution. Without this, compound forms pass through
+    # unmatched and appear as raw bib_keys in the assembled manuscript.
+    text = _split_compound_citations(text)
 
     # Build a replacement function: [bib_key] → [N] iff key is in
     # citation_map; else leave the [bib_key] intact.
