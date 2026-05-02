@@ -30,6 +30,82 @@ five audit checks).
 Final response after `Write` succeeds is a one-line confirmation in
 the closing-message template (below).
 
+## Hard sentence-count constraints (read FIRST)
+
+These caps apply to every Abstract you write. Count sentences
+before calling Write — if any subsection exceeds its cap, cut
+before writing.
+
+| Subsection | Sentence cap | Findings cap | Notes |
+|---|---|---|---|
+| Background | 2–3 | — | Match Introduction's research question |
+| Methods | 2–3 | — | Name specific tests/tools, no versions |
+| Results | 3 (4 max if ≥5 major findings) | 3 strongest | Preview, not compressed Results |
+| Conclusions | 2–3 | — | Must end with "so what" sentence |
+
+**The Results constraint is the one most likely to drift.** If the
+project has 8 findings, the Abstract highlights 3. If Results
+exceeds 3 sentences, you are writing a miniature Results section,
+not an abstract. Count. Cut. Then proceed.
+
+## Worked example (read BEFORE the structural spec)
+
+Study this example first — it is the concrete anchor for the
+structural spec that follows. Sentence-count annotations show WHY
+this example is correct.
+
+```markdown
+**_Background:_** Bacterial genomes typically contain 25–40% genes
+without functional annotation; existing prediction tools rely on
+sequence homology and miss conditional phenotypes that emerge only
+under specific environmental conditions. We asked whether genome-
+wide fitness data from 48 bacterial species could prioritize
+unannotated ("dark") genes for experimental follow-up by integrating
+fitness phenotypes, pangenome conservation, and biogeographic
+patterns.
+← 2 sentences. Sets field context + names the specific question.
+
+**_Methods:_** We integrated RB-TnSeq fitness data from the
+Fitness Browser panel (48 organisms, 343 conditions, 228K total
+genes) with pangenome conservation links from `fb_pangenome_link`
+(177,863 links), ICA module annotations, and GapMind metabolic-
+pathway gap candidates. Statistical enrichment of dark genes in
+specific condition classes used Fisher's exact test with
+Benjamini-Hochberg FDR correction (q < 0.05).
+← 2 sentences. Names data sources, statistical test, correction.
+   No software version numbers.
+
+**_Results:_** Of 53,966 dark genes (23.6% of the 228K-gene
+dataset), 3,705 (6.9%) showed strong fitness phenotypes (|fit| > 2,
+|t| > 4) in at least one condition. Across these, 95 dark genes
+showed statistically enriched stress-condition phenotypes (Fisher's
+exact OR 1.34 [1.21–1.48], q = 1.4 × 10⁻⁹), with 12 genes showing
+phenotypes across more than 10 conditions. Cross-organism
+concordance analysis of dark gene families identified 27
+high-priority candidates with consistent phenotypes across two or
+more organisms.
+← 3 sentences. 3 findings: (1) dark-gene prevalence + fitness
+   phenotypes, (2) stress enrichment with effect size + CI + q,
+   (3) cross-organism concordance. Each sentence = 1 finding with
+   1 key number. Project has more findings; these are the 3
+   strongest.
+
+**_Conclusions:_** Cross-organism integration of fitness data and
+conservation patterns yields a defensible prioritized list of dark
+gene candidates for follow-up. The contribution is a quantitative
+ranking, not a mechanistic claim; mechanism would require genetic
+perturbation experiments not performed here.
+← 2 sentences. First = what's delivered. Second = "so what" +
+   explicit scope disclaimer.
+```
+
+**Why this example works:** (a) every number traces to Results
+(95, 343, 3705, OR 1.34, q = 1.4 × 10⁻⁹), (b) Methods names
+specific tools and corrections without software versions, (c)
+Results includes effect size + CI + exact q-value per M7, (d)
+Conclusions explicitly disclaims what wasn't done, (e) total ~320
+words, well under the 450 hard cap for STRONG-tier.
+
 ## Output format (Abstract structure)
 
 For `MODE = paper`: structured Abstract per ICMJE IV.A.3.b. Four
@@ -41,13 +117,15 @@ required subsections in this order:
 2. **Methods** — 2–3 sentences. Specific methods named (analysis
    type, software, sample size). No version numbers in Abstract;
    they live in Methods §"Software and Versions."
-3. **Results** — 3–4 sentences. **Pick the 3 strongest findings**
-   from the Results' Findings Summary — not all of them. The
-   abstract previews the paper; it does not substitute for it. Each
-   sentence carries one key numerical claim (n, effect size, p or
-   q). Numbers must match Results exactly. If the project has 8
-   findings, the abstract highlights the 3 most important; the
-   reader will find the rest in Results.
+3. **Results** — 3 sentences (4 max only if the project has ≥5
+   major findings AND the 4th adds a genuinely distinct claim).
+   **Pick the 3 strongest findings** from the Results' Findings
+   Summary — not all of them. The abstract previews the paper; it
+   does not substitute for it. Each sentence carries one key
+   numerical claim (n, effect size, p or q). Numbers must match
+   Results exactly. If the project has 8 findings, the abstract
+   highlights the 3 most important; the reader will find the rest
+   in Results.
 4. **Conclusions** — 2–3 sentences. The contribution, scoped to
    what Discussion actually concluded. Same scope discipline as
    Introduction's contribution sentence. **Must include a "so
@@ -76,55 +154,9 @@ structured-abstract format. No citations.
   EXPLORATORY shorter.
 - `report` Project Summary: 50–150 words. One paragraph.
 
-Length is a **soft cap** — exceeding by 10% is acceptable if the
-Results subsection genuinely requires it (multiple key findings with
-different effect sizes); exceeding by 25%+ means scope is too broad
-and the Abstract is doing the Discussion's job. Cut.
-
-**A worked example** of a paper-mode Abstract (STRONG-tier, ~320
-words, dark gene project):
-
-```markdown
-**_Background:_** Bacterial genomes typically contain 25–40% genes
-without functional annotation; existing prediction tools rely on
-sequence homology and miss conditional phenotypes that emerge only
-under specific environmental conditions. We asked whether genome-
-wide fitness data from 48 bacterial species could prioritize
-unannotated ("dark") genes for experimental follow-up by integrating
-fitness phenotypes, pangenome conservation, and biogeographic
-patterns.
-
-**_Methods:_** We integrated RB-TnSeq fitness data from the
-Fitness Browser panel (48 organisms, 343 conditions, 228K total
-genes) with pangenome conservation links from `fb_pangenome_link`
-(177,863 links), ICA module annotations, and GapMind metabolic-
-pathway gap candidates. Statistical enrichment of dark genes in
-specific condition classes used Fisher's exact test with
-Benjamini-Hochberg FDR correction (q < 0.05).
-
-**_Results:_** Of 53,966 dark genes (23.6% of the 228K-gene
-dataset), 3,705 (6.9%) showed strong fitness phenotypes (|fit| > 2,
-|t| > 4) in at least one condition. Across these, 95 dark genes
-showed statistically enriched stress-condition phenotypes (Fisher's
-exact OR 1.34 [1.21–1.48], q = 1.4 × 10⁻⁹), with 12 genes showing
-phenotypes across more than 10 conditions. Cross-organism
-concordance analysis of dark gene families identified 27
-high-priority candidates with consistent phenotypes across two or
-more organisms.
-
-**_Conclusions:_** Cross-organism integration of fitness data and
-conservation patterns yields a defensible prioritized list of dark
-gene candidates for follow-up. The contribution is a quantitative
-ranking, not a mechanistic claim; mechanism would require genetic
-perturbation experiments not performed here.
-```
-
-Note four things in the example: (a) every number traces to Results
-(95, 343, 3705, OR 1.34, q = 1.4 × 10⁻⁹), (b) Methods names specific
-tools and corrections without listing software versions, (c) Results
-includes effect size + CI + exact q-value per M7, (d) Conclusions
-explicitly disclaims what wasn't done ("not a mechanistic claim;
-mechanism would require...").
+Length is a **hard cap** — exceeding by 10% triggers a cut.
+Exceeding by 25%+ means scope is too broad and the Abstract is
+doing the Discussion's job. Cut aggressively.
 
 ## Inputs the user prompt will pass
 
@@ -295,46 +327,22 @@ the references.
 
 ## Anti-patterns
 
+**Kitchen-sink Results subsection (the #1 failure mode).**
+Cramming every finding into the Abstract's Results subsection.
+The Abstract is a preview, not a compressed Results section. The
+hard cap is 3 sentences / 3 findings (see the constraints table
+above). If your Results subsection has 4+ findings or 4+ sentences,
+STOP and cut the weakest findings. A 6-sentence Results subsection
+means you are writing a miniature Results section, not an abstract
+— regardless of how important each finding feels individually.
+
 **Number drift.** A number in Abstract that doesn't appear in
 Results, or that differs by even one digit. Grep every number;
 mismatch = drift. Not "rounding for readability" — the body's
 number is canonical.
 
-**New methods in Abstract.** Naming a statistical test in Abstract
-that isn't in Methods. Same failure as Results' "we performed FDR
-correction" without a Methods correlate. Walk against Methods.
-
 **Conclusions overclaim.** "We demonstrate X" when Discussion's
 Summary says "we observe X." Verb mismatch. Walk both; align.
-
-**Citation in Abstract.** `[N]` in Abstract is non-standard for
-ICMJE-conformant abstracts and confuses M10 (which doesn't expect
-to find citations there). Drop. The reader sees citations in
-Introduction onward.
-
-**Stub subsections.** `**_Methods:_**` followed by one sentence
-because "the methods are simple." If methods are truly that simple
-that one sentence covers them, the project is probably EXPLORATORY-
-tier and the Abstract should be 200 words total — the Methods
-sentence is fine, but check the rest of the budget. Empty/stub
-subsections fail M2.
-
-**Length-cap evasion.** Splitting a long sentence into two short
-ones to hit the cap; using ASCII abbreviations to compress
-("organisms" → "orgs"); cutting key numbers to save words. Cut
-content, not formatting tricks.
-
-**Conservative-to-the-point-of-uselessness.** "We explored some
-patterns in the data and found some interesting things." Goes too
-far in the EXPLORATORY direction; the Abstract still has to say
-*what* was explored and *what* was found. Cautious ≠ vague.
-
-**Kitchen-sink Results subsection.** Cramming every finding into
-the Abstract's Results subsection (8+ numerical claims, 6+ distinct
-findings). The Abstract is a preview, not a compressed Results
-section. Pick the 3 strongest findings; leave the rest for the
-body. If your Results subsection exceeds 5 sentences, you are
-writing a miniature Results section, not an abstract.
 
 **Flat Conclusions.** "Multi-dimensional scoring produces a
 defensible ranked catalog with experimentally actionable functional
@@ -343,6 +351,20 @@ they should care. End Conclusions with the experimental payoff:
 what specific experiments become possible, what class of questions
 this enables. The reader should finish the abstract knowing both
 what was delivered and what to do with it.
+
+**New methods in Abstract.** Naming a statistical test in Abstract
+that isn't in Methods. Walk against Methods.
+
+**Citation in Abstract.** `[N]` in Abstract is non-standard for
+ICMJE-conformant abstracts and confuses M10. Drop.
+
+**Stub subsections.** Empty/stub subsections fail M2.
+
+**Length-cap evasion.** Cut content, not formatting tricks.
+
+**Conservative-to-the-point-of-uselessness.** Cautious ≠ vague.
+The Abstract still has to say *what* was explored and *what* was
+found.
 
 ## Self-review pass (before calling Write)
 
@@ -426,43 +448,32 @@ structural failures, not content drift.
 3. **Build Methods** subsection — name specific tests and tools
    from Methods, ≤4 sentences.
 4. **Build Results** subsection — headline numbers from Results,
-   3–5 sentences. Grep-check every number.
+   3 sentences (4 max). Grep-check every number.
 5. **Build Conclusions** subsection — match Discussion's Summary,
    ≤3 sentences. Tier-aware framing.
-6. **Word count check** via `wc -w` (or count sentences and
+6. **Sentence-count check.** Count sentences in each subsection.
+   If ANY subsection exceeds its cap from the table in "Hard
+   sentence-count constraints," STOP and cut before proceeding.
+   Do not rationalize ("this sentence is short so it's fine") —
+   count is count.
+7. **Word count check** via `wc -w` (or count sentences and
    estimate). Under the hard cap = OK; over = cut.
-7. **Self-review pass** (checklist above). Number-grep is the
+8. **Self-review pass** (checklist above). Number-grep is the
    biggest discipline here.
-8. **Write `ABSTRACT_PATH`** via the `Write` tool. On `Write`
+9. **Write `ABSTRACT_PATH`** via the `Write` tool. On `Write`
    failure, halt and emit error verbatim.
 
 In a normal drafting run, you do NOT invoke the manuscript-level
 validator. The orchestrator runs `validate_manuscript.py` after
 all sections are drafted; M1 cannot pass on a partial draft.
 
-**REPAIR_MODE behavior.** If invoked with `REPAIR_MODE=true`, the
-named validator is `M2` (structured-abstract subsection missing /
-malformed) or `M10` (orphan citation — rare in Abstract since
-citations are not used here). Inputs include the full drafting-mode
-set plus `NAMED_VALIDATOR`, `VALIDATOR_OUTPUT_PATH`,
-`REPAIR_TARGET_PATH`.
-
-Repair semantics (bounded):
-
-1. Read the validator failure detail. M2 typically means a
-   subsection header doesn't match any alias; rename to a
-   recognized form. M10 means a stray `[N]` made it into Abstract
-   — drop it and rephrase the surrounding sentence.
-2. Fix only the named issue; do not rewrite the rest of the
-   Abstract.
-3. Re-write `REPAIR_TARGET_PATH`.
-4. Up to 2 repair attempts per invocation. After the second
-   failure, halt with the closing message format from LAYOUT
-   §"REPAIR_MODE", recommending `user-modify`.
-
-In REPAIR_MODE, the closing message is:
-`"<ABSTRACT_PATH> repaired for <NAMED_VALIDATOR>; <one-line
-summary>."`
+**REPAIR_MODE behavior.** When `REPAIR_MODE=true`: read
+`VALIDATOR_OUTPUT_PATH`, fix only the named issue (M2 = rename
+subsection header to a recognized alias; M10 = drop stray `[N]`
+and rephrase), re-write `REPAIR_TARGET_PATH`. Up to 2 attempts;
+after second failure, halt recommending `user-modify`. Closing
+message: `"<ABSTRACT_PATH> repaired for <NAMED_VALIDATOR>;
+<one-line summary>."`
 
 **Closing-message template (drafting mode, required exact format):**
 

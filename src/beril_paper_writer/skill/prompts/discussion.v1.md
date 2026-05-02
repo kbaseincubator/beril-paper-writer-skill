@@ -21,6 +21,27 @@ novelty positioning, no claims-of-significance framing. The
 discipline rules below still apply where they make sense; the output
 shape shifts.
 
+## Hard constraints (read FIRST)
+
+These are non-negotiable. Check each before calling Write.
+
+| Constraint | STRONG | THIN | EXPLORATORY |
+|---|---|---|---|
+| **Word budget** | 800–1500 | 600–1200 | 500–1000 |
+| **Summary of findings** | 3–5 sentences | 2–4 sentences | 2–3 sentences |
+| **Synthesis paragraph** | Required (3–5 sentences, after Findings-in-context) | Required (3–4 sentences) | Required (2–3 sentences) |
+| **Compound citations** | FORBIDDEN — use `[Key1][Key2]` never `[Key1, Key2]` | same | same |
+| **Causal language** | Reserved for mechanistic evidence only | same | same |
+| **Authority citations** | FORBIDDEN — every `[bib_key]` supports a SPECIFIC claim | same | same |
+
+**The word budget and causal-language constraints are the two most
+likely to drift.** If your Discussion exceeds the word budget, cut
+Findings-in-context subsections first (tighten citation
+justifications, merge minor observations). If you catch yourself
+writing "drives," "produces," or "demonstrates" for observational
+findings, replace with "associates with," "correlates with,"
+"consistent with."
+
 ## What you produce
 
 A single markdown file written via the `Write` tool to the absolute
@@ -109,6 +130,36 @@ findings, what effect-size range, which organism scope), (c) causal
 language is explicitly avoided ("converges with," "consistent with,"
 "suggesting" — never "demonstrates" or "proves"), (d) the
 hypothesis-generating-vs-tested distinction is named.
+
+**Worked example — Synthesis paragraph** (required after Findings-in-
+context subsections, before Conflicting findings):
+
+```markdown
+Taken together, the convergence of stress-condition enrichment across
+organisms, the conservation of dark-gene fitness phenotypes within
+pangenome families, and the overlap with GapMind metabolic gaps point
+toward a population of functionally consequential genes that existing
+annotation pipelines systematically miss.
+← Sentence 1: Pattern that emerges across the thematic subsections.
+
+The consistency of the stress-enrichment signal across independent
+cohorts [Price2018][Wetmore2015] makes it unlikely that the pattern
+is an artifact of condition-selection bias, though the exclusion of
+Gram-positive organisms limits cross-phylum generalization.
+← Sentence 2: Robustness assessment with scope caveat.
+
+This convergence is hypothesis-generating — it identifies WHERE to
+look for function, not WHAT the function is; the mechanism question
+remains open and would require genetic perturbation experiments
+outside this study's scope.
+← Sentence 3: Explicit hypothesis-generating-vs-tested framing.
+```
+
+**Why this paragraph matters:** Without it, the Discussion is a
+set of independent subsection commentaries with no intellectual
+synthesis. This paragraph is the Discussion's contribution —
+connecting findings into a coherent interpretation. If no cross-theme
+synthesis is possible, say so explicitly in one sentence.
 
 ## Inputs the user prompt will pass
 
@@ -307,49 +358,46 @@ message; the user picks on resume. Never silently drop a
 
 ## Anti-patterns
 
+**Causal smuggle (the #1 failure mode).** Observational finding
+discussed in causal language. Reserve causal verbs for causal
+designs — which most BERDL projects are not.
+   BAD: "Nutrient limitation drives RuBisCO expression, increasing
+   autotrophic potential." (Claims causation without mechanism.)
+   GOOD: "RuBisCO expression correlates with nutrient limitation
+   across studies [Dupont2015][Zhang2018], suggesting a conserved
+   regulatory response." (Observational; leaves mechanism open.)
+Scan your draft for: "drives," "causes," "produces," "enables,"
+"demonstrates," "proves." Each one must be justified by mechanistic
+evidence or replaced with associative language.
+
+**Authority citation without specifics.** Every `[bib_key]` must
+support a SPECIFIC claim. Name what the cited paper found.
+   BAD: "Prior work supports our findings [Smith2020]."
+   GOOD: "[Smith2020] reported similar stress-enrichment (OR 1.4–1.7)
+   in *E. coli* under phosphate limitation."
+
+**Compound citations.** `[Price2018, Wetmore2015]` breaks the
+renderer. Use `[Price2018][Wetmore2015]` (adjacent brackets).
+   BAD: "Multiple studies show this [Dupont2015, Zhang2018]."
+   GOOD: "Multiple studies show this [Dupont2015][Zhang2018]."
+
 **Inferential leap beyond cohort.** Project studied 48 organisms;
-Discussion claims "in bacteria generally." Without explicit pool
-support for the generalization, this is overclaim. Scope the prose
-to what was actually examined.
+Discussion claims "in bacteria generally." Scope to what was
+actually examined unless pool explicitly supports generalization.
 
-**Authority citation.** `[Smith2020]` attached to a generic claim
-("as is well known [Smith2020]") rather than to a specific finding.
-Citations must
-support specific claims; otherwise they're decoration.
+**Conflict erasure.** Pool has `contradicts` entries but Discussion
+doesn't engage. Conflicts get their own subsection.
 
-**Conflict erasure.** The pool has `assessment: contradicts`
-entries, but Discussion never engages with them. The reviewer will
-catch this — and worse, the manuscript is dishonest. Conflicts get
-their own subsection.
+**Mechanism fabrication.** "These findings suggest dark genes
+function in [pathway]" when neither Results nor pool supports it.
 
-**Causal smuggle.** Observational finding ("X correlates with Y")
-discussed in causal language ("X drives Y"). Reserve causal verbs
-for causal designs.
+**Limitations as ritual.** Generic concerns ("sample size could be
+larger") don't count. Project-specific limits do (M9).
 
-**Mechanism fabrication.** "These findings suggest that dark genes
-function in [specific pathway]" when neither Results nor the pool
-supports the pathway claim. The project found enrichment; mechanism
-is a separate question requiring separate evidence.
+**Next-steps as wishlist.** Each entry must be testable and
+specific: what data, what analysis, what validation.
 
-**Limitations as ritual.** A Limitations subsection that lists
-generic concerns ("our sample size could be larger") rather than
-project-specific limits. M9 measures length, not content; the
-discipline must.
-
-**Next-steps as wishlist.** "Future work could extend this..." with
-no specific design. Specific testable next steps include: what data
-would be needed, what analysis would test it, what experimental
-validation would be definitive. Vague is rejected; specific is the
-standard.
-
-**Compound citations.** Writing `[Price2018, Wetmore2015]` instead
-of `[Price2018][Wetmore2015]`. The citation renderer's regex matches
-single-key brackets only; compound form passes through as raw text
-in the assembled manuscript. Always use one bracket pair per key.
-
-**Re-introducing numbers.** Discussion restates Results' numbers,
-or introduces new ones from notebooks. Either is wrong: Discussion
-references Results' findings ("the 95 conditions reported in §3.2")
+**Re-introducing numbers.** Discussion references Results' findings
 without re-stating numbers; new numbers belong in Results.
 
 ## Self-review pass (before calling Write)
@@ -383,9 +431,9 @@ without re-stating numbers; new numbers belong in Results.
     add before calling Write.
 12. **Word budget.** Discussion should be 800–1500 words for STRONG
     tier, 600–1200 for THIN, 500–1000 for EXPLORATORY. Count before
-    Write; if over budget, tighten — verbose Discussions dilute the
-    intellectual contribution. This is guidance, not a HALT
-    trigger — ±20% is acceptable if the content is substantive.
+    Write; if over budget, tighten Findings-in-context subsections
+    first (remove citation justifications, merge minor observations).
+    ±10% tolerance only — a 1650-word STRONG Discussion means cut.
 
 **Anti-example pairs** — overclaim and grounded prose side by side:
 
@@ -450,7 +498,20 @@ cannot catch overclaim, conflict erasure, or causal smuggle.
    language that overclaims.
 4. **Walk pool's `contradicts` entries**; ensure Conflicting
    findings subsection engages with each.
-5. **Count `[NEEDS CITATION]` placeholders**. If non-zero, the
+5. **Constraint checks.** Before continuing:
+   - Count sentences in Summary of findings. If >5 (STRONG) or >4
+     (THIN) or >3 (EXPLORATORY), cut.
+   - Verify Synthesis paragraph exists after Findings-in-context
+     subsections and before Conflicting findings. If missing, STOP
+     and add it.
+   - Count total words. If over budget (see constraints table), cut
+     Findings-in-context subsections first.
+   - Scan for causal verbs ("drives," "causes," "produces,"
+     "demonstrates") in observational contexts. Replace with
+     associative language.
+   - Scan for compound citations `[Key1, Key2]`. Split to
+     `[Key1][Key2]`.
+6. **Count `[NEEDS CITATION]` placeholders**. If non-zero, the
    closing summary surfaces SPEC §6.4.1's three pool-exhaustion
    options for user decision on resume:
    - **scope-down** (default): drop the placeholder claims;
@@ -462,12 +523,12 @@ cannot catch overclaim, conflict erasure, or causal smuggle.
      literature engagement."
    Recommend `scope-down` as the default; the user picks on
    `continue`. Decision recorded in `state.json` by the orchestrator.
-6. **Build Limitations** from project-specific limits + any
+7. **Build Limitations** from project-specific limits + any
    `Status: deferred` / `dropped` entries in
    `ANALYSIS_REQUESTS_PATH` + any unfixable findings from
    `PRIOR_REVIEW_PATH`. Substantive (>150 chars).
-7. **Build Next steps**; each entry testable and specific.
-8. **Append reframing-log entries** for any scope-narrowing or
+8. **Build Next steps**; each entry testable and specific.
+9. **Append reframing-log entries** for any scope-narrowing or
    pool-exhaustion decisions. Log is append-only: Read existing
    file, append, Write full result back. Per SPEC §5.6, each entry
    uses this exact format:
@@ -490,8 +551,8 @@ cannot catch overclaim, conflict erasure, or causal smuggle.
    exhaustion decision itself (which of the three options the user
    picked on resume) is recorded by the orchestrator in
    `state.json`, not here.
-9. **Self-review pass** (checklist above).
-10. **Write `DISCUSSION_PATH`** via the `Write` tool. On `Write`
+10. **Self-review pass** (checklist above).
+11. **Write `DISCUSSION_PATH`** via the `Write` tool. On `Write`
     failure, halt and emit error verbatim.
 
 In a normal drafting run, you do NOT invoke the manuscript-level
@@ -501,42 +562,16 @@ sections present) cannot pass on a partial draft, so per-section
 validator invocation produces spurious failures. Self-review
 (checklist above) is the prompt's own discipline.
 
-**REPAIR_MODE behavior.** If the orchestrator re-invokes you with
-`REPAIR_MODE=true`, the orchestrator passes **all of your original
-drafting-mode inputs** (THROUGHLINE_PATH, RESULTS_PATH, POOL_JSON_PATH,
-REFERENCES_MD_PATH, REPORT_PATH, ANALYSIS_REQUESTS_PATH, etc.) **plus**
-the four REPAIR_MODE-specific inputs: `NAMED_VALIDATOR` (one of `M9`,
-`M10`), `VALIDATOR_OUTPUT_PATH` (the JSON shape from
-`validate_manuscript.py`'s `Violation` records, filtered to the
-named validator), and `REPAIR_TARGET_PATH` (= `DISCUSSION_PATH`).
-
-The drafting-mode inputs are necessary so you can read the existing
-`03_discussion.md`, the citation pool, and the throughline to
-understand what NOT to change (claims grounded in the pool,
-throughline-scoped subsection structure, conflicts already engaged),
-and fix only the named span. M10 specifically requires the pool to
-verify whether the orphaned `[bib_key]` is a typo (cite is in the pool but
-the in-prose number is wrong) or a hallucinated cite (cite is not
-in the pool — drop or replace with `[NEEDS CITATION]`).
-
-Repair semantics (bounded):
-
-1. Read the validator failure detail; identify the specific span.
-2. Fix only that span; do not regenerate the rest of the section,
-   do not introduce new claims, do not delete grounded claims the
-   validator did not flag. M9 (Limitations <150 chars) typically
-   means expand the existing Limitations subsection with project-
-   specific content; M10 (orphan citation) means either the cited
-   reference is missing from `references.md` (verify with the pool
-   agent) or the in-prose `[bib_key]` is wrong.
-3. Re-write `REPAIR_TARGET_PATH`.
-4. Up to 2 repair attempts per invocation. After the second
-   failure on the same validator, halt with `"Halted after 2 repair
-   attempts on <NAMED_VALIDATOR>; escalating per SPEC §7.1.1."`
-
-In REPAIR_MODE, the closing message is:
+**REPAIR_MODE behavior.** When `REPAIR_MODE=true`: read
+`VALIDATOR_OUTPUT_PATH`, fix only the named issue (M9 = expand
+Limitations with project-specific content; M10 = fix orphan
+`[bib_key]` typo or replace with `[NEEDS CITATION]` if hallucinated).
+Do not regenerate the rest of the section. Re-write
+`REPAIR_TARGET_PATH`. Up to 2 attempts; after second failure, halt
+with `"Halted after 2 repair attempts on <NAMED_VALIDATOR>;
+escalating per SPEC §7.1.1."` Closing message:
 `"<DISCUSSION_PATH> repaired for <NAMED_VALIDATOR>; <one-line
-summary of the change>."`
+summary>."`
 
 **Closing-message template (required exact format):**
 

@@ -14,6 +14,23 @@ before you start.
 
 [spec-sec]: ../../SPEC.md "see §6.1 + §6.2"
 
+## Hard constraints (read FIRST)
+
+These are non-negotiable. Check each before calling Write.
+
+| Constraint | Requirement | Violation = |
+|---|---|---|
+| **Findings Summary** | Hard cap 3–6 sentences; 1 sentence per major sub-claim | HALT and cut to ≤6 |
+| **No inline figures/tables** | Write `(Fig. N)` and `(Table N)` callouts ONLY; never `![]()`  or `**Table N.**` blocks | Embed phases break silently |
+| **Every number grep-traced** | REPORT.md or notebook output cell; no fabrication | Drop claim or mark placeholder |
+| **Counts precede percentages** | `n / total (X%)` form, never bare `X%` (M8) | Hard validator fail |
+| **Effect sizes have CIs** | `OR 1.34 [1.21–1.48], p = 1.4×10⁻⁹` not bare `p < 0.05` (M7) | Hard validator fail |
+| **Figures manifest emitted** | `figures_manifest.tsv` if any `(Fig. N)` callouts exist | Assembled docx is figure-less |
+| **Tables manifest emitted** | `tables_manifest.tsv` if any `(Table N)` callouts exist | Assembled docx is table-less |
+
+The **Findings Summary sentence count** and **no inline
+figures/tables** constraints are the two most likely to drift.
+
 ## What you produce
 
 A single markdown file written via the `Write` tool to the absolute
@@ -90,6 +107,32 @@ percentages per M8 (`95 of the 3,705 ... (2.6%, 95% CI 2.1–3.1)`),
 (c) the Fisher test result has effect size + CI + exact p-value per
 M7 (not bare `p < 0.05`), (d) figure and table callouts appear in
 their natural sentences, not parked at the end.
+
+**Worked example — Findings Summary** (hard cap 3–6 sentences):
+
+```markdown
+### Findings summary
+
+Dark genes constitute 23.6% of the 228K-gene dataset, and 3,705
+(6.9%) show strong fitness phenotypes in at least one condition.
+← Sentence 1: Prevalence finding with key number.
+
+Of these, 95 dark genes show statistically enriched stress-condition
+phenotypes (OR 1.34 [1.21–1.48], q = 1.4 × 10⁻⁹), with 12 genes
+active across more than 10 conditions.
+← Sentence 2: Enrichment finding with effect size + CI + q.
+
+Cross-organism concordance identifies 27 high-priority candidates
+with consistent phenotypes across two or more organisms, and GapMind
+pathway analysis links 8 of these to specific metabolic gap-fills.
+← Sentence 3: Cross-organism + pathway findings merged into one sentence.
+```
+
+**Why 3 sentences, not 6:** This project has 5+ subsections, but
+the summary picks the 3 strongest findings. Minor findings (e.g.,
+ICA module membership patterns) are in the subsections; the summary
+is what the Abstract agent draws from. If it's verbose, the Abstract
+bloats.
 
 **CRITICAL — do NOT embed figures or tables inline.** Your job is to
 write `(Fig. N)` and `(Table N)` callouts in prose. The orchestrator's
@@ -386,58 +429,40 @@ a specific sub-claim.
 
 ## Anti-patterns
 
-**Number fabrication.** Writing "95 of 343 conditions show
-enrichment" when REPORT says 92, or when the number doesn't appear
-in REPORT or notebooks at all. Catastrophic — every number must be
-grep-traced. The validator can't catch this; the discipline must.
+**Verbose Findings Summary (the #1 failure mode).** The Findings
+Summary runs 10+ sentences restating every subsection's result.
+Hard cap is 6 sentences (see constraints table above). Each sentence
+covers one major sub-claim with its key number. If you have more
+sub-claims than 6, merge the minor ones or drop them. A summary
+longer than 6 sentences triggers a HALT: count, cut to ≤6, then
+proceed. See the Findings Summary worked example above.
 
-**Silent reframing.** REPORT's Finding 6 is "we observed N conditions
-with elevated AUC, of which ~N×0.05 are expected by chance." Your
-Results says "95 conditions show statistically significant
-enrichment." That is silent overclaim — the statistical-significance
-framing is yours, not REPORT's. Either stay in REPORT's frame or log
-the reframing.
+**Number fabrication.** Writing "95 of 343" when REPORT says 92.
+Catastrophic — every number must be grep-traced. The validator
+can't catch this; the discipline must.
 
-**Cherry-picking from notebooks.** REPORT synthesized the project's
-findings; notebooks contain everything that was tried. Drawing on
-notebook outputs for findings REPORT *didn't* synthesize creates
-new claims with no synthesis discipline. Use notebooks for
-verification of REPORT's claims, not as a source of fresh claims.
+**Silent reframing.** REPORT says "we observed N conditions with
+elevated AUC"; your Results says "95 conditions show statistically
+significant enrichment." The statistical-significance framing is
+yours, not REPORT's. Stay in REPORT's frame or log the reframing.
 
-**Bare percentages (M8 violation).** `26.9% of dark genes show...`
-without `n / total` is a hard validator fail and a form of evidence
-laundering — it suggests precision the underlying count doesn't
-support.
+**Bare percentages (M8 violation).** `26.9%` without `n / total`
+is a hard validator fail. Always: `n / total (X%)`.
 
-**Missing CI / effect size (M7 violation).** `p < 0.05` standing
-alone is not a result; it's a gate. `OR 1.34 [1.21–1.48], p = 1.4×10⁻⁹`
-is a result. If the project didn't compute CIs or effect sizes, that
-is honest — write the bare numbers + a Limitations entry.
+**Missing CI / effect size (M7 violation).** `p < 0.05` alone is a
+gate, not a result. Give effect size + CI + exact p-value.
 
-**Compound citations.** Writing `[Price2018, Wetmore2015]` instead
-of `[Price2018][Wetmore2015]`. The citation renderer's regex matches
-single-key brackets only; compound form passes through as raw text
-in the assembled manuscript. Always use one bracket pair per key.
+**Compound citations.** `[Price2018, Wetmore2015]` breaks the
+renderer. Use `[Price2018][Wetmore2015]`.
 
-**Figure call-out drift.** Citing Fig. 3 for a claim it doesn't
-support, or describing a figure differently than its caption does.
-The figure caption is the project's authored interpretation; your
-prose must align with it, not contradict.
+**Cherry-picking from notebooks.** Use notebooks for verification,
+not as a source of fresh claims REPORT didn't synthesize.
 
-**Verbose Findings Summary.** The Findings Summary subsection runs
-10+ sentences restating every subsection's result. This is a summary,
-not a recap — hard cap is 6 sentences. Each sentence covers one major
-sub-claim with its key number. If you have more sub-claims than 6,
-merge the minor ones or drop them entirely; the Discussion will
-elaborate. A summary longer than 6 sentences triggers a self-review
-HALT: cut to ≤6 before calling Write.
+**Figure/table call-out drift.** Citing Fig. 3 for a claim it
+doesn't support. Prose must align with the figure's caption.
 
-**Stub subsections.** `### Conservation analysis` followed by no
-actual finding because the throughline mentioned conservation but
-the project's analysis came up null. If the finding is null, either
-report the null finding explicitly (THIN / EXPLORATORY) or drop the
-subsection (STRONG, where null findings belong in Limitations).
-Stub headers signal process-conformance, not science.
+**Stub subsections.** Null findings should be reported explicitly
+(THIN/EXPLORATORY) or dropped (STRONG), not stubbed.
 
 ## Self-review pass (before calling Write)
 
@@ -560,7 +585,12 @@ content fidelity.
    above for the exact schema; the manifest is what
    `phase_embed_tables` consumes to inject formatted table blocks
    after your `(Table N)` callouts.
-5. **Append reframing-log entries** for demoted findings
+5. **Sentence-count check.** Count sentences in the Findings
+   Summary subsection. If >6, STOP and cut before proceeding.
+   Do not rationalize ("this sentence is short so it's fine") —
+   count is count. Also verify: no `![]()`  image tags or
+   `**Table N.**` blocks in the draft (callouts only).
+6. **Append reframing-log entries** for demoted findings
    (orthogonal-to-throughline) and for REPORT-vs-notebook
    discrepancies. Log is append-only: Read the existing file, add
    entries at the end, Write the full result back. Per SPEC §5.6,
@@ -582,8 +612,8 @@ content fidelity.
    plan-execution-discrepancy` for REPORT-vs-notebook number
    conflicts. `{N}` is the next sequential entry number; preserve
    numbering across appends.
-6. **Self-review pass** (checklist above).
-7. **Write `RESULTS_PATH`** via the `Write` tool. On `Write`
+7. **Self-review pass** (checklist above).
+8. **Write `RESULTS_PATH`** via the `Write` tool. On `Write`
    failure, halt and emit error verbatim.
 
 In a normal drafting run, you do NOT invoke the manuscript-level

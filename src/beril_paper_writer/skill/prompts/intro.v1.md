@@ -22,6 +22,23 @@ prompt produces the **"Background and Question"** section per SPEC
 §3.2.2 — descriptive context only, no field-positioning beyond what
 the project itself states.
 
+## Hard constraints (read FIRST)
+
+These are non-negotiable. Check each before calling Write.
+
+| Constraint | Requirement | Violation = |
+|---|---|---|
+| **No subsection headers** | Continuous flowing prose only; NO `###` headers | Restructure entire section |
+| **Approach-in-brief** | Exactly 3 sentences (methods preview, finding preview, contribution+disclaimer) | Delete excess sentences |
+| **Background length** | 1–2 paragraphs max; this is NOT a literature review | Cut to 2 paragraphs |
+| **Citations from pool only** | Every `[bib_key]` resolves in references.md (M10) | Drop or mark `[NEEDS CITATION]` |
+| **Research question = throughline** | Question matches throughline claim, interrogative form | Rewrite to match |
+
+The **subsection headers** and **approach-in-brief sentence count**
+constraints are the two most likely to drift. If you catch yourself
+writing `### Background and Motivation` or a 5-sentence approach
+block, STOP and fix before continuing.
+
 ## What you produce
 
 A single markdown file written via the `Write` tool to the absolute
@@ -41,6 +58,45 @@ log and surface, do not paper over.
 Final response after `Write` succeeds is a one-line confirmation in
 the closing-message template (below).
 
+## Worked example (read BEFORE the structural spec)
+
+Study this example of the Approach-in-brief paragraph first — it
+is the concrete anchor for the structural spec that follows.
+(STRONG tier, dark gene fitness project):
+
+```markdown
+We addressed this question by integrating fitness data from 48
+phylogenetically diverse organisms (the Fitness Browser RB-TnSeq
+panel) with pangenome conservation, ICA module membership, and
+GapMind pathway annotations to characterize the 3,705 dark genes
+with strong fitness phenotypes (|fit| > 2, |t| > 4) in their
+condition-specific contexts.
+← Sentence 1: Methods preview. Names data sources + parameters
+   without replicating the Methods section.
+
+Our analysis identifies 95 dark genes with cross-organism
+concordance in stress conditions and prioritizes 27 candidates
+for experimental follow-up.
+← Sentence 2: Finding preview. Headline number + direction;
+   does NOT replicate Results detail.
+
+The contribution is a defensible prioritized list grounded in
+quantitative cross-organism evidence — not a claim of mechanism,
+which our analysis cannot establish.
+← Sentence 3: Contribution + mandatory scope disclaimer. Names
+   what IS delivered; disclaims what is NOT.
+```
+
+**Why this example works:** (a) exactly 3 sentences — no more, no
+fewer, (b) no causal verbs ("characterize," "identifies,"
+"prioritizes"), (c) scope disclaimer explicit, (d) no subsection
+header above it — this is continuous prose following the gap
+paragraph.
+
+**If your approach-in-brief has 4+ sentences, it is overclaiming.
+Cut to exactly 3. The overage belongs in Results or Discussion,
+not Introduction.**
+
 ## Output format (Introduction structure)
 
 Markdown prose under standard IMRAD Introduction structure. **Write
@@ -59,13 +115,15 @@ or any subsection markers:
    project addresses. The question must match the throughline's
    claim — phrase it as a question the throughline answers.
 3. **Approach in brief** (conceptual block, no header) —
-   **EXACTLY 3 sentences.** One sentence previewing methods (don't
-   replicate Methods); one sentence previewing the key finding
-   (don't replicate Results); one sentence stating what the paper
-   contributes to the field with a scope-disclaimer. This is the
-   "exactly what the paper delivers, no more, no less" paragraph.
-   If your approach-in-brief block exceeds 5 sentences, you have
-   drifted into Results territory. Cut.
+   **Exactly 3 sentences, no more, no fewer.**
+   - Sentence 1: Methods preview (specific data sources and
+     parameters; do NOT replicate Methods section).
+   - Sentence 2: Key finding preview (headline number and
+     direction; do NOT replicate Results detail).
+   - Sentence 3: Contribution with mandatory scope disclaimer
+     (state what is established; disclaim what is not).
+   **Violation:** if your block has 4+ sentences, it is
+   overclaiming and must be cut to exactly 3.
 
 For `MODE = report`: section title is "Background and Question" per
 SPEC §3.2.2. Single section, descriptive only — no
@@ -74,31 +132,6 @@ and research question" portion is appropriate; the "Approach in
 brief" portion drops to a one-sentence pointer (e.g., "We address
 this by [project's approach]; see What Was Done."). No novelty
 claims.
-
-**A worked example** of the Approach-in-brief paragraph (a STRONG-
-tier paper on dark gene fitness):
-
-```markdown
-We addressed this question by integrating fitness data from 48
-phylogenetically diverse organisms (the Fitness Browser RB-TnSeq
-panel) with pangenome conservation, ICA module membership, and
-GapMind pathway annotations to characterize the 3,705 dark genes
-with strong fitness phenotypes (|fit| > 2, |t| > 4) in their
-condition-specific contexts. Our analysis identifies 95 dark genes
-with cross-organism concordance in stress conditions and
-prioritizes 27 candidates for experimental follow-up. The
-contribution is a defensible prioritized list grounded in
-quantitative cross-organism evidence — not a claim of mechanism,
-which our analysis cannot establish.
-```
-
-Note four things in the example: (a) the methods preview names
-specific data sources and parameters without re-stating Methods,
-(b) the finding preview gives the headline number without re-stating
-Results' detail, (c) the contribution is *scoped* — names what's
-delivered and disclaims what isn't ("not a claim of mechanism"),
-(d) no causal language; "characterize," "identifies," "prioritizes"
-are the right verbs.
 
 ## Inputs the user prompt will pass
 
@@ -271,59 +304,46 @@ report mode. Use the canonical name for the mode (per SPEC §3.2.2).
 
 ## Anti-patterns
 
-**Pre-Discussion drafting.** Writing Introduction before Discussion
-is settled. The body's claims may narrow during Discussion's scope
-discipline; the Introduction's preview must match what Discussion
-actually concludes. If you find yourself drafting Introduction and
-Discussion's tone is unclear, halt and verify Discussion is
-finalized.
+**Subsection headers in Introduction (the #1 failure mode).** Do
+NOT emit `### Background and motivation` or `### Gap and research
+question` or `### Approach in brief` as visible headers. These are
+internal organizational guidance, not output format. Write
+continuous flowing prose with paragraph breaks between conceptual
+blocks. If your output contains ANY line starting with `###`, STOP
+and remove it.
 
-**Authority citations.** "Many studies have shown that X [3, 7,
-12]" without naming what each study showed is authority-citation
-and is M10-passable but evidence-laundering. Each `[bib_key]` supports a
-specific claim or is dropped.
-
-**Gap by inflation.** Claiming a gap larger than the pool supports
-to make the project's contribution look bigger. "Nothing has been
-done on X" is a strong claim that requires pool support.
-
-**Question drift.** Phrasing the research question slightly
-differently than the throughline's claim, in a way that promises
-more (or different) than the project addresses. The question is the
-throughline's claim, phrased interrogatively. Drift = overclaim.
-
-**Methods preview that becomes Methods.** A 3-paragraph methods
-preview in Introduction. Approach-in-brief is *one sentence* on
-methods; the actual Methods section is where the detail lives.
-Re-stating Methods in Introduction is bloat.
-
-**Findings preview that becomes Results.** Same failure for
-Results. One-sentence headline finding; no detail; if the reader
-wants the numbers, they read Results.
+**Approach-in-brief exceeds 3 sentences.** If your final paragraph
+has 4+ sentences, you have drifted into Results/Discussion
+territory. Cut to exactly 3 — methods preview, finding preview,
+contribution+disclaimer. See worked example above.
 
 **Contribution overclaim.** "We demonstrate that..." when
-Discussion says "we observe that..." Verb mismatch between the
+Discussion says "we observe that..." Verb mismatch between
 Introduction's contribution sentence and Discussion's actual
-conclusions is silent overclaim. Walk both; align.
+conclusions is silent overclaim.
+   BAD: "We demonstrate that dark genes drive stress response."
+   GOOD: "Our analysis identifies 95 dark genes with cross-organism
+   concordance in stress conditions."
 
 **Generic motivation language.** "Microbial communities are
 critical for ecosystem function. Despite recent advances..."
-Generic, applies to any paper, says nothing about this paper's
-specific contribution. The motivation must name a *specific*
-field gap the *specific* project addresses.
+Generic, applies to any paper. The motivation must name a
+*specific* field gap the *specific* project addresses.
+
+**Authority citations.** "Many studies have shown that X
+[Price2018][Wetmore2015]" without naming what each study showed.
+Each `[bib_key]` supports a specific claim or is dropped.
 
 **Compound citations in one bracket.** `[Price2018, Wetmore2015]`
-breaks the citation-renumbering pipeline, which expects one key
-per bracket pair. Use `[Price2018][Wetmore2015]` (adjacent
-brackets, no space) for multi-citation references. The
-`render-with-numbers` step matches `[single_key]` individually
-and cannot parse comma-separated keys inside one bracket pair.
+breaks the citation-renumbering pipeline. Use
+`[Price2018][Wetmore2015]` (adjacent brackets, no space).
 
-**Subsection headers in Introduction.** Do NOT emit `###
-Background and motivation` or `### Gap and research question` or
-`### Approach in brief` as visible headers. These are internal
-organizational guidance, not output format. Write continuous
-flowing prose with paragraph breaks between the conceptual blocks.
+**Gap by inflation.** "Nothing has been done on X" requires pool
+support. Scope gaps to what the pool can justify.
+
+**Methods/findings preview bloat.** Approach-in-brief is one
+sentence each on methods and findings; detail lives in their
+respective sections.
 
 ## Self-review pass (before calling Write)
 
@@ -421,11 +441,15 @@ always overclaims, and the validator can't catch it.
    citations from pool, specific not generic.
 3. **Build Gap and research question** subsection — gap with pool
    support, research question matching throughline.
-4. **Build Approach in brief** subsection — one sentence each on
-   methods, finding, contribution. Contribution matches Discussion.
-5. **Walk against Discussion's scope** one more time; downgrade
+4. **Build Approach in brief** — exactly 3 sentences: methods
+   preview, finding preview, contribution+disclaimer. Contribution
+   matches Discussion.
+5. **Sentence-count check.** Count sentences in approach-in-brief.
+   If not exactly 3, STOP and rewrite. Also verify: no `###`
+   headers anywhere in the draft. If any exist, remove them.
+6. **Walk against Discussion's scope** one more time; downgrade
    any verb that overclaims relative to Discussion.
-6. **Append reframing-log entries** if Introduction cannot honestly
+7. **Append reframing-log entries** if Introduction cannot honestly
    motivate without overclaiming (rare; signals Discussion needs
    revision). Log is append-only: Read existing file, append,
    Write full result back. Per SPEC §5.6, each entry uses this
@@ -450,8 +474,8 @@ always overclaims, and the validator can't catch it.
 
    `{N}` is the next sequential entry number; preserve numbering
    across appends.
-7. **Self-review pass** (checklist above).
-8. **Write `INTRODUCTION_PATH`** via the `Write` tool. On `Write`
+8. **Self-review pass** (checklist above).
+9. **Write `INTRODUCTION_PATH`** via the `Write` tool. On `Write`
    failure, halt and emit error verbatim.
 
 In a normal drafting run, you do NOT invoke the manuscript-level
@@ -459,30 +483,13 @@ validator. The orchestrator runs `validate_manuscript.py` after
 all sections are drafted; M1 cannot pass on a partial draft.
 Self-review is the prompt's discipline.
 
-**REPAIR_MODE behavior.** If invoked with `REPAIR_MODE=true`, the
-named validator is `M10` (orphan citation). Inputs include the
-full drafting-mode set plus `NAMED_VALIDATOR`, `VALIDATOR_OUTPUT_PATH`,
-`REPAIR_TARGET_PATH`.
-
-Repair semantics (bounded):
-
-1. Read the validator failure detail; identify the specific `[bib_key]`
-   that's orphaned.
-2. Either (a) the cite is correct and the reference is missing
-   from `references.md` (verify with the pool — if the pool entry
-   exists and just isn't in `references.md`, the orchestrator must
-   re-run `citation_pool.py format`; that's not your repair), or
-   (b) the cite is wrong (typo in the bracketed number, or
-   reference to a paper not in the pool) — fix the in-prose `[bib_key]`
-   or replace with `[NEEDS CITATION]` if the cite was hallucinated.
-3. Re-write `REPAIR_TARGET_PATH`.
-4. Up to 2 repair attempts per invocation. After the second
-   failure, halt with the closing message format from LAYOUT
-   §"REPAIR_MODE", recommending `user-modify` (typically the right
-   path for citation issues — manual inspection beats automated
-   re-write).
-
-In REPAIR_MODE, the closing message is:
+**REPAIR_MODE behavior.** When `REPAIR_MODE=true`: read
+`VALIDATOR_OUTPUT_PATH`, fix only the named issue (M10 = orphaned
+`[bib_key]` — either fix typo or replace with `[NEEDS CITATION]` if
+hallucinated; if the cite is correct but missing from references.md,
+that's an orchestrator issue, not yours), re-write
+`REPAIR_TARGET_PATH`. Up to 2 attempts; after second failure, halt
+recommending `user-modify`. Closing message:
 `"<INTRODUCTION_PATH> repaired for M10; <one-line summary>."`
 
 **Closing-message template (drafting mode, required exact format):**

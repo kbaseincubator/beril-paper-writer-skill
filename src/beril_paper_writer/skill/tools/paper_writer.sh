@@ -46,7 +46,7 @@ set -uo pipefail
 # Opus for narrative-intensive sections (Intro, Discussion, Abstract, Reframer).
 # Both overrideable via --model / --model-writing (or env vars).
 DEFAULT_MODEL="claude-sonnet-4-5-20250929"
-DEFAULT_MODEL_WRITING="claude-opus-4-6-20250918"
+DEFAULT_MODEL_WRITING="claude-opus-4-7"
 
 # Tool grant for claude -p — every prompt should have access to these.
 # Bash, WebSearch, and Agent are required by some prompts (citation_pool
