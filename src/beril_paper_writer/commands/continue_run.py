@@ -182,6 +182,11 @@ def _write_throughline_verbatim(
             # Extract everything after `## Candidate TLN: `
             after_colon = line.split(":", 1)
             title = after_colon[1].strip() if len(after_colon) > 1 else ""
+            if not title:
+                print(
+                    f"warning: candidate header has empty title: {line!r}",
+                    file=sys.stderr,
+                )
             body_start = i + 1
             break
     rest = "\n".join(lines[body_start:]).strip()

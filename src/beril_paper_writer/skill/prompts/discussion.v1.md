@@ -14,6 +14,13 @@ and §7.2 (aspirational discipline that lives in this prompt) before
 you start.
 
 [spec-pool]: ../../SPEC.md "see §6.4 + §6.4.1"
+[fab-discipline]: ../../LAYOUT.md "see §Fabrication discipline"
+
+> **Fabrication discipline ([LAYOUT.md §Fabrication discipline][fab-discipline]):**
+> every factual claim must trace to a canonical project source, verified
+> bibliography entry, or explicit metadata. Discussion's specific risk:
+> mechanism fabrication. Interpretive claims must be grounded in Results
+> + verified bibliography only.
 
 For `MODE = report`, this prompt produces the **"Observations and
 Open Questions"** section per SPEC §3.2.2 — descriptive only, no

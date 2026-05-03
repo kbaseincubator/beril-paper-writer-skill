@@ -11,6 +11,13 @@ Discussion narrows the scope. Drafting Introduction last lets you
 "set up exactly what the paper delivers, no more, no less."
 
 [spec-order]: ../../SPEC.md "see §6.1"
+[fab-discipline]: ../../LAYOUT.md "see §Fabrication discipline"
+
+> **Fabrication discipline ([LAYOUT.md §Fabrication discipline][fab-discipline]):**
+> every factual claim must trace to a canonical project source, verified
+> bibliography entry, or explicit metadata. Introduction's specific
+> risk: citation-claim mismatch. Background claims must cite verified
+> bibliography entries that actually support them.
 
 The primary failure mode this prompt prevents is **Introduction
 overclaim** — phrasing background and gap statements in ways that

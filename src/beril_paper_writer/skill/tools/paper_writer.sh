@@ -217,6 +217,40 @@ init_skill_paths() {
     PYTHON_BIN="$(discover_python_bin)"
 }
 
+# Check beril-adversarial availability and version compatibility.
+# Returns 0 if compatible (or absent — soft dependency), sets
+# ADVERSARIAL_AVAILABLE=1/0. Per CONTRACT.md: advisory check only;
+# unrecognized versions fall back to inline reviewer, not hard fail.
+check_adversarial_compat() {
+    ADVERSARIAL_AVAILABLE=0
+    if ! command -v beril-adversarial &>/dev/null; then
+        log_step "beril-adversarial not installed; canonical reviewer unavailable"
+        log_step "Install: pipx install beril-adversarial-skill"
+        return 0
+    fi
+
+    local adv_version
+    adv_version=$(beril-adversarial --version 2>/dev/null || echo "unknown")
+    log_step "beril-adversarial version: $adv_version"
+
+    # Compatible range: 0.6.x–0.8.x (adversarial-review-paper.v2/v3)
+    case "$adv_version" in
+        0.6.*|0.7.*|0.8.*)
+            ADVERSARIAL_AVAILABLE=1
+            ;;
+        unknown)
+            log_warn "Could not determine beril-adversarial version"
+            log_warn "Canonical reviewer will not be used"
+            ;;
+        *)
+            log_warn "beril-adversarial $adv_version may be incompatible"
+            log_warn "Expected 0.6.x–0.8.x for adversarial-review-paper.v2/v3"
+            log_warn "Canonical reviewer will not be used"
+            ;;
+    esac
+    return 0
+}
+
 # ==============================================================================
 # State.json helpers (delegated to paper_writer_helpers.py for atomicity)
 # ==============================================================================
@@ -2714,6 +2748,7 @@ resolve_project() {
 # Main: parse args, dispatch.
 main() {
     init_skill_paths
+    check_adversarial_compat
 
     local verb="${1:-}"
     case "$verb" in

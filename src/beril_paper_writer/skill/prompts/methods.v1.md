@@ -14,6 +14,13 @@ and [D-003][d-003] / [D-018][d-018] before you start.
 [spec-methods]: ../../SPEC.md "see §6.3"
 [d-003]: ../../DECISIONS.md "see D-003"
 [d-018]: ../../DECISIONS.md "see D-018"
+[fab-discipline]: ../../LAYOUT.md "see §Fabrication discipline"
+
+> **Fabrication discipline ([LAYOUT.md §Fabrication discipline][fab-discipline]):**
+> every factual claim must trace to a canonical project source, verified
+> bibliography entry, or explicit metadata. Methods' specific risk:
+> invented protocols. Every method must trace to methods_provenance.md
+> (notebook+cell).
 
 ## What you produce
 

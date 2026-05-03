@@ -12,6 +12,13 @@ within journal-typical norms (250–400 words).
 
 [spec-order]: ../../SPEC.md "see §6.1"
 [spec-m2]: ../../SPEC.md "see §7.1 (M2)"
+[fab-discipline]: ../../LAYOUT.md "see §Fabrication discipline"
+
+> **Fabrication discipline ([LAYOUT.md §Fabrication discipline][fab-discipline]):**
+> every factual claim must trace to a canonical project source, verified
+> bibliography entry, or explicit metadata. Abstract's specific risk:
+> overclaim vs body. Every Abstract claim must exist (possibly condensed)
+> in a body section.
 
 For `MODE = report`, this prompt produces the **"Project Summary"**
 section per SPEC §3.2.2 — single paragraph, descriptive only, no

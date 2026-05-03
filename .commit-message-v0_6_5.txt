@@ -1,0 +1,51 @@
+v0.6.5: contract + fabrication discipline + documentation debt
+
+Triage-driven release closing Tier A (bugs), B1 (contract), C1 (anti-
+fabrication), and D1-D2 (documentation) from the consolidated 4-reviewer
+adversarial audit of the v0.6.4 codebase.
+
+Bug fixes (Tier A):
+- Fix null-coalescing in cost/elapsed accumulators: `dict.get("k", 0.0)`
+  returns None when key exists with JSON null. Changed to
+  `(dict.get("k") or 0.0)` at 4 sites in paper_writer_helpers.py
+  (cmd_update_state + cmd_aggregate_metadata). 4 regression tests.
+- Defensive warning on empty throughline title in continue_run.py.
+- 3 of 5 original Tier A items were false positives upon code reading:
+  JSONDecodeError in emit_next_actions (already wrapped), reframing
+  parser multi-line (already handled), check_repair_status (working
+  as designed). No changes needed.
+
+Cross-skill contract (Tier B1):
+- NEW: CONTRACT.md — consumer-side contract for beril-adversarial
+  interop. Documents: expected schema (adversarial-review-paper.v2),
+  per-draft input layout, output paths, exit code handling, severity
+  mapping (P0→Critical etc), class enum routing, fix_target values,
+  version compatibility matrix, fallback reviewer coordination,
+  contract change protocol.
+- NEW: check_adversarial_compat() in paper_writer.sh — advisory
+  version check at startup. Detects beril-adversarial availability
+  and version range (0.6.x–0.8.x). Sets ADVERSARIAL_AVAILABLE flag.
+  Falls back gracefully if absent or incompatible.
+- NEW: tests/integration/test_adversarial_interop.py — 15 tests
+  verifying schema parsing, severity mapping, exit code routing,
+  fix_target validation, v3 forward compatibility.
+
+Fabrication discipline (Tier C1):
+- NEW: LAYOUT.md §Fabrication discipline — unified definition of
+  "fabrication" across all prompts. Three valid trace-back categories:
+  canonical project sources, verified bibliography, explicit metadata.
+  Per-section risk table. Failure handling protocol.
+- Cross-references added to 6 drafting prompts: results.v1.md,
+  methods.v1.md, discussion.v1.md, intro.v1.md, abstract.v1.md,
+  figure_caption.v1.md. Each references the unified definition with
+  its section-specific risk variant.
+
+Documentation debt (Tier D):
+- Version banners on SPEC.md and LAYOUT.md noting v0.1 origin and
+  v0.6.x implementation state.
+- DECISIONS.md backfill: D-027 through D-033 covering dual-reviewer
+  architecture, adversarial-review-paper.v2 schema, JSON-validity
+  hardening, caption sufficiency redesign, reframing repair dispatch,
+  tier-detection defaults, unified fabrication discipline.
+
+Tests: 636 passed (was 621).

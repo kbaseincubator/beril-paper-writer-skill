@@ -1,8 +1,13 @@
 # beril-paper-writer-skill — package layout + CLI structure
 
-**Date:** 2026-04-25
-**Status:** v0.1 specification. No code yet. Implementation pending sign-off
-on this layout.
+> **Version notice (v0.6.5):** This document was written at v0.1 and is
+> incrementally updated as features land. Sections marked "planned" may
+> already be implemented; sections without version annotations reflect
+> the original v0.1 design. For the current implementation state, see
+> RELEASE_NOTES_v0_*.md and DECISIONS.md (D-001–D-033).
+
+**Date:** 2026-04-25 (originated); updated through v0.6.5.
+**Status:** Living document. Updated incrementally as features ship.
 
 This document specifies the shape of `ArkinLaboratory/beril-paper-writer-skill`.
 The skill mirrors `beril-adversarial-skill-draft`'s pipx-installable, ships-
@@ -562,6 +567,83 @@ Reuses the pattern from beril-adversarial:
 
 Stream logs are preserved per-section under `audit/<section>.stream.log`
 for post-mortem.
+
+## Fabrication discipline (cross-prompt contract)
+
+_Added v0.6.5. All drafting prompts must reference this definition._
+
+"Fabrication" in this skill means any prose claim that cannot be traced
+back to one of the three valid source categories below. The definition
+is deliberately narrow: a plausible-sounding sentence that no source
+backs is fabrication, even if the claim is likely true.
+
+### Valid trace-back categories
+
+Every factual claim, number, comparison, or mechanism assertion in the
+manuscript MUST trace to exactly one of:
+
+1. **Canonical project sources** — REPORT.md, notebook output cells,
+   methods_provenance.md, figures_inventory.md, tables_inventory.md.
+   The trace must be grep-verifiable: the number or claim must appear
+   verbatim (or with trivially equivalent formatting) in the source.
+   Paraphrased claims require an inline provenance note (e.g.,
+   `[derived from REPORT §Finding 3]`).
+
+2. **Verified bibliography** — entries in `references.md` /
+   `bibliography.bib` that have passed citation_pool.v1's
+   verify-by-resolution discipline (DOI/PMID confirmed via
+   WebSearch). Claims attributed to bibliography entries must be
+   supported by the cited work — attaching a real citation to an
+   unsupported claim is fabrication (citation-claim mismatch).
+
+3. **Explicit metadata** — information that is definitionally true
+   by the manuscript's own construction: section structure, author
+   lists, acknowledgments, data-availability statements referencing
+   the project's own artifacts. This category does NOT include
+   interpretive claims about the data.
+
+### What is NOT a valid source
+
+- LLM training knowledge (even if correct)
+- Plausible inference from partial evidence ("the data suggests...")
+  without a traceable source
+- RESEARCH_PLAN.md (design intent, not results)
+- Other papers' methods or results unless cited from the bibliography
+
+### Per-prompt fabrication variants
+
+Each prompt applies the three categories above to its section's
+specific risk profile:
+
+| Prompt | Primary risk | Discipline |
+|---|---|---|
+| `results.v1.md` | Invented numbers | Every number grep-traced to REPORT.md or notebook cell |
+| `methods.v1.md` | Invented protocols | Every method traced to methods_provenance.md (notebook+cell) |
+| `discussion.v1.md` | Mechanism fabrication | Interpretive claims grounded in Results + bibliography only |
+| `introduction.v1.md` | Citation-claim mismatch | Background claims must cite verified bibliography entries |
+| `abstract.v1.md` | Overclaim vs body | Every Abstract claim must exist (possibly condensed) in a body section |
+| `caption` synthesis | Invented n-values | Quantitative figure descriptions traced to notebook output or REPORT |
+
+### Failure handling
+
+When a prompt cannot trace a claim to a valid source:
+
+- **Drop the claim** and note the gap with `[DATA NOT AVAILABLE]` or
+  `[METHOD UNCLEAR: see notebook X cell Y]`.
+- **Never fill the gap with plausible text.** A gap marker is always
+  preferable to a fabricated sentence.
+- **Log the gap** in `analysis_requests.md` if the missing information
+  could be obtained from a BERIL re-analysis.
+
+### Relationship to adversarial review
+
+The adversarial reviewer's `claim_evidence`, `unbacked_quantitative`,
+`citation_reality`, and `report_drift` classes are the detection
+counterparts of this discipline. This definition is prevention
+(compile-time); adversarial review is detection (test-time). Both
+are necessary — the reviewer catches what the prompts miss.
+
+---
 
 ## Coupling to beril-adversarial
 

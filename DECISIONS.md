@@ -778,4 +778,200 @@ prefix is part of the alt-text and renders verbatim.
 
 ---
 
+## D-027 — 2026-04-28 — Dual-reviewer architecture: fallback + canonical
+
+**Decision:** Two review pathways, not one. The fallback inline
+reviewer (`fallback_reviewer.v1.md`, 3 classes, ~30s, no tool access)
+runs inside the rewrite loop for fast iteration. The canonical
+adversarial reviewer (`beril-adversarial review --type paper`, 10
+classes, 5–10 min, full tool access) runs after the rewrite loop as a
+final quality gate. They are complementary, not alternative.
+
+**Rationale:** The original D-005 design assumed a single reviewer
+that would either be adversarial (if installed) or fallback (if not).
+Live testing revealed a cost/latency mismatch: the canonical reviewer
+at 5–10 min per pass makes a 3-pass rewrite loop take 15–30 min just
+in review, with diminishing returns on the shallow fixable issues the
+rewrite loop targets. The fallback's 3 focused classes (overclaim,
+citation rigor, scope alignment) are the right tool for the rewrite
+loop; the canonical reviewer's 10 classes are the right tool for the
+final audit.
+
+**Alternatives considered:** Single reviewer with a `--fast` flag
+(rejected: the two review modes have different prompt architectures
+and tool-access requirements; a flag would be a leaky abstraction).
+Canonical reviewer only, no rewrite loop (rejected: rewrite loop
+catches mechanical issues — orphan citations, bare percentages —
+that the user shouldn't have to fix by hand).
+
+**Related:** D-005 (original loose coupling); CONTRACT.md (cross-skill
+contract); paper_writer.sh lines 2242–2262.
+
+---
+
+## D-028 — 2026-05-02 — adversarial-review-paper.v2 schema adoption
+
+**Decision:** Paper-writer adopts the `adversarial-review-paper.v2`
+single-array JSON schema for the canonical adversarial reviewer's
+output. The schema uses a flat `findings[]` array (no deck-level /
+section-level split), P0/P1/P2/info severity values, 10 class
+enum, and `fix_target` fields that map to paper-writer prompt names.
+
+**Rationale:** The v1 schema (presentation-originated) had a
+deck-level / slide-level split that didn't map to papers. v2
+unifies both into a single `findings[]` array with manuscript-wide
+vs section-level distinguished by field presence (section-level
+findings have `section` + `line_range` + `paragraph_quote`;
+manuscript-wide findings omit them). This eliminated the structural
+mismatch and let both paper and presentation modes share validator
+infrastructure.
+
+**Alternatives considered:** Paper-specific v1 schema (rejected:
+diverges from presentation, doubles validator maintenance); JSON-LD
+or RDF-style (rejected: overengineered for 2-consumer audience).
+
+**Related:** CONTRACT.md (consumer-side schema documentation);
+beril-adversarial CONTRACT.md (producer-side).
+
+---
+
+## D-029 — 2026-05-02 — JSON-validity hardening pattern
+
+**Decision:** When LLM-emitted JSON contains unescaped inner quotes
+(e.g., `"paragraph_quote": "The "key" finding..."`) — a failure mode
+that is NOT algorithmically repairable — the fix is at the prompt
+level: explicit anti-pattern rule with worked examples showing correct
+alternatives (`\"`, `'`, backtick, or rephrase). Additionally, a
+lenient JSON loader does trailing-comma repair (`,}` → `}`) which IS
+algorithmically safe. Both paper and presentation reviewer prompts
+carry the anti-pattern rules.
+
+**Rationale:** Two LLM JSON failure modes with different fixability:
+unescaped quotes (ambiguous — parser can't distinguish delimiter from
+content) vs trailing commas (unambiguous — regex `,(\s*[}\]])` →
+`\1` is safe). Treating them differently is the correct response:
+prompt-side prevention for the unfixable one, code-side repair for the
+fixable one. Both are documented in memory entries
+`feedback_llm_json_unfixable_in_parser.md` and
+`feedback_llm_json_trailing_commas_repairable.md`.
+
+**Alternatives considered:** Lenient JSON parser for both (rejected:
+unescaped-quote ambiguity is provably unresolvable — `"a "b" c"` has
+3 valid parsings); strict JSON only (rejected: trailing commas are
+common enough that a simple repair saves retry cost).
+
+**Related:** beril-adversarial v0.6.2 commit; D-028.
+
+---
+
+## D-030 — 2026-04-28 — Caption sufficiency redesign: Source 4 LLM synthesis
+
+**Decision:** When deterministic caption sources (notebook walk-back
++ matplotlib AST, Source 1–3) don't produce enough signal for a usable
+ICMJE figure caption, route to Source 4: LLM synthesis via
+`figure_caption.v1.md`. The sufficiency gate uses
+`_strip_prose_for_inline` to remove boilerplate before measuring
+word count, preventing notebook critique-heavy prose from falsely
+passing. Panel-count-scaled `max_words` formula: `200 + (panels - 1) * 100`.
+
+**Rationale:** v0.3 produced "Figure N: <filename>" captions (avg 5
+words) because it had no LLM fallback when deterministic sources
+failed. v0.4 added Source 4 with anti-fabrication discipline
+(every quantitative claim must trace to notebook output or REPORT).
+v0.5 tightened the sufficiency gate: boilerplate-heavy notebook prose
+(e.g., lengthy critique paragraphs) was passing the word-count gate
+but producing unusable captions. Stripping boilerplate before
+measurement routes these correctly to Source 4.
+
+**Alternatives considered:** Always use LLM for captions (rejected:
+deterministic sources are more reliable and cheaper; LLM is the
+fallback, not the default); higher word-count threshold without
+stripping (rejected: doesn't distinguish signal from noise in
+notebook prose).
+
+**Related:** RELEASE_NOTES_v0_4.md; RELEASE_NOTES_v0_5.md;
+figure_caption.v1.md.
+
+---
+
+## D-031 — 2026-05-01 — Reframing repair dispatch via reframer.v1
+
+**Decision:** When `check_reframing_log.py` detects entries with
+status `escalated` or `new_data` in reframing_log.md, the orchestrator
+dispatches `reframer.v1.md` to re-evaluate and repair affected sections
+rather than halting the pipeline. Repairs are logged as new reframing-
+log entries with `type: repair` for auditability.
+
+**Rationale:** The original design (D-008, intercalation) specified
+explicit re-evaluation on resume when source artifacts changed. In
+practice, reframing-log entries accumulate during drafting (not just on
+resume), and a halt-and-wait-for-user response to every escalated
+entry makes the pipeline unusable for unattended runs. Dispatching
+reframer.v1 to repair in-place preserves the audit trail while keeping
+the pipeline moving. The user can review repairs in the reframing log
+post-run.
+
+**Alternatives considered:** Halt on any escalated entry (rejected:
+too many halts in practice — functional_dark_matter draft_6 had 4
+escalated entries); ignore escalated entries (rejected: silent drift
+is the thing the reframing log exists to prevent).
+
+**Related:** D-008 (intercalation); reframer.v1.md; paper_writer.sh
+`phase_apply_reframing_repairs`.
+
+---
+
+## D-032 — 2026-05-01 — Tier-detection defaults to STRONG for unknown REPORT structure
+
+**Decision:** When `check_tier.py` cannot determine the project's
+evidence tier from REPORT.md (no recognizable hypothesis-test
+structure, no explicit tier annotation), default to STRONG framing
+rather than EXPLORATORY.
+
+**Rationale:** STRONG framing is more restrictive (requires
+explicit claims, effect sizes, CIs). Defaulting to it means the
+writer produces conservative prose that a reviewer might loosen,
+rather than speculative prose that a reviewer must tighten. The risk
+of defaulting to EXPLORATORY is overclaim on a project that actually
+has strong evidence; the risk of defaulting to STRONG is understatement
+on an exploratory project. Understatement is safer.
+
+**Alternatives considered:** Default to EXPLORATORY (rejected:
+overclaim risk); require explicit tier annotation (rejected:
+existing BERIL projects don't have tier annotations; would block
+all current usage).
+
+**Related:** Discussion tier-detection fix (v0.6.4); results.v1.md
+tier-aware framing table.
+
+---
+
+## D-033 — 2026-05-03 — Unified fabrication discipline in LAYOUT.md
+
+**Decision:** A single "Fabrication discipline" section in LAYOUT.md
+defines what fabrication means across all prompts: any claim that
+cannot trace to (1) canonical project sources, (2) verified bibliography,
+or (3) explicit metadata. Each drafting prompt cross-references this
+definition with its section-specific risk variant (results: invented
+numbers; methods: invented protocols; discussion: mechanism fabrication;
+intro: citation-claim mismatch; abstract: overclaim vs body; captions:
+invented n-values).
+
+**Rationale:** The prompt review (2026-05-03, CPN.3) found that
+"fabrication" was defined differently in 6 prompts with no single
+authoritative definition. The risk: a prompt with a weaker definition
+of fabrication produces text that a prompt with a stricter definition
+would flag. Centralizing the definition ensures all prompts share the
+same three-category trace-back contract.
+
+**Alternatives considered:** Per-prompt standalone definitions
+(rejected: demonstrated drift across 6 prompts); shared include file
+(rejected: prompt templates don't support includes; a reference link
+achieves the same outcome with less tooling).
+
+**Related:** LAYOUT.md §Fabrication discipline; C1 in consolidated
+triage; prompts CPN.3 finding.
+
+---
+
 *Append new decisions below this line. Use the next D-NNN ID.*

@@ -1,8 +1,17 @@
 # beril-paper-writer — Specification (v0.1)
 
-**Status:** v0.1 — community-facing design rationale. Implementation has not
-started. Decisions captured here are load-bearing for the build; changes
-require updates to [DECISIONS.md](DECISIONS.md).
+> **Version notice (v0.6.5):** This document was written at v0.1 and has not
+> been comprehensively updated through v0.6.x. The core design intent
+> (§1–§4, §6–§8) remains accurate; implementation details (specific
+> validator counts, section ordering, gap-fill mechanics) may have
+> evolved. For current behavior, cross-reference LAYOUT.md (runtime
+> contracts), DECISIONS.md (D-001–D-033), and the per-version release
+> notes (RELEASE_NOTES_v0_*.md). A full SPEC refresh is planned for
+> v1.0.
+
+**Status:** v0.1 — community-facing design rationale. Implementation
+shipped through v0.6.x. Decisions captured here are load-bearing for
+the build; changes require updates to [DECISIONS.md](DECISIONS.md).
 
 This document explains *what* the skill does and *why* the design choices were
 made. It is the document an external reviewer should read to decide whether to

@@ -13,6 +13,13 @@ not deleted. Read [SPEC §6.1][spec-sec] / §6.2 / §3 (REPORT discipline)
 before you start.
 
 [spec-sec]: ../../SPEC.md "see §6.1 + §6.2"
+[fab-discipline]: ../../LAYOUT.md "see §Fabrication discipline"
+
+> **Fabrication discipline ([LAYOUT.md §Fabrication discipline][fab-discipline]):**
+> every factual claim must trace to a canonical project source, verified
+> bibliography entry, or explicit metadata. Results' specific risk:
+> invented numbers. Every number must be grep-traced to REPORT.md or
+> a notebook output cell.
 
 ## Hard constraints (read FIRST)
 

@@ -18,6 +18,13 @@ orchestrator passes; every panel letter must trace to either
 for the surrounding figure discipline.
 
 [spec-sec]: ../../SPEC.md "see §6.1"
+[fab-discipline]: ../../LAYOUT.md "see §Fabrication discipline"
+
+> **Fabrication discipline ([LAYOUT.md §Fabrication discipline][fab-discipline]):**
+> every factual claim must trace to a canonical project source, verified
+> bibliography entry, or explicit metadata. Caption's specific risk:
+> invented n-values. Quantitative figure descriptions must trace to
+> notebook output or REPORT.
 
 ## What you produce
 

@@ -298,10 +298,12 @@ def cmd_update_state(args: argparse.Namespace) -> int:
         state["throughline"]["revision"] = rev + 1
 
     if args.add_cost:
-        state["cost_so_far_usd"] = float(state.get("cost_so_far_usd", 0.0)) + float(args.add_cost)
+        # Use (x or default) — dict.get returns None when key is present
+        # with a JSON null value; see feedback_dict_get_default_vs_null.md.
+        state["cost_so_far_usd"] = float(state.get("cost_so_far_usd") or 0.0) + float(args.add_cost)
 
     if args.add_elapsed_seconds:
-        state["elapsed_seconds"] = float(state.get("elapsed_seconds", 0.0)) + float(
+        state["elapsed_seconds"] = float(state.get("elapsed_seconds") or 0.0) + float(
             args.add_elapsed_seconds
         )
 
@@ -1006,8 +1008,8 @@ def cmd_aggregate_metadata(args: argparse.Namespace) -> int:
             continue
         for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"):
             totals[k] += int(d.get(k, 0))
-        totals["estimated_cost_usd"] += float(d.get("estimated_cost_usd", 0.0))
-        totals["elapsed_seconds"] += int(d.get("elapsed_seconds", 0))
+        totals["estimated_cost_usd"] += float(d.get("estimated_cost_usd") or 0.0)
+        totals["elapsed_seconds"] += int(d.get("elapsed_seconds") or 0)
         totals["calls"].append(
             {
                 "sidecar": sc.name,
