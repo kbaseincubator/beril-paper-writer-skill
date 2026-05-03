@@ -625,6 +625,23 @@ No \`RE_EVALUATION_MODE\` (this is a fresh first-pass run).
         return 1
     fi
 
+    # Extract tier from throughline_candidates.md → state.json (v0.6.4).
+    # If the LLM didn't write a Triage section, defaults to EXPLORATORY
+    # (conservative — the prior bug defaulted to STRONG, causing budget
+    # overshoot on EXPLORATORY projects like functional_dark_matter).
+    log_step "Extracting tier from throughline_candidates.md → state.json"
+    local extracted_tier
+    extracted_tier=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" extract-tier \
+        "$target" --draft-dir "$draft_dir")
+    local extract_rc=$?
+    if [[ $extract_rc -eq 2 ]]; then
+        log_warn "No tier verdict found in $target; defaulting to EXPLORATORY"
+    elif [[ $extract_rc -ne 0 ]]; then
+        log_warn "extract-tier failed (rc=$extract_rc); tier may be unset in state.json"
+    else
+        log_step "Tier extracted: $extracted_tier"
+    fi
+
     # Strength-glyph cross-walk post-processor (advisory).
     log_step "Running check_throughline_glyphs.py (advisory cross-walk)"
     local glyph_warnings_file="$draft_dir/audit/glyph_warnings.txt"
@@ -1304,6 +1321,153 @@ Walk the 5 drift checks per your system prompt's discipline. Append entries to R
     touch "$sentinel"
 
     log_ok "reframe_drift_audit phase complete"
+}
+
+# ==============================================================================
+# Phase: apply_reframing_repairs — fix escalated drift entries (v0.6.4)
+# ==============================================================================
+#
+# After phase_reframe_drift_audit writes the reframing_log.md, this phase
+# reads entries with "Resolution: escalated" and dispatches targeted
+# REPAIR_MODE rewrites to the affected section(s). Each escalated entry
+# may target multiple sections (e.g., Entry 1 from draft_9 targeted
+# Results, Discussion, and Abstract for n_annotated correction).
+#
+# The repair is "targeted" — the section prompt receives REPAIR_MODE=true
+# plus the full reframing log entry as context, and rewrites only the
+# spans identified in the entry. This is cheaper and more precise than
+# re-drafting the full section.
+#
+# Runs ONCE after reframe_drift_audit; idempotent via sentinel file.
+
+phase_apply_reframing_repairs() {
+    local project_root="$1"
+    local draft_dir="$2"
+    local model="$3"
+
+    log_phase "Phase: apply_reframing_repairs"
+
+    local reframing_log="$draft_dir/reframing_log.md"
+    if [[ ! -f "$reframing_log" ]]; then
+        log_step "No reframing_log.md; nothing to repair"
+        return 0
+    fi
+
+    # Idempotency sentinel.
+    local sentinel="$draft_dir/audit/reframing_repairs.done"
+    if [[ -f "$sentinel" ]]; then
+        log_step "reframing repairs already applied (sentinel: audit/reframing_repairs.done); skipping"
+        return 0
+    fi
+
+    local repair_summary="$draft_dir/audit/reframing_repair_summary.txt"
+    : > "$repair_summary"
+
+    # Get list of escalated repairs from the Python helper.
+    # Output format: ENTRY=1|SECTION=results|PROMPT=results.v1.md|FILE=02_results.md|VAR=RESULTS_PATH
+    local dispatch_lines
+    dispatch_lines=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+        list-reframing-repairs "$reframing_log" "$draft_dir" 2>/dev/null) || true
+
+    if [[ -z "$dispatch_lines" ]]; then
+        log_step "No escalated reframing entries (or none with resolvable targets)"
+        echo "no escalated reframing entries at phase entry" >> "$repair_summary"
+        touch "$sentinel"
+        log_ok "apply_reframing_repairs phase complete (no-op)"
+        return 0
+    fi
+
+    local total_dispatches=0
+    local total_repaired=0
+
+    local dline
+    while IFS= read -r dline; do
+        [[ -z "$dline" ]] && continue
+
+        # Parse pipe-delimited fields.
+        local entry_num section_name section_prompt target_file target_var
+        entry_num=$(echo "$dline" | sed 's/.*ENTRY=\([^|]*\).*/\1/')
+        section_name=$(echo "$dline" | sed 's/.*SECTION=\([^|]*\).*/\1/')
+        section_prompt=$(echo "$dline" | sed 's/.*PROMPT=\([^|]*\).*/\1/')
+        target_file=$(echo "$dline" | sed 's/.*FILE=\([^|]*\).*/\1/')
+        target_var=$(echo "$dline" | sed 's/.*VAR=\([^|]*\).*/\1/')
+
+        local target_path="$draft_dir/$target_file"
+        if [[ ! -f "$target_path" ]]; then
+            log_warn "Entry $entry_num → $target_file not found; skipping"
+            echo "Entry $entry_num → $section_name: target file missing" >> "$repair_summary"
+            continue
+        fi
+
+        total_dispatches=$((total_dispatches + 1))
+        log_step "Entry $entry_num → $section_name: dispatching to $section_prompt (REPAIR_MODE)"
+
+        # Snapshot pre-repair.
+        local pre_snapshot="$draft_dir/audit/reframing_repair_entry${entry_num}_${section_name}_pre.md"
+        cp "$target_path" "$pre_snapshot"
+
+        # Build REPAIR_MODE user prompt with reframing context.
+        local mode tier
+        mode="$(read_state_field "$draft_dir" "mode")"; [[ -z "$mode" ]] && mode="paper"
+        tier="$(read_state_field "$draft_dir" "tier")"; [[ -z "$tier" ]] && tier="STRONG"
+
+        local user_prompt
+        user_prompt="REPAIR_MODE invocation: address reframing log Entry $entry_num in $target_file.
+
+## Inputs (canonical sources — pass-through; read what your section prompt needs)
+
+- \`PROJECT_ROOT\` = \`$project_root\`
+- \`DRAFT_DIR\` = \`$draft_dir\`
+- \`THROUGHLINE_PATH\` = \`$draft_dir/00_throughline.md\`
+- \`REPORT_PATH\` = \`$project_root/REPORT.md\`
+- \`RESEARCH_PLAN_PATH\` = \`$project_root/RESEARCH_PLAN.md\`
+- \`METHODS_PATH\` = \`$draft_dir/01_methods.md\`
+- \`RESULTS_PATH\` = \`$draft_dir/02_results.md\`
+- \`DISCUSSION_PATH\` = \`$draft_dir/03_discussion.md\`
+- \`INTRODUCTION_PATH\` = \`$draft_dir/04_introduction.md\`
+- \`ABSTRACT_PATH\` = \`$draft_dir/05_abstract.md\`
+- \`POOL_JSON_PATH\` = \`$draft_dir/pool.json\`
+- \`REFERENCES_MD_PATH\` = \`$draft_dir/references.md\`
+- \`REFRAMING_LOG_PATH\` = \`$draft_dir/reframing_log.md\`
+- \`METHODS_PROVENANCE_PATH\` = \`$draft_dir/methods_provenance.md\`
+- \`FIGURES_INVENTORY_PATH\` = \`$draft_dir/figures_inventory.md\`
+- \`MODE\` = \`$mode\`
+- \`TIER\` = \`$tier\`
+
+## REPAIR_MODE inputs
+
+- \`REPAIR_MODE\` = \`true\`
+- \`REPAIR_SOURCE\` = \`reframing_log\`
+- \`REFRAMING_ENTRY_NUMBER\` = \`$entry_num\`
+- \`REPAIR_TARGET_PATH\` = \`$target_path\` (the file you must rewrite via the Write tool)
+
+Read REFRAMING_LOG_PATH and locate Entry $entry_num. The entry's **Issue** field describes the drift; the **Resolution** field's parenthetical describes the specific repair needed for this section ($section_name). The entry's **Source** field identifies the REPORT.md provenance for the correct value.
+
+Fix ONLY the spans identified in the reframing entry for this section. Do not regenerate the section. Do not introduce new claims. Do not delete grounded claims that the reframing entry did not flag. Re-write REPAIR_TARGET_PATH via the Write tool, then emit your prompt's REPAIR_MODE closing message."
+
+        local metadata_path="$draft_dir/audit/reframing_repair_entry${entry_num}_${section_name}.metadata.json"
+
+        invoke_claude_with_retry \
+            "$PROMPTS_DIR/$section_prompt" "$user_prompt" "$model" \
+            "$target_path" "reframing_repair_entry${entry_num}_${section_name}" "$metadata_path"
+        local rc=$?
+
+        if [[ $rc -ne 0 ]]; then
+            log_warn "Entry $entry_num → $section_name: invocation failed (rc=$rc)"
+            echo "Entry $entry_num → $section_name: invocation-fail (rc=$rc); user-modify recommended" >> "$repair_summary"
+        else
+            total_repaired=$((total_repaired + 1))
+            log_ok "Entry $entry_num → $section_name: repair dispatched successfully"
+            echo "Entry $entry_num → $section_name: repaired via $section_prompt" >> "$repair_summary"
+        fi
+
+    done <<< "$dispatch_lines"
+
+    echo "---" >> "$repair_summary"
+    echo "total dispatches: $total_dispatches, successful: $total_repaired" >> "$repair_summary"
+
+    touch "$sentinel"
+    log_ok "apply_reframing_repairs phase complete ($total_repaired/$total_dispatches repaired)"
 }
 
 # ==============================================================================
@@ -2098,6 +2262,34 @@ run_reviewer_pass() {
     # See beril-adversarial CONTRACT.md for full surface.
     log_step "Using fallback inline reviewer (pass $review_number)"
     run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
+
+    # ── Review substance post-check (v0.6.4) ──────────────────────────
+    # Prevents garbage-acceptance: if the reviewer produces a file that
+    # is too short or lacks any finding headers, the rewrite loop would
+    # operate on nonsense. Caught in draft_9 (2026-05-03): a stale CLI
+    # invocation produced a 2-line argparse usage error that shipped as
+    # the canonical review. The fallback path is now always-on, but a
+    # truncated LLM response could still produce a substance-free file.
+    #
+    # Check: >20 lines AND at least one finding header (**C\d+: or
+    # **I\d+: or **S\d+:). If neither condition is met, warn and remove
+    # the file so the rewrite loop sees "no review" rather than garbage.
+    if [[ -f "$review_out" ]]; then
+        local line_count
+        line_count=$(wc -l < "$review_out")
+        local has_findings
+        has_findings=$(grep -cE '^\s*(\-\s+)?\*\*[CIS][0-9]+:' "$review_out" 2>/dev/null || echo 0)
+
+        if [[ "$line_count" -lt 20 || "$has_findings" -eq 0 ]]; then
+            log_warn "Review substance check FAILED for pass $review_number"
+            log_warn "  file: $review_out"
+            log_warn "  lines: $line_count (min 20), findings: $has_findings (min 1)"
+            log_warn "  Moving aside as .rejected; rewrite loop will see no review"
+            mv "$review_out" "${review_out}.rejected"
+            return 0
+        fi
+        log_step "Review substance check passed: $line_count lines, $has_findings finding(s)"
+    fi
 }
 
 run_fallback_reviewer() {
@@ -2681,6 +2873,8 @@ main() {
                         || halt_with "$draft_dir" "abstract.v1 failed after retry exhaustion"
                     phase_reframe_drift_audit "$project_root" "$draft_dir" "$model_writing" \
                         || halt_with "$draft_dir" "reframer.v1 drift audit failed; inspect audit/reframer.metadata.json"
+                    phase_apply_reframing_repairs "$project_root" "$draft_dir" "$model_writing" \
+                        || halt_with "$draft_dir" "reframing repair dispatch failed; inspect audit/reframing_repair_summary.txt"
                     phase_data_avail    "$project_root" "$draft_dir" "$project_id" \
                         || halt_with "$draft_dir" "data_availability template fill failed (orchestrator-side, no LLM); inspect tools/paper_writer_helpers.py"
                     phase_finalize_citations "$draft_dir" \

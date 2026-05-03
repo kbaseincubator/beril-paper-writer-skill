@@ -317,6 +317,88 @@ def cmd_update_state(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: extract-tier
+# ---------------------------------------------------------------------------
+
+_VALID_TIERS = {"STRONG", "THIN", "EXPLORATORY"}
+
+# Regex patterns for tier extraction, ordered by reliability.
+# Pattern 1 (v0.6.4+): structured Triage header in throughline_candidates.md
+#   **Tier:** EXPLORATORY
+_TIER_STRUCTURED_RE = re.compile(
+    r"^\*\*Tier:\*\*\s*(STRONG|THIN|EXPLORATORY)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+# Pattern 2: closing-message format from plan.v1's closing template
+#   tier: EXPLORATORY, recommended mode: report
+_TIER_CLOSING_RE = re.compile(
+    r"\btier:\s*(STRONG|THIN|EXPLORATORY)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_tier_from_text(text: str) -> str | None:
+    """Extract tier verdict from throughline_candidates.md text.
+
+    Returns uppercase tier string or None if not found.
+    """
+    # Try structured header first (most reliable).
+    m = _TIER_STRUCTURED_RE.search(text)
+    if m:
+        return m.group(1).upper()
+    # Fall back to closing-message pattern.
+    m = _TIER_CLOSING_RE.search(text)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def cmd_extract_tier(args: argparse.Namespace) -> int:
+    """Extract tier from throughline_candidates.md and write to state.json.
+
+    Prints the extracted tier to stdout (for bash capture).
+    Returns 0 on success, 1 on missing file, 2 on tier-not-found (warning).
+    """
+    candidates_path = Path(args.candidates_path).expanduser().resolve()
+    if not candidates_path.is_file():
+        print(f"error: candidates file not found: {candidates_path}",
+              file=sys.stderr)
+        return 1
+
+    text = candidates_path.read_text(encoding="utf-8")
+    tier = _extract_tier_from_text(text)
+
+    if tier is None:
+        print("warning: no tier verdict found in candidates file; "
+              "defaulting to EXPLORATORY (conservative)",
+              file=sys.stderr)
+        tier = "EXPLORATORY"
+        exit_code = 2
+    else:
+        exit_code = 0
+
+    # Write to state.json if --draft-dir provided.
+    if args.draft_dir:
+        draft_dir = Path(args.draft_dir).expanduser().resolve()
+        state_path = draft_dir / "state.json"
+        if state_path.is_file():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                state = {}
+            state["tier"] = tier
+            _atomic_write_json(state_path, state)
+            print(f"wrote tier={tier} to {state_path}", file=sys.stderr)
+        else:
+            print(f"warning: state.json not found at {state_path}; "
+                  f"tier={tier} not persisted", file=sys.stderr)
+
+    # Always print tier to stdout for bash capture.
+    print(tier)
+    return exit_code
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: fill-template
 # ---------------------------------------------------------------------------
 
@@ -1188,6 +1270,229 @@ def cmd_list_failed_validators(args: argparse.Namespace) -> int:
     for e in v.get("validators", []):
         if e.get("status") == "fail":
             print(e.get("id", ""))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Reframing-log parsing + repair dispatch (v0.6.4)
+# ---------------------------------------------------------------------------
+
+# Section name → (prompt, filename, var_name) for reframing repair dispatch.
+_SECTION_REPAIR_DISPATCH: dict[str, dict] = {
+    "methods": {
+        "section_prompt": "methods.v1.md",
+        "target_filename": "01_methods.md",
+        "target_var_name": "METHODS_PATH",
+    },
+    "results": {
+        "section_prompt": "results.v1.md",
+        "target_filename": "02_results.md",
+        "target_var_name": "RESULTS_PATH",
+    },
+    "discussion": {
+        "section_prompt": "discussion.v1.md",
+        "target_filename": "03_discussion.md",
+        "target_var_name": "DISCUSSION_PATH",
+    },
+    "introduction": {
+        "section_prompt": "intro.v1.md",
+        "target_filename": "04_introduction.md",
+        "target_var_name": "INTRODUCTION_PATH",
+    },
+    "abstract": {
+        "section_prompt": "abstract.v1.md",
+        "target_filename": "05_abstract.md",
+        "target_var_name": "ABSTRACT_PATH",
+    },
+}
+
+
+def _parse_reframing_log(text: str) -> list[dict]:
+    r"""Parse reframing_log.md into structured entries.
+
+    Each entry is delimited by ``## Entry N`` headers. Within an entry,
+    the parser extracts bullet fields:
+      - **Issue:** ...
+      - **Source:** ...
+      - **Manuscript impact:** ...
+      - **Resolution:** ...
+      - **Note:** ...
+
+    Returns a list of dicts with keys: entry_number (int), type (str),
+    issue, source, manuscript_impact, resolution, note, resolution_action
+    ("escalated" | "accepted" | "unknown"), and target_sections (list of
+    lowercase section names extracted from the Resolution text).
+    """
+    entries: list[dict] = []
+    current: Optional[dict] = None
+    current_field: Optional[str] = None
+
+    # Regex for entry headers: ## Entry 1 — 2026-05-03T... — type: reframing
+    entry_re = re.compile(
+        r"^##\s+Entry\s+(\d+)\s*(?:—|-).*?type:\s*(.+?)\s*$", re.IGNORECASE
+    )
+    # Regex for bullet fields: - **Issue:** text
+    field_re = re.compile(
+        r"^-\s+\*\*(\w[\w\s]*?):\*\*\s*(.*)", re.DOTALL
+    )
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+
+        # New entry header?
+        m = entry_re.match(line)
+        if m:
+            if current is not None:
+                entries.append(current)
+            current = {
+                "entry_number": int(m.group(1)),
+                "type": m.group(2).strip(),
+                "issue": "",
+                "source": "",
+                "manuscript_impact": "",
+                "resolution": "",
+                "note": "",
+            }
+            current_field = None
+            continue
+
+        if current is None:
+            continue
+
+        # HR separator — ignore
+        if line.startswith("---"):
+            continue
+
+        # Field bullet?
+        fm = field_re.match(line)
+        if fm:
+            field_name = fm.group(1).strip().lower().replace(" ", "_")
+            field_val = fm.group(2).strip()
+            if field_name in current:
+                current[field_name] = field_val
+                current_field = field_name
+            else:
+                current_field = None
+            continue
+
+        # Continuation line for the current field (multi-line values).
+        if current_field and line.strip():
+            current[current_field] += " " + line.strip()
+
+    if current is not None:
+        entries.append(current)
+
+    # Post-process: extract resolution_action and target_sections.
+    section_names = {"methods", "results", "discussion", "introduction",
+                     "intro", "abstract"}
+
+    for entry in entries:
+        res = entry["resolution"].lower()
+        if "escalated" in res:
+            entry["resolution_action"] = "escalated"
+        elif "accepted" in res:
+            entry["resolution_action"] = "accepted"
+        else:
+            entry["resolution_action"] = "unknown"
+
+        # Extract target section names from the Resolution text.
+        # Match section names that appear as standalone words.
+        found: list[str] = []
+        res_words = re.findall(r"[A-Za-z]+", entry["resolution"])
+        for w in res_words:
+            wl = w.lower()
+            if wl in section_names:
+                # Normalize "intro" → "introduction"
+                canonical = "introduction" if wl == "intro" else wl
+                if canonical not in found:
+                    found.append(canonical)
+        entry["target_sections"] = found
+
+    return entries
+
+
+def cmd_parse_reframing_log(args: argparse.Namespace) -> int:
+    """Parse reframing_log.md; emit JSON of entries with dispatch info.
+
+    With --escalated-only, filters to entries where resolution_action ==
+    "escalated". Each entry gains a ``dispatches`` list of per-section
+    repair records: {section, section_prompt, target_filename,
+    target_var_name, target_path, status}.
+    """
+    log_path = Path(args.reframing_log).expanduser().resolve()
+    if not log_path.is_file():
+        print(json.dumps({"entries": [], "note": "reframing_log.md not found"}))
+        return 0
+
+    text = log_path.read_text(encoding="utf-8")
+    entries = _parse_reframing_log(text)
+
+    if args.escalated_only:
+        entries = [e for e in entries if e["resolution_action"] == "escalated"]
+
+    draft_dir = Path(args.draft_dir).expanduser().resolve() if args.draft_dir else None
+
+    for entry in entries:
+        dispatches = []
+        for section in entry["target_sections"]:
+            d = _SECTION_REPAIR_DISPATCH.get(section)
+            if d is None:
+                dispatches.append({
+                    "section": section,
+                    "status": "unknown_section",
+                })
+                continue
+            rec = dict(d)
+            rec["section"] = section
+            if draft_dir:
+                target = draft_dir / rec["target_filename"]
+                rec["target_path"] = str(target)
+                rec["status"] = "ready" if target.is_file() else "target_missing"
+            else:
+                rec["status"] = "ready"
+            dispatches.append(rec)
+        entry["dispatches"] = dispatches
+
+    print(json.dumps({"entries": entries}, indent=2))
+    return 0
+
+
+def cmd_list_reframing_repairs(args: argparse.Namespace) -> int:
+    """Print one repair dispatch line per escalated section target.
+
+    Output format (for bash consumption):
+        ENTRY=1|SECTION=results|PROMPT=results.v1.md|FILE=02_results.md|VAR=RESULTS_PATH
+        ENTRY=1|SECTION=discussion|PROMPT=discussion.v1.md|FILE=03_discussion.md|VAR=DISCUSSION_PATH
+        ...
+
+    Bash loops over these lines; each triggers a REPAIR_MODE invocation.
+    """
+    log_path = Path(args.reframing_log).expanduser().resolve()
+    if not log_path.is_file():
+        return 0
+
+    text = log_path.read_text(encoding="utf-8")
+    entries = _parse_reframing_log(text)
+    draft_dir = Path(args.draft_dir).expanduser().resolve()
+
+    for entry in entries:
+        if entry["resolution_action"] != "escalated":
+            continue
+        for section in entry["target_sections"]:
+            d = _SECTION_REPAIR_DISPATCH.get(section)
+            if d is None:
+                continue
+            target = draft_dir / d["target_filename"]
+            if not target.is_file():
+                continue
+            print(
+                f"ENTRY={entry['entry_number']}"
+                f"|SECTION={section}"
+                f"|PROMPT={d['section_prompt']}"
+                f"|FILE={d['target_filename']}"
+                f"|VAR={d['target_var_name']}"
+            )
+
     return 0
 
 
@@ -2071,7 +2376,8 @@ def _ensure_period(s: str) -> str:
 _BOILERPLATE_KEYWORD_ALT = (
     r"Purpose|Approach|Strategy|Sections?|Steps?|Method|Methods|"
     r"Inputs?|Outputs?|Notes?|Test|Tests|Goal|Objective|Pipeline|"
-    r"Workflow|Implementation|Setup|Background|Rationale|Dependencies"
+    r"Workflow|Implementation|Setup|Background|Rationale|Dependencies|"
+    r"Problem|Overview|Context|Motivation|Summary|Description|Analysis"
 )
 _NOTEBOOK_BOILERPLATE_KEYWORDS_RE = re.compile(
     # Trailing `\s*` (not `\s+`) so a standalone keyword line like
@@ -2136,6 +2442,50 @@ def _strip_prose_for_inline(prose: str) -> str:
     - Cap at 300 chars (the prose snippet is supplementary, not the
       whole description).
     """
+    # Pre-process: strip markdown blockquote prefixes (`> `) from each
+    # line BEFORE any other processing. The figures_inventory stores
+    # notebook prose in blockquote format; without this, `> ## Problem`
+    # escapes the `^#` heading filter, `> Strategy:` escapes the keyword
+    # filter, and critique prose from Problem/Strategy sections leaks
+    # into figure captions. Caught in v0.6.4: draft_9 fig 8 had raw
+    # NB08 critique text ("gene neighborhood analysis uses a minimal
+    # positional heuristic...") ending mid-sentence in the caption.
+    prose = re.sub(r"^>\s?", "", prose, flags=re.MULTILINE)
+
+    # Pre-process: drop entire notebook-organization sections.
+    # After blockquote stripping, notebook markdown has `## Problem`,
+    # `## Strategy`, `## Inputs`, `## Outputs`, etc. These are
+    # project-internal sections whose BODY content is not figure
+    # description. The line-by-line keyword filter drops keyword-header
+    # lines but their body paragraphs (regular prose) leak through.
+    # Fix: detect `## <BoilerplateKeyword>` section headers and drop
+    # everything until the next `##` header, `---` separator, or EOF.
+    #
+    # IMPORTANT: the header must be EXACTLY the keyword (+ optional
+    # colon/number suffix like `## Section 1` or `## Inputs:`), NOT
+    # keyword-prefixed content descriptions like `## Section 1:
+    # Conserved Gene Neighborhoods`. The latter are real content
+    # sections that should be kept. The regex requires the keyword
+    # to be followed by only optional `: <digits>` or whitespace to
+    # end-of-line.
+    #
+    # Caught in v0.6.4: NB08's `## Problem` body ("gene neighborhood
+    # analysis uses a minimal positional heuristic...") leaked into
+    # fig 8's caption.
+    _section_strip_keywords = (
+        "Problem|Strategy|Overview|Context|Motivation|Purpose|Approach|"
+        "Method|Methods|Inputs|Outputs|Setup|Background|Dependencies|"
+        "Implementation|Analysis|Rationale|Pipeline|Workflow|"
+        "Goal|Objective|Notes"
+    )
+    prose = re.sub(
+        rf"^##\s+(?:{_section_strip_keywords})(?:\s*:?\s*(?:\d+\s*)?)?\s*$"
+        rf".*?(?=^##|\Z)",
+        "",
+        prose,
+        flags=re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+
     # Pre-process: strip `**Bold:**` markers BEFORE the line-prefix
     # boilerplate filter, so `**Goal:** Test ...` becomes `Goal: Test ...`
     # which the line filter then drops. Without this pre-pass, bold-
@@ -3564,6 +3914,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_us.add_argument("--add-elapsed-seconds", type=int)
     p_us.set_defaults(func=cmd_update_state)
 
+    # extract-tier
+    p_et = sub.add_parser("extract-tier",
+                          help="Extract tier from throughline_candidates.md → state.json.")
+    p_et.add_argument("candidates_path", help="Path to throughline_candidates.md")
+    p_et.add_argument("--draft-dir", help="Draft dir to write tier into state.json")
+    p_et.set_defaults(func=cmd_extract_tier)
+
     # fill-template
     p_ft = sub.add_parser("fill-template", help="Substitute {key} placeholders.")
     p_ft.add_argument("template_path")
@@ -3644,6 +4001,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p_lf.add_argument("validation_json")
     p_lf.set_defaults(func=cmd_list_failed_validators)
+
+    # parse-reframing-log (v0.6.4) — parse reframing_log.md; emit JSON
+    # of entries with dispatch info for repair.
+    p_rl2 = sub.add_parser(
+        "parse-reframing-log",
+        help="Parse reframing_log.md; emit JSON of entries with repair dispatch info.",
+    )
+    p_rl2.add_argument("reframing_log", help="Path to reframing_log.md")
+    p_rl2.add_argument("--draft-dir", default=None,
+                       help="Draft directory (for target_path resolution).")
+    p_rl2.add_argument("--escalated-only", action="store_true",
+                       help="Only emit entries with resolution_action == escalated.")
+    p_rl2.set_defaults(func=cmd_parse_reframing_log)
+
+    # list-reframing-repairs (v0.6.4) — emit one pipe-delimited line per
+    # section-target for escalated reframing entries (bash loop consumer).
+    p_lr = sub.add_parser(
+        "list-reframing-repairs",
+        help="Print one repair dispatch line per escalated section target.",
+    )
+    p_lr.add_argument("reframing_log", help="Path to reframing_log.md")
+    p_lr.add_argument("draft_dir", help="Draft directory.")
+    p_lr.set_defaults(func=cmd_list_reframing_repairs)
 
     # parse-review (Item 3.3) — extract findings from review.md, group
     # by primary section, filter by severity, emit JSON to stdout.

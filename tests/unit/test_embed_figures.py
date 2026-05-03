@@ -659,6 +659,111 @@ def test_strip_prose_drops_project_internal_artifact_refs(helpers) -> None:
     assert "comparing with" in out
 
 
+# ---------------------------------------------------------------------------
+# v0.6.4: blockquote stripping + section-level boilerplate stripping
+# ---------------------------------------------------------------------------
+
+
+def test_strip_prose_blockquote_prefixes(helpers) -> None:
+    """v0.6.4: blockquote `> ` prefixes must be stripped so that
+    `> ## Problem` is seen as a heading and filtered."""
+    raw = (
+        "> ## Problem\n"
+        "> Gene neighborhood analysis uses a minimal positional heuristic.\n"
+        "> \n"
+        "> ## Strategy\n"
+        "> We compare neighborhoods across all organisms.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    assert "Problem" not in out
+    assert "Strategy" not in out
+    assert "positional heuristic" not in out
+    assert "compare neighborhoods" not in out
+
+
+def test_strip_prose_section_level_strips_boilerplate_body(helpers) -> None:
+    """v0.6.4: entire `## <BoilerplateKeyword>` sections (header + body)
+    are stripped, not just the heading line. This prevents body paragraphs
+    of Problem/Strategy/Inputs/Outputs sections from leaking through the
+    line-by-line filter."""
+    raw = (
+        "## Problem\n"
+        "Gene neighborhood analysis uses a minimal positional heuristic "
+        "that may miss conserved neighborhoods spanning multiple operons.\n\n"
+        "## Strategy\n"
+        "We compare neighborhoods across all organisms using a sliding "
+        "window approach with configurable overlap.\n\n"
+        "## Inputs\n"
+        "- Gene annotations from Step 2\n"
+        "- Ortholog groups from Step 3\n\n"
+        "## Outputs\n"
+        "- Conserved neighborhood calls\n"
+        "- Confidence scores per neighborhood\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    # All boilerplate section bodies stripped
+    assert "positional heuristic" not in out
+    assert "sliding window" not in out
+    assert "Gene annotations" not in out
+    assert "Confidence scores" not in out
+    # Result should be empty or near-empty
+    assert len(out.split()) < 5
+
+
+def test_strip_prose_section_level_preserves_real_headings(helpers) -> None:
+    """v0.6.4: `## Section 1: Gene Annotation Breakdown` and
+    `## Conserved Gene Neighborhoods` are real content — NOT stripped."""
+    raw = (
+        "## Section 1: Gene Annotation Breakdown\n"
+        "Figure 8 shows the distribution of annotated vs dark genes "
+        "across 35 organisms.\n\n"
+        "## Conserved Gene Neighborhoods\n"
+        "These neighborhoods show strong conservation across phyla.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    # Real content preserved (headings stripped by heading filter,
+    # but body text kept)
+    assert "distribution of annotated" in out
+    assert "strong conservation" in out
+
+
+def test_strip_prose_mixed_boilerplate_and_content(helpers) -> None:
+    """v0.6.4: mixed sections — boilerplate stripped, real content kept."""
+    raw = (
+        "## Problem\n"
+        "This is a boilerplate problem statement.\n\n"
+        "## Gene Annotation Breakdown\n"
+        "Figure 8 shows annotated vs dark genes across 35 organisms.\n\n"
+        "## Strategy\n"
+        "We compare neighborhoods.\n\n"
+        "## Conserved Gene Neighborhoods\n"
+        "These neighborhoods show strong conservation.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    assert "boilerplate problem" not in out
+    assert "compare neighborhoods" not in out
+    assert "annotated vs dark genes" in out
+    assert "strong conservation" in out
+
+
+def test_strip_prose_blockquote_then_section_strip(helpers) -> None:
+    """v0.6.4 end-to-end: blockquote-wrapped notebook sections like
+    the real NB08 prose in figures_inventory.md."""
+    raw = (
+        "> ## Problem\n"
+        "> Gene neighborhood analysis uses a minimal positional heuristic.\n"
+        "> \n"
+        "> ## Results\n"
+        "> We found 42 conserved neighborhoods across the dataset.\n"
+    )
+    out = helpers._strip_prose_for_inline(raw)
+    # Problem section stripped (boilerplate keyword)
+    assert "positional heuristic" not in out
+    # Results heading is IMRAD — content should survive
+    # (heading line stripped by heading filter, body kept)
+    assert "42 conserved neighborhoods" in out
+
+
 def test_assemble_description_strips_redundant_panel_letter_prefix(
     helpers,
 ) -> None:
@@ -859,6 +964,33 @@ class TestSufficiencyGate:
         assert helpers._caption_max_words(6) == 500   # complex multi-panel
         # Negative or zero → defaults to 200 (no negative scaling)
         assert helpers._caption_max_words(-1) == 200
+
+    def test_v0_6_4_gate_fails_blockquote_notebook_prose(self, helpers):
+        """v0.6.4: NB08-style notebook prose wrapped in blockquotes with
+        ## Problem/Strategy/Inputs/Outputs sections should FAIL the gate
+        (routes to Source 4 LLM for proper caption generation)."""
+        descriptor = {
+            "title": "Gene neighborhood conservation",
+            "axes_labels": ["Organism", "Neighborhood count"],
+            "notebook_prose": (
+                "> ## Problem\n"
+                "> Gene neighborhood analysis uses a minimal positional "
+                "heuristic that may miss conserved neighborhoods.\n"
+                "> \n"
+                "> ## Strategy\n"
+                "> We compare neighborhoods across all organisms using a "
+                "sliding window approach.\n"
+                "> \n"
+                "> ## Inputs\n"
+                "> - Gene annotations from Step 2\n"
+                "> - Ortholog groups from Step 3\n"
+                "> \n"
+                "> ## Outputs\n"
+                "> - Conserved neighborhood calls\n"
+                "> - Confidence scores per neighborhood\n"
+            ),
+        }
+        assert not helpers._passes_sufficiency_gate(descriptor)
 
     def test_v0_5_gate_passes_substantive_prose(self, helpers):
         """v0.5 sufficiency-gate: real descriptive prose with no

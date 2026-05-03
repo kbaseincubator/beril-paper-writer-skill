@@ -48,6 +48,14 @@ load-bearing — downstream agents and the adversarial reviewer parse
 this format; deviations break the pipeline.
 
 ```markdown
+## Triage
+
+**Tier:** {STRONG|THIN|EXPLORATORY}
+**Recommended mode:** {paper|report}
+**Rationale:** {one-sentence rubric-driven justification}
+
+---
+
 ## Candidate TL{N}: {one-sentence claim}
 
 **Evidence map:**

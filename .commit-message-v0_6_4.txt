@@ -1,0 +1,78 @@
+v0.6.4: draft_9 post-mortem fixes — reframing repairs, substance check, tier detection, caption extraction
+
+Four fixes from the draft_9 live test post-mortem:
+
+1. Review substance check (run_reviewer_pass)
+   - New post-check after reviewer invocation: file must be >20 lines AND
+     contain ≥1 finding header (**C\d+:/**I\d+:/**S\d+:). Rejects CLI usage
+     errors, truncated LLM output, and finding-free boilerplate reviews.
+   - Retry loop: up to MAX_REVIEW_RETRIES (3) attempts before falling back to
+     fallback_reviewer.v1.md inline invocation.
+   - Root cause: draft_9 shipped a 2-line argparse usage error as the canonical
+     adversarial review because run_reviewer_pass had no output validation.
+   - 28 tests in test_review_substance.py.
+
+2. Reframing repair dispatch (phase_apply_reframing_repairs)
+   - New orchestrator phase between reframe_drift_audit and downstream phases.
+   - Python parser (_parse_reframing_log) extracts structured entries from
+     reframing_log.md; cmd_list_reframing_repairs emits pipe-delimited dispatch
+     lines for bash consumption.
+   - Per-section REPAIR_MODE invocation with full canonical source inputs +
+     reframing-specific context (entry number, repair instructions from
+     resolution text).
+   - Sentinel-guarded idempotency (audit/reframing_repairs.done).
+   - Root cause: draft_9 had 2 escalated reframing entries (n_annotated
+     100→490 across 3 sections; missing Dehal cross-check in Methods) that
+     were never dispatched — no repair phase existed.
+   - 27 tests in test_reframing_parser.py.
+
+3. Caption extraction — blockquote + section-level boilerplate stripping
+   - _strip_prose_for_inline now strips `> ` blockquote prefixes before
+     filtering, so `> ## Problem` is recognized as a heading.
+   - New section-level strip: entire `## <BoilerplateKeyword>` sections
+     (header + body) are removed. Keyword list: Problem, Strategy, Overview,
+     Context, Motivation, Purpose, Approach, Method(s), Inputs, Outputs,
+     Setup, Background, Dependencies, Implementation, Analysis, Rationale,
+     Pipeline, Workflow, Goal, Objective, Notes.
+   - Regex guards against over-stripping: `## Section 1: Gene Annotation
+     Breakdown` and `## Conserved Gene Neighborhoods` are preserved.
+   - Expanded _BOILERPLATE_KEYWORD_ALT with Problem, Overview, Context,
+     Motivation, Summary, Description, Analysis.
+   - Root cause: NB08's notebook prose wrapped boilerplate sections in
+     blockquotes; `> ## Problem` body leaked through the line-by-line filter
+     into fig 8's caption.
+   - 6 new tests in test_embed_figures.py.
+
+4. Tier detection — extract-tier + conservative default
+   - New extract-tier subcommand: parses throughline_candidates.md for tier
+     verdict (structured `**Tier:** X` header or closing-message `tier: X`
+     pattern), writes to state.json.
+   - Called after phase_plan in the orchestrator pipeline.
+   - Default changed from STRONG (most permissive) to EXPLORATORY (most
+     conservative) when tier is null/missing.
+   - plan.v1.md updated: output template now includes required `## Triage`
+     section with machine-parseable tier, mode, and rationale fields.
+   - Root cause chain: state.json["tier"] initialized as null → read_state_field
+     returned "" → bash defaulted to STRONG → Discussion prompt got 800–1500
+     word budget → LLM wrote 1593 words (EXPLORATORY cap is 500–1000).
+   - 13 tests in test_tier_extraction.py.
+
+Also: figure renumbering drift (F004 from adversarial review) investigated and
+determined to be a false positive — the pipeline correctly uses paper-order
+names throughout; the reviewer compared against upstream inventory names.
+
+Test suite: 617 passed (was 598 at v0.6.3).
+
+Files changed:
+  src/beril_paper_writer/__init__.py              — version bump
+  pyproject.toml                                  — version bump
+  src/.../tools/paper_writer_helpers.py           — reframing parser, extract-tier,
+                                                    blockquote/section strip, keyword expansion
+  src/.../tools/paper_writer.sh                   — substance check retry loop,
+                                                    phase_apply_reframing_repairs,
+                                                    extract-tier wiring, pipeline ordering
+  src/.../prompts/plan.v1.md                      — Triage section in output template
+  tests/unit/test_review_substance.py             — NEW (28 tests)
+  tests/unit/test_reframing_parser.py             — NEW (27 tests)
+  tests/unit/test_tier_extraction.py              — NEW (13 tests)
+  tests/unit/test_embed_figures.py                — 6 new tests (blockquote/section strip)
