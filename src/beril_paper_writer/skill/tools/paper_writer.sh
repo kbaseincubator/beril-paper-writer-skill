@@ -2075,19 +2075,29 @@ run_reviewer_pass() {
         return 0
     fi
 
-    if command -v beril-adversarial &>/dev/null; then
-        log_step "Invoking beril-adversarial --type paper (pass $review_number)"
-        beril-adversarial --type paper "$project_id" \
-            > "$review_out" 2>&1 || \
-            log_warn "beril-adversarial exited non-zero on pass $review_number; review may be partial"
-        if [[ ! -s "$review_out" ]]; then
-            log_warn "Adversarial review file empty; falling back to inline reviewer"
-            run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
-        fi
-    else
-        log_warn "beril-adversarial not on PATH; using fallback inline reviewer (pass $review_number)"
-        run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
-    fi
+    # Architecture decision (2026-05-03, CONTRACT.md Option A):
+    #
+    # The fallback inline reviewer (fallback_reviewer.v1.md, 3 classes,
+    # ~30s via claude -p) stays as the fast in-loop iteration tool.
+    # beril-adversarial's canonical reviewer (10 classes, 5-10 min via
+    # pipx CLI with tool access) serves a different purpose: thorough
+    # audit of a finished draft.
+    #
+    # The rewrite loop (phase_review_rewrite) runs 1-3 review passes;
+    # it needs cheap, fast passes that identify the top fixable problems,
+    # not comprehensive audit. Cost and latency mismatch rules out the
+    # canonical reviewer here.
+    #
+    # TODO v0.7.0: Add phase_adversarial_audit that runs AFTER the
+    # rewrite loop as a final quality gate:
+    #   beril-adversarial review "$draft_dir" --type paper
+    # Output: $draft_dir/audit/adversarial_review.{md,json}
+    # Schema: adversarial-review-paper.v2
+    # Severity mapping: P0→Critical, P1→Important, P2→Suggested
+    # Exit codes: 0=clean, 2=auto-corrected (safe), 1=user error, 3=config
+    # See beril-adversarial CONTRACT.md for full surface.
+    log_step "Using fallback inline reviewer (pass $review_number)"
+    run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$review_out" "$review_number" || return 1
 }
 
 run_fallback_reviewer() {

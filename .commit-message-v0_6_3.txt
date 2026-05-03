@@ -1,4 +1,4 @@
-v0.6.3: Expert prompt engineering review — constraint enforcement
+v0.6.3: Expert prompt review + adversarial reviewer fix + model ID fix
 
 Applied systematic prompt engineering techniques across all 4 narrative
 prompts (abstract, intro, results, discussion) based on expert review.
@@ -50,7 +50,20 @@ discussion.v1.md:
 paper_writer.sh:
 - Fix stale model ID: DEFAULT_MODEL_WRITING updated from
   claude-opus-4-6-20250918 (returns 404) to claude-opus-4-7
+- Fix adversarial reviewer: beril-adversarial CLI only exposes
+  install-skill/configure, not --type paper review. The old code
+  passed command -v (binary exists) but failed at argparse; the
+  2-line usage error was non-empty so the fallback didn't trigger.
+  Fix: always use fallback inline reviewer (runs same rubric via
+  claude -p).
+- Architecture decision: fallback reviewer stays as fast in-loop
+  iteration tool (CONTRACT.md Option A). Canonical adversarial
+  reviewer (beril-adversarial review --type paper) is thorough
+  audit, not iteration — 10 classes, 5-10 min, tool access.
+  TODO v0.7.0: add phase_adversarial_audit as post-rewrite-loop
+  quality gate. Severity mapping documented: P0→Critical,
+  P1→Important, P2→Suggested.
 
-Tests: 543 passed (no changes to code, prompt-only release)
+Tests: 543 passed
 
 Co-Authored-By: Claude <noreply@anthropic.com>
