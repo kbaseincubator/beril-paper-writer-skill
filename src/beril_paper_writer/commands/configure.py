@@ -157,12 +157,12 @@ def run(args: argparse.Namespace) -> int:
     _info("=== Soft requirements ===")
 
     # ---- 5. beril-adversarial CLI (soft) ----
-    adv_path = shutil.which("beril-adversarial-cli")
+    adv_path = shutil.which("beril-adversarial")
     if adv_path:
-        _info(f"  [OK]      beril-adversarial-cli — {adv_path}")
+        _info(f"  [OK]      beril-adversarial — {adv_path}")
     else:
         _info(
-            "  [absent]  beril-adversarial-cli — not on PATH; the writer will use the "
+            "  [absent]  beril-adversarial — not on PATH; the writer will use the "
             "inline fallback reviewer (lighter; see SPEC §8.2)."
         )
         _info(

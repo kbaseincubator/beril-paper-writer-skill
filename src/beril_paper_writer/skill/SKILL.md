@@ -29,10 +29,11 @@ flow). The drafting itself runs through a shell orchestrator
 points emit `papers/draft_N/.handoff.json` for the slash-command
 parser.
 
-**Status: v0.1 — first release.** Linear pipeline; REPAIR_MODE,
-review-rewrite loop, card elicitation, and `assemble`
-markdown→docx all deferred to v0.2. See `RELEASE_NOTES.md` for the
-full deferral list.
+**Status: v0.7.0 — pipeline reliability.** Full IMRAD pipeline with
+review-rewrite loop (v0.2+), figure + table embedding (v0.3/v0.6),
+caption-richness via Source 4 LLM (v0.4), markdown→docx assembly,
+and v0.7.0 ensemble review (3× fallback reviewer + agreement scoring),
+parallel rewrite candidates, and best-of-3 caption generation.
 
 ## Slash commands
 
@@ -60,8 +61,8 @@ full deferral list.
   multi-source verification.
 - `--model <model_id>` — override default model. Default Sonnet
   (~3× cheaper than Opus on this pipeline).
-- `--no-adversarial` — skip the `beril-adversarial-cli` review and
-  use the inline `fallback_reviewer.v1` prompt. Useful when
+- `--no-adversarial` — skip the `beril-adversarial` canonical review
+  and use the inline `fallback_reviewer.v1` prompt. Useful when
   `beril-adversarial` isn't installed.
 - `--no-stream` — disable the `stream_progress.py` wrapper. Loses
   Write-tool verification + cost summary. Useful only for debugging.
@@ -151,12 +152,15 @@ in v0.1, no auto-fix).
 Wall clock: ~10-25 min on Sonnet depending on `--depth` and project
 tier.
 
-### Step 5 — Adversarial review
+### Step 5 — Ensemble review + rewrite loop
 
-The orchestrator shells out to `beril-adversarial-cli --type paper
-<project_id>` if installed; otherwise falls back to the inline
-`fallback_reviewer.v1` prompt. The review is single-pass; the
-review-rewrite loop is deferred to v0.2.
+The orchestrator runs 3 independent fallback reviews in parallel
+(v0.7.0 ensemble), deduplicates findings by section + textual overlap,
+and scores by agreement (3/3, 2/3 → routed to rewrite loop; 1/3 →
+advisory only). The bounded rewrite loop (up to 2 passes per SPEC §8.3)
+dispatches `rewrite.v1` per affected section with parallel candidates
+(v0.7.0 R3). A canonical `beril-adversarial review --type paper` audit
+is planned as a post-loop quality gate (phase_adversarial_audit).
 
 ### Step 6 — Final pause
 
@@ -236,7 +240,7 @@ failed step.
 | Scenario | Use |
 |---|---|
 | BERDL project ready to write up | `/beril-paper-writer` |
-| Existing draft to review | `/beril-adversarial --type paper` (sibling skill) |
+| Existing draft to review | `beril-adversarial review --type paper` (sibling skill) |
 | Plan-stage manuscript outline | (not yet — `/beril-paper-writer --mode report` is closest, but it's tier-driven; v0.2 may add a planning-stage prompt) |
 | Slide-deck companion | `/beril-presentation-maker` (sibling skill, mid-flight) |
 
@@ -265,7 +269,7 @@ co-located with the draft.
   `REPORT.md`, `RESEARCH_PLAN.md`, notebooks). All output is scoped
   to `papers/draft_N/`.
 - Adversarial review coupling is loose. The writer shells out to
-  `beril-adversarial-cli --type paper` if on PATH; missing-binary
+  `beril-adversarial review --type paper` if on PATH; missing-binary
   triggers the fallback reviewer with a stderr warning.
 - For provider/model configuration: the `claude` CLI carries its own
   config. This skill does not edit `.env` or hold API keys.

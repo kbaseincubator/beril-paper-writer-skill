@@ -654,7 +654,7 @@ skill:
 
 ```bash
 # Inside paper_writer.sh's review phase
-beril-adversarial-cli --type paper "$DRAFT_DIR" 2>&1 | tee "$REVIEW_LOG"
+beril-adversarial review --type paper "$DRAFT_DIR" 2>&1 | tee "$REVIEW_LOG"
 ```
 
 Or via the slash-command path if the writer runs inside Claude Code:

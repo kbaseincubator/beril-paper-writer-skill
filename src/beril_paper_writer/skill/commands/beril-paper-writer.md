@@ -86,7 +86,7 @@ From BERIL_ROOT:
   Pass `deep` (~30-50 min) for thorough pre-submission drafting.
 - Omit `--model` to use Sonnet (default; ~3× cheaper than Opus on
   this pipeline).
-- `--no-adversarial` skips `beril-adversarial-cli` and uses the inline
+- `--no-adversarial` skips `beril-adversarial` and uses the inline
   `fallback_reviewer.v1` prompt. Useful if `beril-adversarial` isn't
   installed.
 
