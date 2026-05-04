@@ -229,8 +229,10 @@ check_adversarial_compat() {
         return 0
     fi
 
-    local adv_version
-    adv_version=$(beril-adversarial --version 2>/dev/null || echo "unknown")
+    local adv_version_raw adv_version
+    adv_version_raw=$(beril-adversarial --version 2>/dev/null || echo "unknown")
+    # Strip package-name prefix: "beril-adversarial-skill 0.7.0" → "0.7.0"
+    adv_version="${adv_version_raw##* }"
     log_step "beril-adversarial version: $adv_version"
 
     # Compatible range: 0.6.x–0.8.x (adversarial-review-paper.v2/v3)

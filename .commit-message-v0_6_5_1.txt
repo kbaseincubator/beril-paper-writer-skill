@@ -1,0 +1,21 @@
+v0.6.5.1: hotfix — adversarial version-check string parsing
+
+Fix check_adversarial_compat() to strip package-name prefix from
+`beril-adversarial --version` output before matching.
+
+The --version command prints "beril-adversarial-skill 0.7.0" (full
+package name + version). The case statement expected a bare version
+number (e.g., "0.7.0"). Without stripping, the full string never
+matched 0.6.*|0.7.*|0.8.*, causing a false "may be incompatible"
+warning on every run.
+
+Fix: adv_version="${adv_version_raw##* }" (bash parameter expansion,
+strip everything up to and including the last space).
+
+Discovered during first live run of v0.6.5 on functional_dark_matter
+draft_10. The warning was advisory-only (fallback reviewer still ran),
+but it confused the operator and would have prevented canonical
+adversarial reviewer dispatch once that path is wired.
+
+No test changes — version-check is a runtime advisory, not a testable
+code path (requires installed beril-adversarial binary).
