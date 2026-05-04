@@ -484,6 +484,38 @@ class TestM8CountsBeforePct:
         result = vm.validate_M8_counts_before_percentages(sections, "paper")
         assert result.status == "pass"
 
+    def test_adjacent_count_N_genes_pct(self):
+        """v0.7.0 R5c: '42 genes (73.7%)' should NOT be flagged."""
+        sections = {
+            "results": "## Results\n\nWe identified 42 genes (73.7%) with FDM annotations."
+        }
+        result = vm.validate_M8_counts_before_percentages(sections, "paper")
+        assert result.status == "pass"
+
+    def test_adjacent_count_N_of_M(self):
+        """v0.7.0 R5c: '42 (73.7%) of 57 genes' should NOT be flagged."""
+        sections = {
+            "results": "## Results\n\nA total of 42 (73.7%) of 57 genes were classified."
+        }
+        result = vm.validate_M8_counts_before_percentages(sections, "paper")
+        assert result.status == "pass"
+
+    def test_adjacent_count_N_isolates_pct(self):
+        """v0.7.0 R5c: '156 isolates (28.2%)' should NOT be flagged."""
+        sections = {
+            "results": "## Results\n\nTransport was found in 156 isolates (28.2%) across all sites."
+        }
+        result = vm.validate_M8_counts_before_percentages(sections, "paper")
+        assert result.status == "pass"
+
+    def test_truly_bare_percentage_still_flagged(self):
+        """A percentage with no nearby count should still be flagged."""
+        sections = {
+            "results": "## Results\n\nThe rate increased to 73.7% in recent years."
+        }
+        result = vm.validate_M8_counts_before_percentages(sections, "paper")
+        assert result.status == "soft-warning"
+
 
 # ---------------------------------------------------------------------------
 # M9 — Limitations

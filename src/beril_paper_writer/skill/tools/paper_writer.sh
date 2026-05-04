@@ -1706,7 +1706,7 @@ phase_caption_synthesis() {
             continue
         fi
 
-        log_step "Synthesizing caption for figure $fig_id"
+        log_step "Synthesizing caption for figure $fig_id (ensemble best-of-3)"
 
         # Read the bundle JSON into a variable for inlining; per the
         # prompt's contract, all inputs flow through user_prompt (no
@@ -1714,8 +1714,25 @@ phase_caption_synthesis() {
         local bundle_json
         bundle_json=$(cat "$bundle_path")
 
-        local user_prompt
-        user_prompt="Run figure_caption.v1 to produce $output_path.
+        # v0.7.0 R2: Ensemble caption generation (best-of-3).
+        # Generate up to 3 candidates, score each mechanically, pick
+        # the highest-scoring survivor. If all 3 fail code-smell,
+        # retry once with explicit anti-pattern instruction (4th attempt).
+        local best_score=0
+        local best_candidate=""
+        local n_candidates=3
+        local all_failed=true
+
+        # Build body text path for percentage cross-check.
+        local body_text_path="$draft_dir/02_results.md"
+        [[ ! -f "$body_text_path" ]] && body_text_path=""
+
+        for attempt in $(seq 1 $n_candidates); do
+            local candidate_path="$draft_dir/audit/figure_caption_${fig_id}_candidate${attempt}.md"
+            local candidate_meta="$draft_dir/audit/figure_caption_${fig_id}_candidate${attempt}.metadata.json"
+
+            local user_prompt
+            user_prompt="Run figure_caption.v1 to produce $candidate_path.
 
 ## Inputs (JSON bundle)
 
@@ -1725,17 +1742,80 @@ $bundle_json
 
 ## Output path
 
-Write the caption markdown to \`$output_path\` via the Write tool.
+Write the caption markdown to \`$candidate_path\` via the Write tool.
 
 After Write succeeds, emit the closing-message template (see prompt §Closing-message)."
 
-        invoke_claude_with_retry \
-            "$PROMPTS_DIR/figure_caption.v1.md" "$user_prompt" "$model" \
-            "$output_path" "$label" "$cap_metadata" \
-            || {
-                log_warn "figure_caption.v1 failed for figure $fig_id; falling back to deterministic description."
+            invoke_claude_with_retry \
+                "$PROMPTS_DIR/figure_caption.v1.md" "$user_prompt" "$model" \
+                "$candidate_path" "$label" "$candidate_meta" \
+                || continue
+
+            if [[ ! -f "$candidate_path" ]]; then
                 continue
-            }
+            fi
+
+            # Score the candidate.
+            local score_json
+            local score_args=(--caption-path "$candidate_path")
+            [[ -n "$body_text_path" ]] && score_args+=(--body-text-path "$body_text_path")
+            score_json=$("$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+                score-caption "${score_args[@]}") || continue
+
+            local cand_score
+            cand_score=$(echo "$score_json" | "$PYTHON_BIN" -c "import json,sys; print(json.load(sys.stdin).get('score',0))")
+            log_step "  candidate $attempt for fig $fig_id: score=$cand_score"
+
+            if [[ "$cand_score" -gt "$best_score" ]]; then
+                best_score="$cand_score"
+                best_candidate="$candidate_path"
+                all_failed=false
+            fi
+        done
+
+        # If all 3 failed code-smell, retry once with explicit anti-pattern.
+        if $all_failed; then
+            log_warn "All 3 candidates failed for fig $fig_id; retrying with anti-pattern instruction."
+            local fallback_path="$draft_dir/audit/figure_caption_${fig_id}_fallback.md"
+            local fallback_meta="$draft_dir/audit/figure_caption_${fig_id}_fallback.metadata.json"
+
+            local user_prompt
+            user_prompt="Run figure_caption.v1 to produce $fallback_path.
+
+CRITICAL: Previous caption attempts contained code artifacts (function calls,
+variable names, notebook comments). You MUST NOT include any programming
+constructs, variable names, SQL fragments, or notebook cell references in
+the caption. Write ONLY in scientific prose suitable for an ICMJE journal.
+
+## Inputs (JSON bundle)
+
+\`\`\`json
+$bundle_json
+\`\`\`
+
+## Output path
+
+Write the caption markdown to \`$fallback_path\` via the Write tool.
+
+After Write succeeds, emit the closing-message template (see prompt §Closing-message)."
+
+            invoke_claude_with_retry \
+                "$PROMPTS_DIR/figure_caption.v1.md" "$user_prompt" "$model" \
+                "$fallback_path" "$label" "$fallback_meta" \
+                || {
+                    log_warn "figure_caption.v1 fallback also failed for figure $fig_id; skipping."
+                    continue
+                }
+            best_candidate="$fallback_path"
+        fi
+
+        # Copy best candidate to the canonical output path.
+        if [[ -n "$best_candidate" && -f "$best_candidate" ]]; then
+            cp "$best_candidate" "$output_path"
+        else
+            log_warn "No viable caption candidate for figure $fig_id; skipping."
+            continue
+        fi
 
         # Update metadata.json with stats from the written caption.
         "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
@@ -1746,7 +1826,7 @@ After Write succeeds, emit the closing-message template (see prompt §Closing-me
         n_synth=$((n_synth + 1))
     done <<< "$fig_ids"
 
-    log_ok "caption_synthesis phase complete ($n_synth/$n_figs LLM-synthesized)"
+    log_ok "caption_synthesis phase complete ($n_synth/$n_figs LLM-synthesized, ensemble best-of-3)"
 }
 
 # ==============================================================================
@@ -2231,7 +2311,7 @@ $(_emit_repair_inputs_block "$project_root" "$draft_dir" "$TARGET_VAR_NAME" "$TA
 }
 
 # ==============================================================================
-# Phase: review — single-pass adversarial OR fallback
+# Phase: review — ensemble fallback (3 reviews + agreement scoring)
 # ==============================================================================
 
 phase_review() {
@@ -2240,17 +2320,103 @@ phase_review() {
     local model="$3"
     local project_id="$4"
 
-    log_phase "Phase: review (initial pass; rewrite loop runs after if criticals)"
+    log_phase "Phase: review (ensemble fallback — 3 reviews + agreement scoring)"
 
-    # Idempotency: skip if review_1 already exists.
+    # Idempotency: skip if the ensemble output already exists.
     if [[ -f "$draft_dir/reviews/draft_1_review_1.md" ]]; then
         log_step "draft_1_review_1.md exists; skipping initial review pass"
         return 0
     fi
 
-    run_reviewer_pass "$project_root" "$draft_dir" "$model" "$project_id" 1 || return 1
+    mkdir -p "$draft_dir/reviews"
 
-    log_ok "review phase complete"
+    # v0.7.0 R4: Run 3 independent fallback reviews in parallel.
+    # Raw outputs: draft_1_review_1a.md, _1b.md, _1c.md.
+    # Ensemble output: draft_1_review_1.md (deduplicated, agreement ≥2/3).
+    local raw_a="$draft_dir/reviews/draft_1_review_1a.md"
+    local raw_b="$draft_dir/reviews/draft_1_review_1b.md"
+    local raw_c="$draft_dir/reviews/draft_1_review_1c.md"
+
+    log_step "Launching 3 parallel fallback reviews"
+    run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$raw_a" "1a" &
+    local pid_a=$!
+    run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$raw_b" "1b" &
+    local pid_b=$!
+    run_fallback_reviewer "$project_root" "$draft_dir" "$model" "$raw_c" "1c" &
+    local pid_c=$!
+
+    wait $pid_a 2>/dev/null || true
+    wait $pid_b 2>/dev/null || true
+    wait $pid_c 2>/dev/null || true
+
+    # Count how many raw reviews actually wrote valid files.
+    local valid_count=0
+    local valid_paths=()
+    for rp in "$raw_a" "$raw_b" "$raw_c"; do
+        if [[ -f "$rp" && -s "$rp" ]]; then
+            # Run the substance check inline (same logic as run_reviewer_pass).
+            local lc hf
+            lc=$(wc -l < "$rp")
+            hf=$(grep -cE '^\s*(\-\s+)?\*\*[CIS][0-9]+:' "$rp" 2>/dev/null || echo 0)
+            if [[ "$lc" -ge 20 && "$hf" -gt 0 ]]; then
+                valid_count=$((valid_count + 1))
+                valid_paths+=("$rp")
+            else
+                log_warn "Raw review $rp failed substance check (${lc} lines, ${hf} findings); excluding"
+                mv "$rp" "${rp}.rejected"
+            fi
+        else
+            log_warn "Raw review $rp missing or empty"
+        fi
+    done
+
+    if [[ "$valid_count" -eq 0 ]]; then
+        log_warn "All 3 raw reviews failed; no ensemble possible"
+        return 0
+    fi
+
+    if [[ "$valid_count" -eq 1 ]]; then
+        # Only one valid review — no ensemble possible, use it directly.
+        log_step "Only 1 of 3 reviews passed substance check; using it directly (no ensemble)"
+        cp "${valid_paths[0]}" "$draft_dir/reviews/draft_1_review_1.md"
+        log_ok "review phase complete (single-reviewer fallback)"
+        return 0
+    fi
+
+    # 2 or 3 valid reviews — run ensemble deduplication.
+    # Pad to exactly 3 args by duplicating the first valid review
+    # if only 2 passed. This lets the 2-review case still score
+    # agreement correctly (a finding in both reviews = 2/3 with
+    # the duplicate, or 2/2 if we only count unique review indices —
+    # ensemble_review.py deduplicates by review_idx, so duplicating
+    # a review just means one review has two entries in the same cluster,
+    # which the code handles by checking rev_idx uniqueness).
+    local r1="${valid_paths[0]}"
+    local r2="${valid_paths[1]:-${valid_paths[0]}}"
+    local r3="${valid_paths[2]:-${valid_paths[0]}}"
+
+    local routed_json="$draft_dir/audit/ensemble_routed.json"
+    local advisory_json="$draft_dir/audit/ensemble_advisory.json"
+    local ensemble_md="$draft_dir/reviews/draft_1_review_1.md"
+
+    log_step "Running ensemble deduplication on $valid_count reviews"
+    "$PYTHON_BIN" "$TOOLS_DIR/ensemble_review.py" \
+        --review-1 "$r1" \
+        --review-2 "$r2" \
+        --review-3 "$r3" \
+        --min-severity important \
+        --out-routed "$routed_json" \
+        --out-advisory "$advisory_json" \
+        --out-review-md "$ensemble_md" \
+        2>&1 | while IFS= read -r line; do log_step "  $line"; done
+
+    if [[ ! -f "$ensemble_md" || ! -s "$ensemble_md" ]]; then
+        # Ensemble failed — fall back to the first valid raw review.
+        log_warn "Ensemble output missing; falling back to first raw review"
+        cp "${valid_paths[0]}" "$ensemble_md"
+    fi
+
+    log_ok "review phase complete (ensemble: $valid_count raw reviews → deduplicated)"
 }
 
 # run_reviewer_pass <project_root> <draft_dir> <model> <project_id> <review_number>
@@ -2499,7 +2665,20 @@ for k in d.get('findings_by_section', {}).keys():
         echo "hard cap reached: $n_crit Critical finding(s) remain after 2 rewrite passes; user-modify recommended (per SPEC §8.3, fold into Limitations / Next Steps if persistent)" >> "$rewrite_summary"
     fi
 
-    log_ok "review_rewrite phase complete (see $rewrite_summary)"
+    # v0.7.0 R5a: Record actual rewrite pass count in state.json so the
+    # AI disclosure template gets the correct "N pass(es)" value.
+    local actual_passes
+    actual_passes=$(grep -c "^pass [12]:" "$rewrite_summary" 2>/dev/null || echo "0")
+    "$PYTHON_BIN" -c "
+import json
+with open('$draft_dir/state.json') as f:
+    d = json.load(f)
+d.setdefault('iteration', {})['rewrite_passes'] = int('$actual_passes')
+with open('$draft_dir/state.json', 'w') as f:
+    json.dump(d, f, indent=2, sort_keys=True)
+" 2>/dev/null || true
+
+    log_ok "review_rewrite phase complete ($actual_passes rewrite pass(es); see $rewrite_summary)"
 }
 
 # Dispatch rewrite.v1 for one section. All outcome lines go to stdout
@@ -2576,14 +2755,26 @@ print(json.dumps(ids))
     local pre_snapshot="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_pre.md"
     cp "$section_path" "$pre_snapshot"
 
+    # v0.7.0 R1: Pre-extract findings into a self-contained file so
+    # the LLM reads only the relevant findings (~1-5K tokens) instead
+    # of the full review file (~50-200K tokens).
+    local findings_excerpt="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_findings.md"
+    "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" \
+        extract-findings "$review_path" --finding-ids "$finding_ids" \
+        > "$findings_excerpt" 2>/dev/null || true
+
+    # v0.7.0 R1: Reduced context — only section + findings + minimal
+    # viability-check sources (throughline for scope, references for
+    # citation checks).  Full manuscript, REPORT, pool.json, methods
+    # provenance, and other section drafts are NOT passed.  Cross-
+    # section coherence is the reviewer's job; the rewriter's job is
+    # targeted edits against specific findings.
     local user_prompt="Run rewrite.v1 to apply review findings ${finding_ids_json} to ${sec_file} on rewrite pass ${pass_num} of 2 (per SPEC §8.3).
 
 ## Inputs (rewrite.v1 contract)
 
-- \`PROJECT_ROOT\` = \`$project_root\`
-- \`DRAFT_DIR\` = \`$draft_dir\`
 - \`SECTION_PATH\` = \`$section_path\`
-- \`REVIEW_PATH\` = \`$review_path\`
+- \`FINDINGS_EXCERPT_PATH\` = \`$findings_excerpt\`
 - \`FINDING_IDS\` = ${finding_ids_json}
 - \`MIN_SEVERITY\` = \`${min_sev_capitalized}\`
 - \`REWRITE_PASS_NUMBER\` = \`${pass_num}\`
@@ -2591,35 +2782,128 @@ print(json.dumps(ids))
 - \`MODE\` = \`$mode\`
 - \`TIER\` = \`$tier\`
 
-## Canonical sources (rewrite.v1 reads what it needs to verify fix viability)
+## Viability-check sources (read only if needed to verify a fix)
 
 - \`THROUGHLINE_PATH\` = \`$draft_dir/00_throughline.md\`
-- \`REPORT_PATH\` = \`$project_root/REPORT.md\`
-- \`METHODS_PATH\` = \`$draft_dir/01_methods.md\`
-- \`RESULTS_PATH\` = \`$draft_dir/02_results.md\`
-- \`DISCUSSION_PATH\` = \`$draft_dir/03_discussion.md\`
-- \`INTRODUCTION_PATH\` = \`$draft_dir/04_introduction.md\`
-- \`ABSTRACT_PATH\` = \`$draft_dir/05_abstract.md\`
-- \`POOL_JSON_PATH\` = \`$draft_dir/pool.json\`
 - \`REFERENCES_MD_PATH\` = \`$draft_dir/references.md\`
-- \`METHODS_PROVENANCE_PATH\` = \`$draft_dir/methods_provenance.md\`
 
-Apply the listed findings per rewrite.v1's discipline (minimal scoped edits; reframing-log entry per finding; cross-finding consistency check; cascade abandonment per pass-2 strictness if applicable). Re-write SECTION_PATH via the Write tool; emit closing-message template."
+Read the findings excerpt first (it contains the full text of each finding you need to apply). Then read the section. Apply fixes per rewrite.v1's discipline (minimal scoped edits; reframing-log entry per finding; cross-finding consistency check; cascade abandonment per pass-2 strictness if applicable). Re-write SECTION_PATH via the Write tool; emit closing-message template."
 
     local metadata_path="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}.metadata.json"
 
-    invoke_claude_with_retry \
-        "$PROMPTS_DIR/rewrite.v1.md" "$user_prompt" "$model" \
-        "$section_path" "rewrite_pass${pass_num}_${sec_key}" "$metadata_path"
-    local rc=$?
+    # v0.7.0 R3: Parallel rewrite candidates.
+    # Launch 2 candidates in parallel, each writing to a unique audit path.
+    # If exactly one calls Write, use it.  If both call Write, use the
+    # longer output (crude but effective — longer rewrites tend to address
+    # more findings).  If neither calls Write, fall back to a single
+    # escalated retry (3rd attempt, serial to original path).
+    # Same total token cost as the old serial-retry pattern, but parallel
+    # cuts wall-clock time by ~50% in the failure case.
 
-    if [[ $rc -ne 0 ]]; then
-        log_warn "Pass $pass_num [$sec_key]: rewrite.v1 invocation failed (rc=$rc); section unchanged"
-        echo "pass $pass_num [$sec_key]: invocation-fail (rc=$rc); user-modify recommended"
+    local cand_a_path="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_candA.md"
+    local cand_b_path="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_candB.md"
+    local meta_a="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_candA.metadata.json"
+    local meta_b="$draft_dir/audit/rewrite_pass${pass_num}_${sec_key}_candB.metadata.json"
+
+    # Build per-candidate prompts. Each candidate writes to its own path
+    # (not SECTION_PATH) to avoid parallel write races. The winner is
+    # copied to SECTION_PATH after selection.
+    _build_rewrite_candidate_prompt() {
+        local _cand_write_path="$1"
+        cat <<REWRITE_PROMPT
+Run rewrite.v1 to apply review findings ${finding_ids_json} to ${sec_file} on rewrite pass ${pass_num} of 2 (per SPEC §8.3).
+
+## Inputs (rewrite.v1 contract)
+
+- \`SECTION_PATH\` = \`$section_path\` (read from here)
+- \`FINDINGS_EXCERPT_PATH\` = \`$findings_excerpt\`
+- \`FINDING_IDS\` = ${finding_ids_json}
+- \`MIN_SEVERITY\` = \`${min_sev_capitalized}\`
+- \`REWRITE_PASS_NUMBER\` = \`${pass_num}\`
+- \`REFRAMING_LOG_PATH\` = \`$draft_dir/reframing_log.md\`
+- \`MODE\` = \`$mode\`
+- \`TIER\` = \`$tier\`
+
+## Viability-check sources (read only if needed to verify a fix)
+
+- \`THROUGHLINE_PATH\` = \`$draft_dir/00_throughline.md\`
+- \`REFERENCES_MD_PATH\` = \`$draft_dir/references.md\`
+
+## IMPORTANT: Write path for this candidate
+
+Write the revised section to \`$_cand_write_path\` via the Write tool (this is a candidate path for parallel evaluation — the orchestrator will copy the winner to the original SECTION_PATH).
+
+Read the findings excerpt first (it contains the full text of each finding you need to apply). Then read the section at SECTION_PATH. Apply fixes per rewrite.v1's discipline (minimal scoped edits; reframing-log entry per finding; cross-finding consistency check; cascade abandonment per pass-2 strictness if applicable). Write to the candidate path above; emit closing-message template.
+REWRITE_PROMPT
+    }
+
+    local prompt_a prompt_b
+    prompt_a=$(_build_rewrite_candidate_prompt "$cand_a_path")
+    prompt_b=$(_build_rewrite_candidate_prompt "$cand_b_path")
+
+    # Launch both in background.
+    invoke_claude "$PROMPTS_DIR/rewrite.v1.md" "$prompt_a" "$model" \
+        "$cand_a_path" "$meta_a" "rewrite_pass${pass_num}_${sec_key}_A" &
+    local pid_a=$!
+
+    invoke_claude "$PROMPTS_DIR/rewrite.v1.md" "$prompt_b" "$model" \
+        "$cand_b_path" "$meta_b" "rewrite_pass${pass_num}_${sec_key}_B" &
+    local pid_b=$!
+
+    # Wait for both.
+    wait $pid_a 2>/dev/null || true
+    wait $pid_b 2>/dev/null || true
+
+    local a_wrote=false b_wrote=false
+    [[ -f "$cand_a_path" && -s "$cand_a_path" ]] && a_wrote=true
+    [[ -f "$cand_b_path" && -s "$cand_b_path" ]] && b_wrote=true
+
+    local winner=""
+    if $a_wrote && $b_wrote; then
+        # Both called Write — pick the longer output.
+        local size_a size_b
+        size_a=$(wc -c < "$cand_a_path")
+        size_b=$(wc -c < "$cand_b_path")
+        if [[ "$size_a" -ge "$size_b" ]]; then
+            winner="$cand_a_path"
+            log_step "Pass $pass_num [$sec_key]: both candidates wrote; picking A (${size_a}b >= ${size_b}b)"
+        else
+            winner="$cand_b_path"
+            log_step "Pass $pass_num [$sec_key]: both candidates wrote; picking B (${size_b}b > ${size_a}b)"
+        fi
+    elif $a_wrote; then
+        winner="$cand_a_path"
+        log_step "Pass $pass_num [$sec_key]: only candidate A wrote"
+    elif $b_wrote; then
+        winner="$cand_b_path"
+        log_step "Pass $pass_num [$sec_key]: only candidate B wrote"
+    fi
+
+    if [[ -n "$winner" ]]; then
+        cp "$winner" "$section_path"
+        log_ok "Pass $pass_num [$sec_key]: rewrite.v1 completed for $sec_file (parallel)"
+        echo "pass $pass_num [$sec_key]: rewritten $sec_file (findings ${finding_ids_json})"
         return 0
     fi
 
-    log_ok "Pass $pass_num [$sec_key]: rewrite.v1 completed for $sec_file"
+    # Neither candidate called Write → fall back to escalated serial retry.
+    log_warn "Pass $pass_num [$sec_key]: neither parallel candidate wrote; escalated retry"
+    local escalated_prompt="ATTEMPT 3 OF 3 — two previous parallel attempts produced analysis but did NOT call the Write tool. The result was lost both times. THIS ATTEMPT MUST CALL THE Write TOOL with the absolute path $section_path. Do not produce the result as a chat response.
+
+${user_prompt}"
+
+    invoke_claude "$PROMPTS_DIR/rewrite.v1.md" "$escalated_prompt" "$model" \
+        "$section_path" "$metadata_path" "rewrite_pass${pass_num}_${sec_key}_escalated"
+    local rc=$?
+
+    if [[ $rc -ne 0 ]] || [[ ! -f "$section_path" ]] || [[ ! -s "$section_path" ]]; then
+        cp "$pre_snapshot" "$section_path"
+        log_warn "Pass $pass_num [$sec_key]: all 3 attempts failed; section unchanged"
+        echo "pass $pass_num [$sec_key]: invocation-fail (3 attempts); user-modify recommended"
+        return 0
+    fi
+
+    log_ok "Pass $pass_num [$sec_key]: rewrite.v1 completed for $sec_file (escalated retry)"
     echo "pass $pass_num [$sec_key]: rewritten $sec_file (findings ${finding_ids_json})"
     return 0
 }
@@ -2683,6 +2967,30 @@ PYEOF
     [[ -z "$review_path" ]] && review_path="$draft_dir/reviews/"
 
     "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" aggregate-metadata "$draft_dir" >/dev/null 2>&1
+
+    # v0.7.0 R5b: Wire cost tracking into state.json from aggregated metadata.
+    local total_cost total_elapsed
+    total_cost=$("$PYTHON_BIN" -c "
+import json
+with open('$draft_dir/audit/run_metadata.json') as f:
+    d = json.load(f)
+print(d.get('estimated_cost_usd', 0.0))
+" 2>/dev/null || echo "0.0")
+    total_elapsed=$("$PYTHON_BIN" -c "
+import json
+with open('$draft_dir/audit/run_metadata.json') as f:
+    d = json.load(f)
+print(d.get('elapsed_seconds', 0))
+" 2>/dev/null || echo "0")
+    "$PYTHON_BIN" -c "
+import json
+with open('$draft_dir/state.json') as f:
+    d = json.load(f)
+d['cost_so_far_usd'] = round(float('$total_cost'), 4)
+d['elapsed_seconds'] = float('$total_elapsed')
+with open('$draft_dir/state.json', 'w') as f:
+    json.dump(d, f, indent=2, sort_keys=True)
+" 2>/dev/null || true
 
     # Emit next_actions.md with validator + reviewer + orphan-citation aggregate.
     "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" emit-next-actions "$draft_dir" \

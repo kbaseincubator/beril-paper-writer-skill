@@ -1,0 +1,55 @@
+v0.7.0: Pipeline Reliability — ensemble review, parallel rewrites, caption scoring
+
+Five requirements addressing systemic reliability problems from the v0.6.5
+live run (45% Write-never-invoked rate, garbled captions, ~30% reviewer
+false positives, broken cost tracking, wrong AI disclosure pass count,
+M8 validator noise).
+
+R1: Rewrite context reduction
+  - Pre-extract specific findings into self-contained markdown excerpts
+    (~1-5K tokens) via new extract-findings subcommand.
+  - Rewrite prompt (rewrite.v1.md) now reads FINDINGS_EXCERPT_PATH instead
+    of full review file (50-200K tokens eliminated from rewrite context).
+  - Viability-check sources (throughline, references) optional; missing
+    sources → partial fix or accept-as-limitation, not halt.
+
+R2: Ensemble caption generation (best-of-3)
+  - 11 code-smell regex patterns reject leaked notebook/code artifacts.
+  - Minimum word count gate (50 words).
+  - Percentage cross-check against body text (deduct for unanchored stats).
+  - Best-of-3 loop with mechanical scoring; fallback anti-pattern retry
+    if all 3 candidates fail.
+  - New score-caption subcommand in paper_writer_helpers.py.
+
+R3: Parallel rewrite candidates
+  - Launch 2 rewrite candidates in parallel via background processes.
+  - Selection: both wrote → longer wins; one → use it; neither → escalated
+    serial retry with explicit Write-tool instruction.
+  - Cuts wall-clock time ~50% in the failure case.
+
+R4: Ensemble fallback review with agreement scoring
+  - NEW ensemble_review.py module (standalone, ~350 LOC).
+  - Run 3 independent fallback reviews in parallel.
+  - Cluster findings by section + severity + word overlap (≥50%) or
+    manuscript line range (±5 lines).
+  - Agreement scoring: 3/3 and 2/3 → routed to rewrite loop;
+    1/3 → advisory only (logged in audit, surfaced in next_actions.md).
+  - Rebuild deduplicated review markdown for rewrite loop consumption.
+  - Graceful degradation: 2 valid reviews → ensemble; 1 → direct pass-through.
+
+R5: Template and orchestrator fixes
+  - R5a: AI disclosure pass count from rewrite_summary.txt into state.json.
+  - R5b: Cost tracking from run_metadata.json into state.json.
+  - R5c: M8 validator recognizes "N genes (X%)" adjacent-count patterns.
+
+Test coverage: 720 tests (was 682 pre-v0.7.0).
+  - 17 new: extract-findings (R1)
+  - 25 new: ensemble caption scoring (R2)
+  - 38 new: ensemble review deduplication + agreement scoring (R4)
+  - 4 new: M8 adjacent-count patterns (R5c)
+
+New files:
+  - src/beril_paper_writer/skill/tools/ensemble_review.py
+  - tests/unit/test_extract_findings.py
+  - tests/unit/test_ensemble_caption.py
+  - tests/unit/test_ensemble_review.py

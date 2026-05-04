@@ -441,6 +441,11 @@ _COUNT_PRECEDES_PCT_RE = re.compile(
     r"\d+\s*(?:/|out of|of)\s*\d+\s*\(?\s*\d+(?:\.\d+)?\s*%"  # 42/156 (26.9%)
     r"|"
     r"\d+\s*\(\s*\d+(?:\.\d+)?\s*%"  # 42 (26.9% — closing paren may be outside window
+    r"|"
+    # v0.7.0 R5c: "N genes (X%)" / "N (X%) of M" — count with 1-3 words
+    # before the percentage parenthetical. Covers "42 genes (73.7%)",
+    # "156 isolates (28.2%)", "42 FDM genes (73.7%)", etc.
+    r"\d+\s+(?:\w+\s+){0,3}\(\s*\d+(?:\.\d+)?\s*%"
     r")",
     re.IGNORECASE,
 )

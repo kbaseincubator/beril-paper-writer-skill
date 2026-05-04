@@ -1708,6 +1708,240 @@ def cmd_count_review_criticals(args: argparse.Namespace) -> int:
     return 0
 
 
+def _extract_finding_full_text(review_lines: list[str], finding_id: str) -> str:
+    """Extract the full text of a single finding from a review file.
+
+    Scans for the finding header (e.g., **C1: ...**) and collects all
+    lines until the next finding header, severity header (### ...), or
+    section-level separator (--- or ## ...).
+
+    Returns the finding text including its header, or empty string if
+    not found.  Used by extract-findings to produce pre-filtered review
+    excerpts for rewrite.v1 context reduction (v0.7.0 R1).
+    """
+    finding_header_re = re.compile(
+        r"^\s*(?:-\s+)?\*\*([CIS]\d+):\s+"
+    )
+    severity_header_re = re.compile(r"^\s*###\s+")
+    section_break_re = re.compile(r"^\s*(?:---|##\s)")
+
+    collecting = False
+    lines_collected: list[str] = []
+
+    for line in review_lines:
+        hm = finding_header_re.match(line)
+        if hm:
+            if collecting:
+                # Hit the next finding — stop
+                break
+            if hm.group(1) == finding_id:
+                collecting = True
+                lines_collected.append(line)
+            continue
+
+        if collecting:
+            # Stop at next severity header or section break
+            if severity_header_re.match(line) or section_break_re.match(line):
+                break
+            lines_collected.append(line)
+
+    return "\n".join(lines_collected).strip()
+
+
+def cmd_extract_findings(args: argparse.Namespace) -> int:
+    """Extract full text of specific findings from a review file.
+
+    Produces a self-contained markdown excerpt containing only the
+    requested findings, suitable for feeding to rewrite.v1 as a
+    reduced-context replacement for the full review file.
+
+    Output goes to stdout (markdown).  The orchestrator redirects to a
+    temp file and passes that to the rewrite dispatch instead of the
+    full review path.
+
+    v0.7.0 R1: context reduction for rewrite dispatches.
+    """
+    review_path = Path(args.review_path).expanduser().resolve()
+    if not review_path.is_file():
+        print(f"# Error: review file not found: {review_path}")
+        return 1
+
+    finding_ids = [fid.strip() for fid in args.finding_ids.split(",") if fid.strip()]
+    if not finding_ids:
+        print("# Error: no finding IDs specified")
+        return 1
+
+    review_text = review_path.read_text(encoding="utf-8")
+    review_lines = review_text.splitlines()
+
+    print(f"# Extracted findings from {review_path.name}")
+    print(f"# Finding IDs: {', '.join(finding_ids)}")
+    print()
+
+    found_count = 0
+    for fid in finding_ids:
+        text = _extract_finding_full_text(review_lines, fid)
+        if text:
+            print(f"### Finding {fid}\n")
+            print(text)
+            print()
+            found_count += 1
+        else:
+            print(f"### Finding {fid}\n")
+            print(f"**WARNING:** Finding {fid} not found in review file.")
+            print()
+
+    if found_count == 0:
+        print("# WARNING: No findings extracted. Check finding IDs against review.")
+        return 1
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Ensemble caption scoring (v0.7.0 R2)
+# ---------------------------------------------------------------------------
+
+# Code-smell patterns: match function calls, variable names, SQL fragments,
+# notebook comments that leaked from the underlying notebook into the caption.
+_CODE_SMELL_PATTERNS = [
+    # Python keywords in code-like context (not standalone English words)
+    re.compile(r"\b(?:import|def|class)\s+\w+"),
+    re.compile(r"\bfrom\s+\w+\s+import\b"),
+    # SQL keywords (all-caps or followed by table-like identifiers)
+    re.compile(r"\b(?:SELECT|INSERT|DELETE|UPDATE|CREATE)\s+\w+"),
+    # Notebook cell references
+    re.compile(r"\b(?:cell\s+\d+|In\s*\[\d+\]|Out\s*\[\d+\])\b"),
+    # Data-loading patterns (imperative + "from" in code context)
+    re.compile(r"(?:Load|Read|Write|Save|Parse|Fetch)\s+.{1,60}\s+from\s+(?:Spark|S3|disk|file|database|DataFrame|CSV|table)\b", re.IGNORECASE),
+    # Notebook/code comments
+    re.compile(r"#\s*(?:cell|notebook|TODO|FIXME|HACK)\b", re.IGNORECASE),
+    # Python API calls (dotted method access on common data-science objects)
+    re.compile(r"\b(?:plt\.|ax\.|fig\.|pd\.|np\.|df\[|\.iloc|\.groupby|\.merge)\b"),
+    # Python flow-control keywords (unlikely in scientific prose)
+    re.compile(r"\b(?:lambda|elif|except|finally)\b"),
+    # File extensions in code context
+    re.compile(r"\w+\.py\b"),
+    # Python/JS singletons (capitalized form = code; lowercase form = English)
+    re.compile(r"\b(?:True|False|None|null|undefined|NaN)\b"),
+]
+
+# Percentage extraction: captures "12.3%" or "12%" including optional sign.
+_PERCENT_RE = re.compile(r"(?<!\w)([+-]?\d+(?:\.\d+)?)\s*%")
+
+
+def _score_caption_candidate(
+    caption_text: str,
+    body_text: str = "",
+    min_words: int = 50,
+) -> dict:
+    """Score a single caption candidate for the ensemble selector.
+
+    Returns a dict with:
+      - score (int): higher is better. 0 = rejected.
+      - code_smell_count (int): number of code-smell matches.
+      - word_count (int): caption word count.
+      - pct_mismatch_count (int): percentages that conflict with body_text.
+      - reasons (list[str]): human-readable rejection/deduction reasons.
+
+    Scoring:
+      - Base score: 100
+      - Code-smell match: reject (score → 0)
+      - Word count < min_words: reject (score → 0)
+      - Each percentage mismatch with body_text: -20
+      - Bonus: +1 per 10 words above min_words (longer captions tend to be
+        more informative, capped at +10)
+    """
+    reasons: list[str] = []
+    word_count = len(caption_text.split())
+
+    # --- Code-smell filter ---
+    code_smell_count = 0
+    for pat in _CODE_SMELL_PATTERNS:
+        matches = pat.findall(caption_text)
+        code_smell_count += len(matches)
+    if code_smell_count > 0:
+        reasons.append(f"code-smell: {code_smell_count} match(es)")
+        return {
+            "score": 0,
+            "code_smell_count": code_smell_count,
+            "word_count": word_count,
+            "pct_mismatch_count": 0,
+            "reasons": reasons,
+        }
+
+    # --- Minimum length gate ---
+    if word_count < min_words:
+        reasons.append(f"too-short: {word_count} words (min {min_words})")
+        return {
+            "score": 0,
+            "code_smell_count": 0,
+            "word_count": word_count,
+            "pct_mismatch_count": 0,
+            "reasons": reasons,
+        }
+
+    # --- Percentage cross-check ---
+    pct_mismatch_count = 0
+    if body_text:
+        caption_pcts = _PERCENT_RE.findall(caption_text)
+        body_pcts = set(_PERCENT_RE.findall(body_text))
+        for pct_val in caption_pcts:
+            # If the caption has a percentage that ISN'T in the body text,
+            # it might be fabricated. Deduct but don't reject — the value
+            # could come from a legitimate calculation in the figure itself.
+            if pct_val not in body_pcts:
+                pct_mismatch_count += 1
+                reasons.append(f"pct-mismatch: {pct_val}% not in body text")
+
+    # --- Compute score ---
+    score = 100
+    score -= pct_mismatch_count * 20
+    # Length bonus: +1 per 10 words above min_words, capped at +10
+    score += min(10, max(0, (word_count - min_words) // 10))
+    score = max(1, score)  # Never drop to 0 for non-rejected candidates
+
+    return {
+        "score": score,
+        "code_smell_count": 0,
+        "word_count": word_count,
+        "pct_mismatch_count": pct_mismatch_count,
+        "reasons": reasons,
+    }
+
+
+def cmd_score_caption(args: argparse.Namespace) -> int:
+    """Score a caption candidate file for the ensemble selector.
+
+    Reads the caption from --caption-path, optionally cross-checks
+    percentages against --body-text-path.
+
+    Output: JSON dict with score, code_smell_count, word_count,
+    pct_mismatch_count, reasons. Exits 0 always (scoring, not gating).
+    v0.7.0 R2.
+    """
+    caption_path = Path(args.caption_path).expanduser().resolve()
+    if not caption_path.is_file():
+        print(json.dumps({"score": 0, "reasons": ["caption file not found"]}))
+        return 0
+
+    caption_text = caption_path.read_text(encoding="utf-8")
+
+    body_text = ""
+    if args.body_text_path:
+        body_path = Path(args.body_text_path).expanduser().resolve()
+        if body_path.is_file():
+            body_text = body_path.read_text(encoding="utf-8")
+
+    result = _score_caption_candidate(
+        caption_text,
+        body_text=body_text,
+        min_words=args.min_words,
+    )
+    print(json.dumps(result))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Data availability extraction (Item 5.1)
 # ---------------------------------------------------------------------------
@@ -4048,6 +4282,36 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p_cc.add_argument("review_path")
     p_cc.set_defaults(func=cmd_count_review_criticals)
+
+    # extract-findings (v0.7.0 R1) — extract full text of specific
+    # findings from a review, producing a self-contained markdown
+    # excerpt for reduced-context rewrite dispatches.
+    p_ef = sub.add_parser(
+        "extract-findings",
+        help="Extract full finding text for specific IDs from a review file.",
+    )
+    p_ef.add_argument("review_path")
+    p_ef.add_argument(
+        "--finding-ids", required=True,
+        help="Comma-separated finding IDs (e.g. C1,I2,I7)",
+    )
+    p_ef.set_defaults(func=cmd_extract_findings)
+
+    # score-caption (v0.7.0 R2) — score a single caption candidate for
+    # the ensemble selector. Returns JSON with score + reasons.
+    p_sc = sub.add_parser(
+        "score-caption",
+        help="Score a caption candidate (code-smell, length, pct cross-check). "
+             "Emits JSON to stdout. v0.7.0 R2.",
+    )
+    p_sc.add_argument("--caption-path", required=True,
+                      help="Path to the caption file to score.")
+    p_sc.add_argument("--body-text-path", default=None,
+                      help="Optional path to manuscript body text for "
+                           "percentage cross-checking.")
+    p_sc.add_argument("--min-words", type=int, default=50,
+                      help="Minimum word count (default 50).")
+    p_sc.set_defaults(func=cmd_score_caption)
 
     # extract-data-availability (Item 5.1) — emit JSON of the three
     # template-fill blocks for 07_data_availability.md.

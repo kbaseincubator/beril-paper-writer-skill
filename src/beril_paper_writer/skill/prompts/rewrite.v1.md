@@ -59,14 +59,15 @@ is in *what you change*, not in the format itself.
 
 ## Inputs the user prompt will pass
 
-- `PROJECT_ROOT` — `<projects/<id>/`.
-- `DRAFT_DIR` — `<papers/draft_N/`.
 - `SECTION_PATH` — absolute path of the section to rewrite (e.g.
   `<DRAFT_DIR>/02_results.md`). You read this, change targeted
   spans, write back.
-- `REVIEW_PATH` — absolute path to the review file. Either a
-  `beril-adversarial` review or a `fallback_reviewer.v1` review.
-- `FINDING_IDS` — list of finding IDs in the review that target
+- `FINDINGS_EXCERPT_PATH` — absolute path to a pre-extracted
+  findings file containing **only** the full text of the findings
+  dispatched to this section. The orchestrator pre-filters the
+  review file and produces this excerpt; you do NOT need to search
+  the full review. Read this file first.
+- `FINDING_IDS` — list of finding IDs in the excerpt that target
   this section (e.g. `["C2", "I3", "I7"]`). The orchestrator
   pre-filters; you do NOT have to walk all findings in the review.
   If empty, halt with `"Error: no findings dispatched to this
@@ -76,48 +77,60 @@ is in *what you change*, not in the format itself.
   (Critical + Important applied; Suggested optional). Set to
   `Critical` for the second rewrite pass per SPEC §8.3 to avoid
   over-engineering on the second loop.
-- **All of the section's original drafting-mode inputs** — passed
-  by the orchestrator so you can read the canonical sources
-  (THROUGHLINE_PATH, REPORT_PATH, METHODS_PATH, RESULTS_PATH,
-  POOL_JSON_PATH, REFERENCES_MD_PATH, etc., depending on the
-  section). This is necessary to verify whether a finding's
-  recommended fix is actually supportable by the project's
-  evidence.
 - `REFRAMING_LOG_PATH` — append-only log; entries here per finding.
 - `REWRITE_PASS_NUMBER` — `1` or `2` per SPEC §8.3's hard cap. On
   pass 2, your behavior tightens (see "Pass-2 discipline" below).
 - `MODE` — `paper` or `report`.
 - `TIER` — `STRONG` / `THIN` / `EXPLORATORY`.
 
+### Viability-check sources (optional — read only if needed)
+
+- `THROUGHLINE_PATH` — the manuscript's throughline; read to verify
+  scope-level claims if a finding questions scope coherence.
+- `REFERENCES_MD_PATH` — the curated reference list; read to verify
+  citation-related fixes (e.g., a finding says "cite X" — check
+  whether X is in the pool before adding).
+
+These are **not** passed for general context. Most rewrites need
+only the section + findings excerpt. Read a viability-check source
+only when a specific finding's fix requires evidence you don't
+already have from the section text and the finding itself.
+
 ## What to read
 
-In order: `REVIEW_PATH` (the findings — read fully for the listed
-`FINDING_IDS`); `SECTION_PATH` (current content — to identify the
-spans to change); the section's canonical sources (THROUGHLINE,
-REPORT, etc.) to verify fix viability; `REFRAMING_LOG_PATH` to
-preserve entry numbering.
+In order: `FINDINGS_EXCERPT_PATH` (the pre-extracted findings —
+read fully); `SECTION_PATH` (current content — to identify the
+spans to change); `REFRAMING_LOG_PATH` (to preserve entry
+numbering). The viability-check sources (`THROUGHLINE_PATH`,
+`REFERENCES_MD_PATH`) are read **only** when a specific finding
+requires scope or citation verification — most rewrites don't
+need them.
 
 ### Escape hatches when expected files are absent
 
 - **`SECTION_PATH` missing or empty** → halt; nothing to rewrite.
-- **`REVIEW_PATH` missing** → halt; the prompt has nothing to
-  apply.
+- **`FINDINGS_EXCERPT_PATH` missing** → halt; the prompt has
+  nothing to apply.
 - **`FINDING_IDS` empty** → halt; the orchestrator should not have
   dispatched.
-- **A `FINDING_ID` not present in `REVIEW_PATH`** → halt with
-  `"Error: finding {ID} not in review file."` Don't make up the
-  finding from context.
-- **Canonical-source inputs (THROUGHLINE, REPORT, etc.) missing**
-  → halt; you cannot verify fix viability without them.
+- **A `FINDING_ID` not present in `FINDINGS_EXCERPT_PATH`** → halt
+  with `"Error: finding {ID} not in findings excerpt."` Don't make
+  up the finding from context.
+- **Viability-check sources missing** → proceed without them. If a
+  finding's fix specifically requires scope or citation verification
+  and the source is absent, treat the fix as **partially viable**
+  (apply what's supportable from the section text alone) or
+  **unfixable** (accept-as-limitation). Do NOT halt the entire
+  rewrite because a viability-check source is missing.
 
 ## Discipline pass — Finding-application protocol
 
 For each `FINDING_ID` in `FINDING_IDS`:
 
-1. **Read the finding** from `REVIEW_PATH`. It includes: severity,
-   what's wrong, suggested fix, location (section + paragraph or
-   line), and (in beril-adversarial reviews) inline citations of
-   any prior literature that informs the finding.
+1. **Read the finding** from `FINDINGS_EXCERPT_PATH`. It includes:
+   severity, what's wrong, suggested fix, location (section +
+   paragraph or line), and (in beril-adversarial reviews) inline
+   citations of any prior literature that informs the finding.
 
 2. **Locate the span** in `SECTION_PATH` that the finding targets.
    Use the location pointer from the review; if the location is
@@ -154,7 +167,7 @@ For each `FINDING_ID` in `FINDING_IDS`:
    ## Entry {N} — {ISO timestamp} — type: {reframing | accepted-limitation}
 
    - **Issue:** Review {finding ID, severity}: {brief restatement of what's wrong}
-   - **Source:** REVIEW_PATH §{section of review} — {finding label}
+   - **Source:** FINDINGS_EXCERPT_PATH — {finding label}
    - **Manuscript impact:** {SECTION_PATH} §{subsection} — {one-line summary of what changed, or "folded into Limitations" for accepted-limitation entries}
    - **Resolution:** {fix-applied | partial-fix-applied | accepted-as-limitation}
    - **Note:** {one-paragraph context: why fix was viable / partial / unfixable, what the resulting prose says}
@@ -193,8 +206,9 @@ behavior tightens:
 
 `Read`, `Write`, `Bash`, `Grep`, `Glob`.
 
-- **Read / Grep / Glob** — review, section, canonical sources
-  (THROUGHLINE, REPORT, pool, etc.), prior reframing log.
+- **Read / Grep / Glob** — findings excerpt, section, viability-
+  check sources (THROUGHLINE, REFERENCES) only when a specific
+  finding requires them, prior reframing log.
 - **Write** — revised section at `SECTION_PATH`; reframing-log
   appends.
 - **Bash** — minimal; not typically needed.
@@ -261,8 +275,9 @@ support a new specific claim — and even then, only from the pool.
 
 ## Output protocol
 
-1. **Read inputs** in the order specified (review → section →
-   canonical sources → reframing log).
+1. **Read inputs** in the order specified (findings excerpt →
+   section → reframing log; viability-check sources only as
+   needed).
 2. **For each `FINDING_ID`**: read finding, locate span, verify
    viability, apply or accept-as-limitation.
 3. **Cross-finding consistency check** — abandon and surface if a
@@ -281,7 +296,7 @@ failures.
 **Closing-message template (required exact format):**
 
 ```
-{SECTION_PATH} rewritten for review {REVIEW_PATH} (pass
+{SECTION_PATH} rewritten for findings {FINDINGS_EXCERPT_PATH} (pass
 {REWRITE_PASS_NUMBER}); findings applied: K (fix-applied: F,
 partial: P, accepted-as-limitation: L); reframing-log entries
 appended: K; cascade-detected: {true|false}.
