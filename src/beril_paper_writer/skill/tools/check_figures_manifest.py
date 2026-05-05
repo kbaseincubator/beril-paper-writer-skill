@@ -67,6 +67,11 @@ SECTION_FILES = ("02_results.md", "01_methods.md", "03_discussion.md")
 # i.e., the (Fig. N) form. Loose enough to match
 # "(Fig. 3)" / "(Fig. 3A)" / "(Fig. 3, panel A)" / "(Fig. 3 and Fig. 5)".
 CALLOUT_RE = re.compile(r"\(Fig\.\s*(\d+)[A-Z]?\b")
+# Markdown inline image embedding: ![...](figures/fig3_something.png)
+# Captures the figure number from the filename.
+INLINE_IMAGE_RE = re.compile(
+    r"!\[.*?\]\((?:\.?/?)?figures/fig(\d+)_[^)]+\)", re.IGNORECASE
+)
 FIGURE_FILENAME_RE = re.compile(r"^fig\d+_.+\.(?:png|jpg|jpeg|pdf|svg)$", re.IGNORECASE)
 
 
@@ -149,17 +154,26 @@ def parse_manifest(manifest_path: Path) -> tuple[list[dict], list[str]]:
 
 
 def collect_callouts(section_paths: Iterable[Path]) -> dict[int, list[str]]:
-    """Walk section files for `(Fig. N)` callouts.
+    """Walk section files for figure references.
 
-    Returns {N: [section_filename, ...]} so a callout can be traced back
-    to which section files reference it.
+    Recognises two forms:
+    1. Parenthetical callouts: ``(Fig. N)``
+    2. Inline image embeds: ``![...](figures/figN_something.png)``
+
+    Returns {N: [section_filename, ...]} so a reference can be traced
+    back to which section files use it.
     """
     callouts: dict[int, list[str]] = {}
     for section_path in section_paths:
         if not section_path.is_file():
             continue
         text = section_path.read_text(encoding="utf-8")
+        # Parenthetical callouts: (Fig. 3)
         for m in CALLOUT_RE.finditer(text):
+            n = int(m.group(1))
+            callouts.setdefault(n, []).append(section_path.name)
+        # Inline image embeds: ![...](figures/fig3_...)
+        for m in INLINE_IMAGE_RE.finditer(text):
             n = int(m.group(1))
             callouts.setdefault(n, []).append(section_path.name)
     # Dedup section_filenames per N.

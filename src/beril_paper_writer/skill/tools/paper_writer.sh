@@ -1992,13 +1992,41 @@ phase_assemble() {
     # user-resolves-before-submission flags.
     local project_id
     project_id="$(read_state_field "$draft_dir" "project_id")"; [[ -z "$project_id" ]] && project_id="(unknown_project)"
+
+    # Extract author list from project metadata (RESEARCH_PLAN.md or
+    # README.md). Looks for an "## Authors" section and collects lines
+    # starting with "- " until the next section header or blank line.
+    local authors_text=""
+    local authors_source=""
+    for meta_file in "$project_root/RESEARCH_PLAN.md" "$project_root/README.md"; do
+        if [[ -f "$meta_file" ]]; then
+            # Extract lines between "## Authors" and the next heading or EOF.
+            local extracted
+            extracted="$(sed -n '/^## Authors/,/^## /{/^## Authors/d;/^## /d;p;}' "$meta_file" | grep -E '^\s*-\s' | head -10)"
+            if [[ -n "$extracted" ]]; then
+                # Strip leading "- " to get clean author entries, then
+                # join with "; " for a single-line author list.
+                authors_text="$(echo "$extracted" | sed 's/^\s*-\s*//' | paste -sd '; ' -)"
+                authors_source="$(basename "$meta_file")"
+                break
+            fi
+        fi
+    done
+
+    local authors_line
+    if [[ -n "$authors_text" ]]; then
+        authors_line="**Authors:** ${authors_text} _(from ${authors_source})_"
+    else
+        authors_line="**Authors:** [TBD: list authors before submission]"
+    fi
+
     local title_block_path="$draft_dir/.title_block.md"
     cat > "$title_block_path" <<EOF
 # Title
 
 **Working title:** ${project_id} — DRAFT v0.1 [TBD: assign final title before submission]
 
-**Authors:** [TBD: list authors before submission]
+${authors_line}
 
 **Affiliations:** [TBD: list affiliations before submission]
 
@@ -2668,7 +2696,7 @@ for k in d.get('findings_by_section', {}).keys():
     # v0.7.0 R5a: Record actual rewrite pass count in state.json so the
     # AI disclosure template gets the correct "N pass(es)" value.
     local actual_passes
-    actual_passes=$(grep -c "^pass [12]:" "$rewrite_summary" 2>/dev/null || echo "0")
+    actual_passes=$(grep -c "^pass [12] complete:" "$rewrite_summary" 2>/dev/null || echo "0")
     "$PYTHON_BIN" -c "
 import json
 with open('$draft_dir/state.json') as f:

@@ -173,6 +173,25 @@ _PROJECT_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Literature-context signal: phrases that indicate numbers come from
+# external databases / surveys / prior work, even without a [Cite] marker.
+# Treated as a citation-equivalent in is_literature_attributed().
+_LITERATURE_SIGNAL_RE = re.compile(
+    r"\b(?:"
+    r"(?:across|in|from)\s+(?:all\s+)?(?:GTDB|NCBI|RefSeq|GenBank|UniProt|"
+    r"KEGG|IMG|Silva|Greengenes|EBI|PDB|SEED|MG-RAST)\b"
+    r"|global(?:ly)?\s+(?:is|16S|surveys?|datasets?|analyses|"
+    r"metagenom\w+|census|profiling)"
+    r"|(?:16S|ITS|18S)\s+surveys?"
+    r"|(?:published|reported|known|established|documented|previous)\s+"
+    r"(?:values?|rates?|frequencies?|prevalence|distributions?|estimates?)"
+    r"|literature\s+(?:values?|reports?|suggests?|indicates?)"
+    r"|(?:publicly\s+available|curated)\s+(?:databases?|datasets?|genomes?)"
+    r"|(?:reference|benchmark)\s+(?:databases?|datasets?|genomes?)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Sentence splitter: end-of-sentence punctuation followed by whitespace
 # and a token that starts a new sentence. Tolerates `.")` / `."` /
 # parenthetical wrap-ups, em-dash continuations, etc.
@@ -286,7 +305,7 @@ def is_literature_attributed(
 
     Heuristic: walk preceding text in the same sentence. The closest
     preceding "subject signal" decides scope:
-      - A citation marker → literature.
+      - A citation marker OR literature-context signal → literature.
       - A project-claim signal (we identified, our analysis, this study,
         ...) → project.
       - Nothing → project (the number stands on its own).
@@ -296,10 +315,16 @@ def is_literature_attributed(
     """
     s, _ = span
 
+    # Combine bracket-citations and literature-context signals as
+    # "external-attribution" spans — both indicate the number comes
+    # from outside the current study.
     preceding_citation_end = -1
     for cs, ce in citations:
         if ce <= s and ce > preceding_citation_end:
             preceding_citation_end = ce
+    for m in _LITERATURE_SIGNAL_RE.finditer(sentence[:s]):
+        if m.end() > preceding_citation_end:
+            preceding_citation_end = m.end()
 
     preceding_signal_end = -1
     for m in _PROJECT_SIGNAL_RE.finditer(sentence[:s]):

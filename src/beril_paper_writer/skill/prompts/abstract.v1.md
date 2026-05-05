@@ -62,7 +62,7 @@ structural spec that follows. Sentence-count annotations show WHY
 this example is correct.
 
 ```markdown
-**_Background:_** Bacterial genomes typically contain 25–40% genes
+**Background:** Bacterial genomes typically contain 25–40% genes
 without functional annotation; existing prediction tools rely on
 sequence homology and miss conditional phenotypes that emerge only
 under specific environmental conditions. We asked whether genome-
@@ -72,7 +72,7 @@ fitness phenotypes, pangenome conservation, and biogeographic
 patterns.
 ← 2 sentences. Sets field context + names the specific question.
 
-**_Methods:_** We integrated RB-TnSeq fitness data from the
+**Methods:** We integrated RB-TnSeq fitness data from the
 Fitness Browser panel (48 organisms, 343 conditions, 228K total
 genes) with pangenome conservation links from `fb_pangenome_link`
 (177,863 links), ICA module annotations, and GapMind metabolic-
@@ -82,7 +82,7 @@ Benjamini-Hochberg FDR correction (q < 0.05).
 ← 2 sentences. Names data sources, statistical test, correction.
    No software version numbers.
 
-**_Results:_** Of 53,966 dark genes (23.6% of the 228K-gene
+**Results:** Of 53,966 dark genes (23.6% of the 228K-gene
 dataset), 3,705 (6.9%) showed strong fitness phenotypes (|fit| > 2,
 |t| > 4) in at least one condition. Across these, 95 dark genes
 showed statistically enriched stress-condition phenotypes (Fisher's
@@ -97,7 +97,7 @@ more organisms.
    1 key number. Project has more findings; these are the 3
    strongest.
 
-**_Conclusions:_** Cross-organism integration of fitness data and
+**Conclusions:** Cross-organism integration of fitness data and
 conservation patterns yields a defensible prioritized list of dark
 gene candidates for follow-up. The contribution is a quantitative
 ranking, not a mechanistic claim; mechanism would require genetic
@@ -141,12 +141,13 @@ required subsections in this order:
    end Conclusions with a restatement of what was produced; end
    with why it matters.
 
-Subsection headers are bold-and-italic per ICMJE convention:
-`**_Background:_**`, `**_Methods:_**`, `**_Results:_**`,
-`**_Conclusions:_**` (or `**Background:**` if italic-bold renders
-poorly in the target format — both pass M2's fuzzy match). Note
-that M2 accepts aliases: `objective` or `aim` for Background;
-`findings` for Results; `conclusion` (singular) for Conclusions.
+Subsection headers are **bold** with a trailing colon:
+`**Background:**`, `**Methods:**`, `**Results:**`,
+`**Conclusions:**`. Do NOT add italic underscores (`_`) — ICMJE
+does not prescribe italic labels and the extra markup renders
+inconsistently across docx and PDF targets. M2 accepts aliases:
+`objective` or `aim` for Background; `findings` for Results;
+`conclusion` (singular) for Conclusions.
 
 For `MODE = report`: section title is "Project Summary" per SPEC
 §3.2.2. Single paragraph (3–5 sentences) covering: what the
@@ -343,6 +344,24 @@ STOP and cut the weakest findings. A 6-sentence Results subsection
 means you are writing a miniature Results section, not an abstract
 — regardless of how important each finding feels individually.
 
+**Register bleed from Discussion into Results.** The Abstract's
+Results subsection reports *what was found* — numbers, effect
+sizes, statistical significance. It does NOT interpret, caveat,
+or explain. Parenthetical caveats ("suggesting that…",
+"consistent with…", "possibly due to…"), interpretive framing
+("this indicates"), and hedge-then-claim patterns belong in
+Conclusions or Discussion, never in Abstract Results. Each
+Results sentence = one finding + one key number. No editorializing.
+
+**First-three-encountered bias.** "Pick the 3 strongest" does
+not mean "pick the first 3 findings in order." Read the Results
+section's Findings Summary and pick findings that span the
+breadth of the study: if the paper covers ML prediction,
+feature analysis, and metabolomics validation, the 3 abstract
+findings should touch all three, not triple-down on ML accuracy.
+The abstract is a window into the whole paper, not a zoom on
+one corner.
+
 **Number drift.** A number in Abstract that doesn't appear in
 Results, or that differs by even one digit. Grep every number;
 mismatch = drift. Not "rounding for readability" — the body's
@@ -358,6 +377,13 @@ they should care. End Conclusions with the experimental payoff:
 what specific experiments become possible, what class of questions
 this enables. The reader should finish the abstract knowing both
 what was delivered and what to do with it.
+
+**Conclusions-as-Results-rehash.** If your Conclusions restates
+specific numbers or findings from Results, you're wasting
+sentences. Conclusions is *contribution + so-what*, not a second
+pass at reporting observations. Compare what you wrote in
+Conclusions to your Results subsection — if they make the same
+claims, cut Conclusions back to the interpretive frame.
 
 **New methods in Abstract.** Naming a statistical test in Abstract
 that isn't in Methods. Walk against Methods.
@@ -393,6 +419,16 @@ found.
    claim not in the body, drop or re-anchor.
 10. **Tier-conformant Conclusions language.** STRONG declarative;
     THIN scoped; EXPLORATORY cautious.
+11. **Results register is pure observation.** Walk each Results
+    sentence: is it a finding with a number, or an interpretation?
+    Parenthetical caveats, "suggesting," "consistent with,"
+    "indicating" = Discussion register. Move to Conclusions or cut.
+12. **Conclusions is not Results-rehash.** Compare your Conclusions
+    to your Results. If Conclusions restates specific numbers or
+    findings, rewrite as contribution + "so what."
+13. **Findings span the breadth.** Check whether your 3 Results
+    findings cover distinct aspects of the paper (e.g., prediction,
+    feature analysis, validation) rather than clustering on one.
 
 **Anti-example pairs** — Abstract drift and grounded prose side
 by side:
@@ -402,7 +438,7 @@ Validator-blocking errors (M2 / M10):
 ```
 ✗  No "Conclusions:" header / mis-titled "Discussion:".
    (M2 fail: required subsection missing)
-✓  **_Conclusions:_** at the end of the four-section structured
+✓  **Conclusions:** at the end of the four-section structured
    abstract.
 
 ✗  Cite [3] in Abstract.

@@ -567,7 +567,7 @@ def validate_M2_structured_abstract(
                 any_alias_present = True
                 break
             # Bold prefix. Permissive: matches `**Background:**` (bold),
-            # `**_Background:_**` (bold-italic, the form abstract.v1
+            # `**Background:**` (bold, the form abstract.v1
             # actually emits — line 52 of the prompt), `**Background **`,
             # `***Background:***`, etc. Allows optional emphasis chars
             # (`_` / `*`) inside the outer `**` plus optional whitespace
@@ -583,25 +583,120 @@ def validate_M2_structured_abstract(
         else:
             missing.append(canonical)
 
-    if not missing:
+    if missing:
         return ValidatorResult(
-            id="M2", name="Structured abstract", status="pass",
+            id="M2",
+            name="Structured abstract",
+            status="fail",
+            violations=[Violation(
+                severity="error",
+                section="abstract",
+                line=None,
+                message=(
+                    f"Abstract is missing required subsection(s): "
+                    f"{', '.join(missing)}. Use H3 headers (### Background) "
+                    f"or bold prefixes (**Background:** ...)."
+                ),
+                escalation_path="auto-fix",
+            )],
+        )
+
+    # --- Sentence-count caps (advisory) ---
+    # Caps from abstract.v1.md: Background 2-3, Methods 2-3,
+    # Results 3 (4 max), Conclusions 2-3.
+    SENTENCE_CAPS: dict[str, int] = {
+        "background": 3,
+        "methods": 3,
+        "results": 4,
+        "conclusions": 3,
+    }
+
+    # Split abstract into subsection blocks keyed by canonical name.
+    # Build a regex that matches any subsection header (H3 or bold-prefix)
+    # and capture the canonical key via lookahead iteration.
+    all_aliases: list[tuple[str, str]] = []
+    for canonical, aliases in ABSTRACT_SUBSECTIONS.items():
+        for a in aliases:
+            all_aliases.append((canonical, a))
+
+    # Build a single pattern that matches any subsection boundary.
+    alias_patterns = []
+    for _, a in all_aliases:
+        # Match H3 header or bold-prefix
+        alias_patterns.append(
+            r"(?:^#{2,4}\s+" + re.escape(a) + r"\b"
+            r"|\*\*[_*]?\s*" + re.escape(a) + r"[:\s]?\s*[_*]?\*\*)"
+        )
+    boundary_re = re.compile(
+        "(" + "|".join(alias_patterns) + ")",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # Find boundary positions and map to canonical names.
+    boundaries: list[tuple[int, str]] = []
+    for m in boundary_re.finditer(abstract):
+        matched_text = m.group(0).lower()
+        for canonical, a in all_aliases:
+            if a.lower() in matched_text:
+                boundaries.append((m.end(), canonical))
+                break
+
+    # Extract text between boundaries.
+    subsection_texts: dict[str, str] = {}
+    for i, (end_pos, canonical) in enumerate(boundaries):
+        if i + 1 < len(boundaries):
+            next_start = abstract.rfind("\n", 0, boundaries[i + 1][0])
+            # Find the start of the next boundary's line.
+            for bm in boundary_re.finditer(abstract, end_pos):
+                next_start = bm.start()
+                break
+            text = abstract[end_pos:next_start].strip()
+        else:
+            text = abstract[end_pos:].strip()
+        subsection_texts[canonical] = text
+
+    def _count_sentences(text: str) -> int:
+        """Count sentences with basic abbreviation handling."""
+        if not text:
+            return 0
+        # Remove common abbreviations that contain periods.
+        cleaned = re.sub(
+            r'\b(?:e\.g\.|i\.e\.|et al\.|vs\.|ca\.|approx\.|Fig\.|'
+            r'Figs\.|No\.|no\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|eq\.|'
+            r'sp\.|spp\.|cf\.)',
+            'ABBR', text,
+        )
+        # Remove decimal numbers (e.g. "3.14", "1.2e-5").
+        cleaned = re.sub(r'\d+\.\d+', 'NUM', cleaned)
+        # Split on sentence-ending punctuation followed by space or EOL.
+        sentences = re.split(r'[.!?](?:\s|$)', cleaned)
+        # Filter empty fragments.
+        return len([s for s in sentences if s.strip()])
+
+    warnings: list[Violation] = []
+    for canonical, max_sent in SENTENCE_CAPS.items():
+        text = subsection_texts.get(canonical, "")
+        count = _count_sentences(text)
+        if count > max_sent:
+            warnings.append(Violation(
+                severity="warning",
+                section="abstract",
+                line=None,
+                message=(
+                    f"Abstract {canonical.title()} has {count} sentences "
+                    f"(cap: {max_sent}). Per ICMJE abstract.v1 spec, trim "
+                    f"to {max_sent} or fewer."
+                ),
+                escalation_path="user-modify",
+            ))
+
+    if warnings:
+        return ValidatorResult(
+            id="M2", name="Structured abstract", status="soft-warning",
+            violations=warnings,
         )
     return ValidatorResult(
-        id="M2",
-        name="Structured abstract",
-        status="fail",
-        violations=[Violation(
-            severity="error",
-            section="abstract",
-            line=None,
-            message=(
-                f"Abstract is missing required subsection(s): "
-                f"{', '.join(missing)}. Use H3 headers (### Background) "
-                f"or bold prefixes (**Background:** ...)."
-            ),
-            escalation_path="auto-fix",
-        )],
+        id="M2", name="Structured abstract", status="pass",
     )
 
 

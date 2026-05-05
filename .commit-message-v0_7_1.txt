@@ -1,0 +1,35 @@
+v0.7.1: live-test fixes from genotype_to_phenotype_enigma draft_1
+
+Bug fixes (4):
+- Fix rewrite_passes counter: grep pattern `^pass [12]:` never matched
+  actual summary format `pass 1 complete: ...`; state.json always showed
+  0 passes. Changed to `^pass [12] complete:` (paper_writer.sh:2699).
+- Fix abstract section labels: removed italic underscores from
+  abstract.v1.md worked example and spec (`**_Background:_**` →
+  `**Background:**`). ICMJE does not prescribe italic labels; the
+  extra `_` markup rendered inconsistently across docx/PDF targets.
+- Fix figure-manifest false positives: check_figures_manifest.py now
+  recognises `![...](figures/figN_...)` inline image embeds as valid
+  figure references, not just `(Fig. N)` parenthetical callouts.
+- Fix scope-coherence false positives: added _LITERATURE_SIGNAL_RE
+  to check_scope_coherence.py for external database/survey phrases
+  ("across all GTDB genomes", "global 16S surveys") that indicate
+  literature-sourced numbers without bracket citations.
+
+Feature (1):
+- Author list population: paper_writer.sh title block now extracts
+  authors from RESEARCH_PLAN.md (or README.md) `## Authors` section
+  instead of hardcoding `[TBD]`.
+
+Validators (1):
+- M2 sentence-count caps: validate_manuscript.py M2 now checks
+  per-subsection sentence counts (Background 3, Methods 3, Results 4,
+  Conclusions 3) and emits soft-warning violations when exceeded.
+
+Prompt hardening (abstract.v1.md):
+- New anti-patterns: register bleed (Discussion-language in Results),
+  first-three-encountered bias, Conclusions-as-Results-rehash.
+- 3 new self-review checks (#11 register purity, #12 no rehash,
+  #13 breadth coverage).
+
+720/720 tests pass.
