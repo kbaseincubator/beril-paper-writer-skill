@@ -86,11 +86,18 @@ CONTRACT.md).
 
 ### JSON schema version
 
-Paper-writer v0.6.x expects: **`adversarial-review-paper.v2`**
+Paper-writer v0.7.x accepts: **`adversarial-review-paper.v2`** or
+**`adversarial-review-paper.v3`** (v3 is the current adversarial
+output as of adversarial v0.7.0+). v3 changes: class rename
+`narrative_weakness` → `central_objection`; new `citation_reality`
+class; `--output` flag honored. See adversarial CONTRACT.md §v0.7.0
+migration.
 
-Paper-writer v0.7.0 will migrate to: **`adversarial-review-paper.v3`**
-(class rename `narrative_weakness` → `central_objection`; `--output`
-flag honored; see adversarial CONTRACT.md §v0.7.0 migration).
+**Note:** Paper-writer v0.7.x does not yet invoke the canonical
+adversarial reviewer in-pipeline (`phase_adversarial_audit` is
+planned but unimplemented). The canonical reviewer is used
+standalone via `beril-adversarial review --type paper`. The
+in-pipeline rewrite loop uses the fallback inline reviewer only.
 
 Schema version is found in the JSON at `.schema_version`.
 
@@ -116,7 +123,7 @@ reviewer and rewrite loop use legacy labels. The mapping is bijective:
 | `P0` | Critical | Triggers rewrite dispatch to affected section |
 | `P1` | Important | Surfaces in next_actions.md; rewrite-eligible at pass 1 |
 | `P2` | Suggested | next_actions.md only; not auto-rewritten |
-| `info` | _(no action)_ | Single narrative_weakness/central_objection finding; strategic note for author. Not a fix target |
+| `info` | _(no action)_ | Single `central_objection` finding (v3; was `narrative_weakness` in v2); strategic note for author. Not a fix target |
 
 Consumer-side translation:
 
@@ -132,7 +139,7 @@ def count_actionable(findings: list[dict]) -> dict[str, int]:
     return counts
 ```
 
-### Class enum (paper.v2 — 10 classes)
+### Class enum (paper.v2/v3 — 10 classes)
 
 Paper-writer routes findings by `fix_target` rather than by class.
 The class enum is documented here for completeness and for routing
@@ -149,7 +156,7 @@ classes that need special handling:
 | `missing_section` | paper-equiv | Surfaces in next_actions.md (cannot auto-generate a section) |
 | `section_arc` | paper-equiv | Routes to fix_target section's rewrite prompt |
 | `throughline` | yes | Surfaces in next_actions.md (throughline is user-owned) |
-| `narrative_weakness` | yes | No action — strategic note (info severity) |
+| `central_objection` (v3) / `narrative_weakness` (v2) | yes | No action — strategic note (info severity) |
 
 ### fix_target values (paper-writer prompt names)
 
