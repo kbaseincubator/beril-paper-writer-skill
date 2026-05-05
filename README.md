@@ -160,17 +160,20 @@ to skip the review-rewrite loop (saves ~$5–15).
   guidance. Author list, funding, conflicts, and ethics statements
   are placeholders the user must fill before submission.
 
-## Documentation
+## Documentation map
 
-- [TUTORIAL.md](TUTORIAL.md) — step-by-step guide for new users
-- [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) — comprehensive install→configure→test→operate guide
-- [HUB_INSTALL.md](HUB_INSTALL.md) — JupyterHub operator runbook
-- [CONFIGURE.md](CONFIGURE.md) — configuration reference (CLI flags, cost controls, model selection)
-- [CONTRIBUTION.md](CONTRIBUTION.md) — how to contribute (prompts, validators, orchestrator)
-- [CONTRACT.md](CONTRACT.md) — cross-skill interop with beril-adversarial
-- [SPEC.md](SPEC.md) — design rationale
-- [LAYOUT.md](LAYOUT.md) — internal architecture and CLI details
-- [DECISIONS.md](DECISIONS.md) — running log of design decisions
+| Doc | Audience | Content |
+|---|---|---|
+| [TUTORIAL.md](TUTORIAL.md) | Users | Step-by-step drafting guide (install, configure, draft, throughline selection, output reading, iteration) |
+| [HUB_INSTALL.md](HUB_INSTALL.md) | Operators | JupyterHub deployment runbook (pipx install, install-skill, configure, smoke test, troubleshooting) |
+| [CONFIGURE.md](CONFIGURE.md) | Users / Operators | CLI flags, cost controls, model selection, tier/mode, orchestrator internals |
+| [CONTRACT.md](CONTRACT.md) | Integrators | Cross-skill interop surface with beril-adversarial (schema versions, severity mapping, iteration patterns) |
+| [CONTRIBUTION.md](CONTRIBUTION.md) | Contributors | How to contribute (prompt improvements, validator extensions, orchestrator fixes) |
+| [SPEC.md](SPEC.md) | Developers | Design rationale for the prompt suite and pipeline architecture |
+| [LAYOUT.md](LAYOUT.md) | Developers | Internal architecture, CLI details, runtime contracts |
+| [DECISIONS.md](DECISIONS.md) | Developers | Running log of design decisions with rationale |
+| [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Reference | Comprehensive single-artifact guide (retained as reference; prefer focused docs above) |
+| [PARTICIPANT-RUNBOOK](https://github.com/ArkinLaboratory/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md) | Participants | Cross-skill runbook covering all 4 BERIL skills end-to-end (prereqs, install, workflow, recovery, cost) |
 
 ## License
 

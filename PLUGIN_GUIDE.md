@@ -1,5 +1,19 @@
 # beril-paper-writer — Plugin Guide
 
+> **Status: comprehensive reference, not canonical entry point.**
+> This guide consolidates install, configure, test, and operate
+> content in a single artifact. For focused documentation, prefer:
+>
+> - **New users →** [TUTORIAL.md](TUTORIAL.md)
+> - **Hub operators →** [HUB_INSTALL.md](HUB_INSTALL.md)
+> - **Configuration tuning →** [CONFIGURE.md](CONFIGURE.md)
+> - **Cross-skill participants →** the
+>   [PARTICIPANT-RUNBOOK.md](https://github.com/ArkinLaboratory/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md)
+>   (covers all 4 BERIL skills end-to-end)
+>
+> This file is retained as a comprehensive reference but is not part
+> of the uniform cross-skill doc set.
+
 End-to-end guide to installing, configuring, testing, and operating
 the `beril-paper-writer` skill within a BERIL deployment.
 
