@@ -163,10 +163,14 @@ to skip the review-rewrite loop (saves ~$5–15).
 ## Documentation
 
 - [TUTORIAL.md](TUTORIAL.md) — step-by-step guide for new users
+- [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) — comprehensive install→configure→test→operate guide
+- [HUB_INSTALL.md](HUB_INSTALL.md) — JupyterHub operator runbook
+- [CONFIGURE.md](CONFIGURE.md) — configuration reference (CLI flags, cost controls, model selection)
+- [CONTRIBUTION.md](CONTRIBUTION.md) — how to contribute (prompts, validators, orchestrator)
+- [CONTRACT.md](CONTRACT.md) — cross-skill interop with beril-adversarial
 - [SPEC.md](SPEC.md) — design rationale
 - [LAYOUT.md](LAYOUT.md) — internal architecture and CLI details
 - [DECISIONS.md](DECISIONS.md) — running log of design decisions
-- [CONTRACT.md](CONTRACT.md) — cross-skill interop with beril-adversarial
 
 ## License
 
