@@ -100,13 +100,48 @@ idempotently retries the failed phase.
 
 ## Workflow
 
-### Step 1 — Resolve project + verify install
+### Step 1 — Resolve project context
 
-The slash command verifies `beril-paper-writer` is on PATH, then
-resolves the project (auto-detect from cwd if inside `projects/<id>/`,
-else use the explicit argument). Confirms the project has the
-required inputs: `REPORT.md`, `RESEARCH_PLAN.md`, at least one
-`notebooks/*.ipynb`.
+This is the agent's most load-bearing inference step. On the BERIL
+hub, users invoke the slash command from many starting points (just
+opened Claude Code, mid-research workflow, after `/berdl_start`,
+etc.) and they often stay at BERIL_ROOT rather than `cd`-ing into a
+project. Walk this resolution tree IN ORDER and stop at the first
+match:
+
+**1a. Explicit argument.** If the user typed a project_id or path
+after the slash command (e.g., `/beril-paper-writer my_project_id`),
+use it as-is. Validate `projects/<project_id>/` exists; ask the user
+to clarify if it doesn't.
+
+**1b. Git branch convention.** Run `git -C $BERIL_ROOT branch
+--show-current`. The hub uses a `projects/<id>` branch-naming
+convention — branch `projects/gene_function_ecological_agora` means
+the active research project is `gene_function_ecological_agora`.
+Strip the `projects/` prefix; that's the project_id. **Confirm with
+the user before acting:** "I see you're on branch `projects/<id>`.
+Draft a paper for that project? [Y/n]". This is the strongest signal
+on the hub because users typically stay at BERIL_ROOT.
+
+**1c. cwd.** Run `pwd`. If the path is inside `projects/<id>/`, that
+`<id>` is the project_id. Common when the user `cd`'d into a project
+manually.
+
+**1d. Ask the user.** If 1a–1c didn't resolve, present the project
+list and ask:
+
+```bash
+ls $BERIL_ROOT/projects/        # all available project_ids
+```
+
+For projects that have a `beril.yaml` manifest, surface the project's
+status alongside the id. If the user just ran `/berdl_start`,
+reference the project list it already displayed rather than
+re-listing.
+
+After resolving project_id, verify `beril-paper-writer` is on PATH,
+then confirm the project has the required inputs: `REPORT.md`,
+`RESEARCH_PLAN.md`, at least one `notebooks/*.ipynb`.
 
 ### Step 2 — Initialize and run plan.v1
 
