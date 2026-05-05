@@ -29,7 +29,7 @@ flow). The drafting itself runs through a shell orchestrator
 points emit `papers/draft_N/.handoff.json` for the slash-command
 parser.
 
-**Status: v0.7.0 — pipeline reliability.** Full IMRAD pipeline with
+**Status: v0.7.1 — production pipeline.** Full IMRAD pipeline with
 review-rewrite loop (v0.2+), figure + table embedding (v0.3/v0.6),
 caption-richness via Source 4 LLM (v0.4), markdown→docx assembly,
 and v0.7.0 ensemble review (3× fallback reviewer + agreement scoring),

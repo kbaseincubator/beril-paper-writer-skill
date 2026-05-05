@@ -47,5 +47,8 @@ papers/cost-log.jsonl
 .env
 .env.local
 
+# Development staging artifacts
+.commit-message-*.txt
+
 # Ruff cache
 .ruff_cache/

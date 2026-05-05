@@ -1,12 +1,12 @@
 # beril-paper-writer-skill — package layout + CLI structure
 
-> **Version notice (v0.6.5):** This document was written at v0.1 and is
+> **Version notice (v0.7.1):** This document was written at v0.1 and is
 > incrementally updated as features land. Sections marked "planned" may
 > already be implemented; sections without version annotations reflect
 > the original v0.1 design. For the current implementation state, see
-> RELEASE_NOTES_v0_*.md and DECISIONS.md (D-001–D-033).
+> DECISIONS.md.
 
-**Date:** 2026-04-25 (originated); updated through v0.6.5.
+**Date:** 2026-04-25 (originated); updated through v0.7.1.
 **Status:** Living document. Updated incrementally as features ship.
 
 This document specifies the shape of `ArkinLaboratory/beril-paper-writer-skill`.
@@ -111,9 +111,14 @@ Manuscript content = shell + prompts + claude subprocess + project artifacts.
 ## CLI
 
 ```
+beril-paper-writer draft <project_id> [--mode paper|report]
+                                      [--depth quick|standard|deep]
+                                      [--model <model_id>]
+                                      [--no-adversarial]
+                                      [--max-cost-usd N]
 beril-paper-writer install-skill [<BERIL_ROOT>] [--force]
-beril-paper-writer configure
-beril-paper-writer continue <draft_dir> [options]
+beril-paper-writer configure [--beril-root <path>]
+beril-paper-writer continue <draft_dir> --pick <TL_ID> [--revision <note>]
 beril-paper-writer assemble <draft_dir> [--format docx|pdf|md]
 ```
 
