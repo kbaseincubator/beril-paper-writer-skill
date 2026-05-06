@@ -60,7 +60,26 @@ This installs the `beril-paper-writer` CLI. Verify it worked:
 beril-paper-writer --version
 ```
 
-You should see `beril-paper-writer-skill 0.7.1` (or later).
+You should see `beril-paper-writer-skill 0.7.2` (or later).
+
+### Configure
+
+Verify that all dependencies are in place:
+
+```bash
+beril-paper-writer configure
+```
+
+This checks for:
+
+- **Hard requirements** (must pass): `claude` CLI on PATH, Python
+  with `nbformat` and `python-docx`, the orchestrator script.
+- **Soft requirements** (warnings): `beril-adversarial` CLI (needed
+  for the adversarial review arm; falls back to an inline reviewer
+  if missing), bash 3.2+, standard POSIX utilities.
+
+If `configure` exits 0, you're ready. If it exits 3, fix the missing
+hard requirements it reports.
 
 ### Install the skill into your BERIL deployment
 
@@ -79,27 +98,6 @@ existing files if you're upgrading:
 beril-paper-writer install-skill . --force
 ```
 
----
-
-## 2. Configure
-
-Verify that all dependencies are in place:
-
-```bash
-beril-paper-writer configure --beril-root /path/to/BERIL-research-observatory
-```
-
-This checks for:
-
-- **Hard requirements** (must pass): `claude` CLI on PATH, Python
-  with `nbformat` and `python-docx`, the orchestrator script.
-- **Soft requirements** (warnings): `beril-adversarial` CLI (needed
-  for the adversarial review arm; falls back to an inline reviewer
-  if missing), bash 3.2+, standard POSIX utilities.
-
-If `configure` exits 0, you're ready. If it exits 3, fix the missing
-hard requirements it reports.
-
 ### Installing beril-adversarial (recommended)
 
 If configure warns that `beril-adversarial` is missing and you want
@@ -113,7 +111,7 @@ beril-adversarial install-skill .
 
 ---
 
-## 3. Start a paper draft
+## 2. Start a paper draft
 
 There are two ways to launch the paper writer: the **CLI** (from a
 terminal) or the **slash command** (inside a Claude session). Both
@@ -167,7 +165,7 @@ Or with flags:
 
 ---
 
-## 4. Pick a throughline
+## 3. Pick a throughline
 
 The paper writer pauses after its planning phase and presents 2–3
 **throughline candidates** — each is a possible narrative arc for
@@ -216,7 +214,7 @@ persists on disk.
 
 ---
 
-## 5. Review the output
+## 4. Review the output
 
 When the pipeline finishes, your draft is at:
 
@@ -257,7 +255,7 @@ headings.
 
 ---
 
-## 6. Iterate
+## 5. Iterate
 
 The paper writer creates a new `draft_N/` directory for each
 invocation — it never overwrites a previous draft. To re-draft
@@ -348,8 +346,9 @@ for figure-manifest warnings. Figures must be in the project's
 # Full install sequence
 pipx install git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
 cd /path/to/BERIL-research-observatory
+beril-paper-writer --version
+beril-paper-writer configure
 beril-paper-writer install-skill .
-beril-paper-writer configure --beril-root .
 
 # Draft a paper
 beril-paper-writer draft projects/my_project

@@ -53,8 +53,9 @@ The skill **pauses** at user-decision points and resumes via
 ```bash
 pipx install git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
 cd <BERIL_ROOT>
-beril-paper-writer install-skill .
-beril-paper-writer configure   # verify claude CLI + dependencies
+beril-paper-writer --version
+beril-paper-writer configure         # verify claude CLI + dependencies
+beril-paper-writer install-skill .   # deploy skill files into BERIL_ROOT
 ```
 
 ## Usage

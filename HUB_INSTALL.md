@@ -94,7 +94,9 @@ is how the slash commands become available.
 
 ```bash
 cd "$BERIL_ROOT"
-beril-paper-writer install-skill .
+beril-paper-writer --version             # sanity check
+beril-paper-writer configure             # verify claude CLI + deps
+beril-paper-writer install-skill .       # deploy skill files
 ```
 
 Or specify the path explicitly from anywhere:
@@ -218,10 +220,10 @@ if missing.
 Re-run pipx install with the new version tag:
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.7.1
-beril-paper-writer install-skill "$BERIL_ROOT"   # refresh skill files
-beril-paper-writer --version                      # confirm
+pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.7.2
+beril-paper-writer --version                      # confirm new version
 beril-paper-writer configure                      # verify deps still resolve
+beril-paper-writer install-skill "$BERIL_ROOT"   # refresh skill files
 ```
 
 The skill files in `<BERIL_ROOT>/.claude/skills/beril-paper-writer/`

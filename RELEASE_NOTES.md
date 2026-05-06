@@ -104,8 +104,9 @@ For decision history, see [`DECISIONS.md`](DECISIONS.md).
 pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
 
 cd <BERIL_ROOT>
-beril-paper-writer install-skill .
-beril-paper-writer configure   # verifies claude is on PATH; warns if beril-adversarial absent
+beril-paper-writer --version
+beril-paper-writer configure         # verifies claude is on PATH; warns if beril-adversarial absent
+beril-paper-writer install-skill .   # deploy skill files into BERIL_ROOT
 ```
 
 If you have an SSH key registered with the ArkinLaboratory GitHub org:

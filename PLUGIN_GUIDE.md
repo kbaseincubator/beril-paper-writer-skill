@@ -165,7 +165,7 @@ pipx install --force git+ssh://git@github.com/ArkinLaboratory/beril-paper-writer
 ### Verify
 
 ```bash
-beril-paper-writer --version    # should print "beril-paper-writer-skill 0.7.1"
+beril-paper-writer --version    # should print "beril-paper-writer-skill 0.7.2"
 beril-paper-writer --help       # lists subcommands: draft, install-skill, configure, continue, assemble
 ```
 
