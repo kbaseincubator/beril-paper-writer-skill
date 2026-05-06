@@ -1645,6 +1645,97 @@ phase_check_overclaim() {
 }
 
 # ==============================================================================
+# Phase: check_sentence_complexity — sentence length + parenthetical (advisory)
+# ==============================================================================
+#
+# v0.8 Tier B3. Scans section files (02_results.md, 03_discussion.md, etc.)
+# for sentences >40 words (NOTE), >50 words (WARN), and 2+ parenthetical
+# pairs (WARN). Always exits 0; advisory only.
+
+phase_check_sentence_complexity() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_sentence_complexity (advisory)"
+
+    local sc_warnings_file="$draft_dir/audit/sentence_complexity_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_sentence_complexity.py" "$draft_dir" \
+        2> "$sc_warnings_file" || true
+
+    if grep -q "WARN" "$sc_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "WARN" "$sc_warnings_file")
+        log_warn "Sentence complexity: $n_warn warning(s) (advisory):"
+        grep "WARN" "$sc_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $sc_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_sentence_complexity phase complete"
+}
+
+# ==============================================================================
+# Phase: check_abbreviation_discipline — expansion order + project terms (advisory)
+# ==============================================================================
+#
+# v0.8 Tier B2. Scans manuscript.md (or falls back to section files) for
+# abbreviations used before expansion, never expanded, and project terms
+# without preceding definitions. Always exits 0; advisory only.
+
+phase_check_abbreviation_discipline() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_abbreviation_discipline (advisory)"
+
+    local abbr_warnings_file="$draft_dir/audit/abbreviation_discipline_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_abbreviation_discipline.py" "$draft_dir" \
+        2> "$abbr_warnings_file" || true
+
+    if grep -q "WARN" "$abbr_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "WARN" "$abbr_warnings_file")
+        log_warn "Abbreviation discipline: $n_warn warning(s) (advisory):"
+        grep "WARN" "$abbr_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $abbr_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_abbreviation_discipline phase complete"
+}
+
+# ==============================================================================
+# Phase: check_echo_repetition — quantitative claim repetition (advisory)
+# ==============================================================================
+#
+# v0.8 Tier B1. Scans manuscript.md (or falls back to section files) for
+# quantitative claims (percentages, p-values, effect sizes, sample sizes,
+# confidence intervals) repeated across 3+ sections. Always exits 0;
+# advisory only.
+
+phase_check_echo_repetition() {
+    local draft_dir="$1"
+
+    log_phase "Phase: check_echo_repetition (advisory)"
+
+    local echo_warnings_file="$draft_dir/audit/echo_repetition_warnings.txt"
+    "$PYTHON_BIN" "$TOOLS_DIR/check_echo_repetition.py" "$draft_dir" \
+        2> "$echo_warnings_file" || true
+
+    if grep -q "WARN" "$echo_warnings_file"; then
+        local n_warn
+        n_warn=$(grep -c "WARN" "$echo_warnings_file")
+        log_warn "Echo repetition: $n_warn warning(s) (advisory):"
+        grep "WARN" "$echo_warnings_file" | head -5 | sed 's/^/  /' >&2
+        if [[ "$n_warn" -gt 5 ]]; then
+            echo "  ... (see $echo_warnings_file for the full list)" >&2
+        fi
+    fi
+
+    log_ok "check_echo_repetition phase complete"
+}
+
+# ==============================================================================
 # Phase: check_figures_manifest — figures_manifest.tsv cross-walk (advisory)
 # ==============================================================================
 #
@@ -2112,6 +2203,36 @@ EOF
         n_attr="$(grep -ciE '^Co-Authored-By:' "$manuscript")"
         sed -i'' -e '/^[Cc]o-[Aa]uthored-[Bb]y:/d' "$manuscript"
         log_step "Stripped $n_attr stray Co-Authored-By line(s) from assembled manuscript"
+    fi
+
+    # v0.8.0 D1: Strip internal QC annotations from the references section.
+    # citation_pool.py emits per-entry "Scope alignment:", "Assessment:",
+    # and "Notes:" metadata lines, plus an "Uncited" section — these are
+    # internal book-keeping, not manuscript content.
+    local n_qc_lines=0
+    if grep -qE '^\- \*\*(Scope alignment|Assessment|Notes):\*\*' "$manuscript" 2>/dev/null; then
+        n_qc_lines="$(grep -cE '^\- \*\*(Scope alignment|Assessment|Notes):\*\*' "$manuscript")"
+        sed -i'' -e '/^- \*\*Scope alignment:\*\*/d' \
+                 -e '/^- \*\*Assessment:\*\*/d' \
+                 -e '/^- \*\*Notes:\*\*/d' "$manuscript"
+    fi
+    # Remove "Uncited (in pool but not yet cited in prose)" section and
+    # everything that follows it within References. Delete from the header
+    # line to EOF (uncited section is always last in references.md output).
+    if grep -qE '^## Uncited' "$manuscript" 2>/dev/null; then
+        local uncited_line
+        uncited_line="$(grep -nE '^## Uncited' "$manuscript" | head -1 | cut -d: -f1)"
+        if [[ -n "$uncited_line" ]]; then
+            # Count lines being removed for logging.
+            local total_lines
+            total_lines="$(wc -l < "$manuscript")"
+            local uncited_count=$(( total_lines - uncited_line + 1 ))
+            sed -i'' -e "${uncited_line},\$d" "$manuscript"
+            n_qc_lines=$(( n_qc_lines + uncited_count ))
+        fi
+    fi
+    if [[ "$n_qc_lines" -gt 0 ]]; then
+        log_step "Stripped $n_qc_lines reference QC annotation line(s) from manuscript"
     fi
 
     log_step "Running validate_manuscript.py"
@@ -3304,6 +3425,9 @@ main() {
                     phase_check_overclaim "$draft_dir"
                     phase_assemble      "$draft_dir" \
                         || halt_with "$draft_dir" "assemble (concat + validate_manuscript) failed"
+                    phase_check_sentence_complexity "$draft_dir"
+                    phase_check_abbreviation_discipline "$draft_dir"
+                    phase_check_echo_repetition "$draft_dir"
                     phase_repair_validators "$project_root" "$draft_dir" "$model_writing" "$project_id"
                     set_state_phase     "$draft_dir" "review"
                     phase_review        "$project_root" "$draft_dir" "$model" "$project_id" \

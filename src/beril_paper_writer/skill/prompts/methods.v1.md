@@ -275,6 +275,38 @@ let M6 escalate per SPEC §7.1.1; the user picks the path
   it `[NEEDS CITATION: <claim>]` and continue.
 - **No `Agent`.** This is itself a `claude -p` subagent.
 
+## Language discipline (applies to all prose you write)
+
+**SENTENCE DISCIPLINE:** Target ≤40 words per sentence. Any
+sentence exceeding 50 words MUST be split. Maximum 1 parenthetical
+insertion `(...)` per sentence. Methods sentences tend to accrete
+parenthetical details (library versions, sample sizes, parameter
+values) — restructure as numbered lists or separate sentences.
+
+**ABBREVIATION DISCIPLINE:** Every abbreviation must be expanded
+on its FIRST USE in the manuscript (not just first use in this
+section). Do not use an abbreviation before its expansion.
+Project-internal terms must be explicitly defined with a one-
+sentence operational definition on first use. If the manuscript
+uses 10+ abbreviations, create an abbreviation table at the end
+of Methods.
+
+**NOTEBOOK CITATION DISCIPLINE:** Do not cite specific notebook
+cells or line numbers in the main text (e.g., "notebooks/NB04b.ipynb
+cell 9, line 36"). Instead, create a "Computational
+Reproducibility" description in Methods mapping each analysis to
+its notebook path. In prose, reference the reproducibility section:
+"Permutation tests used 200 iterations (see Computational
+Reproducibility)."
+
+**SCORING SYSTEMS:** If the analytical workflow includes a scoring
+or ranking system (multi-criteria, weighted, composite), you MUST
+formally specify: (a) what components are scored, (b) how each
+component is scored (binary? continuous? weighted?), (c) how
+components combine into the total, (d) what threshold defines
+"actionable" or equivalent. A narrative description is not
+sufficient; provide the formula or decision rule.
+
 ## Anti-patterns
 
 **Fluent fabrication.** Writing "we performed FDR correction at

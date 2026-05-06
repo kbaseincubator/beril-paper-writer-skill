@@ -363,6 +363,50 @@ message; the user picks on resume. Never silently drop a
   the protocol above governs — not a fresh WebSearch.
 - **No `Agent`.** This is itself a `claude -p` subagent.
 
+## Language discipline (applies to all prose you write)
+
+**SENTENCE DISCIPLINE:** Target ≤40 words per sentence. Any
+sentence exceeding 50 words MUST be split. Maximum 1 parenthetical
+insertion `(...)` per sentence. If you need 2+ parenthetical
+asides, restructure as a numbered list or split into separate
+sentences. The main clause's subject and verb should appear early.
+
+**HEDGING DISCIPLINE:** Each claim may carry at most ONE hedging
+marker (e.g., "may," "suggests," "appears," "candidate,"
+"hypothesis-generating"). Do not stack hedges. If a claim needs
+qualification, state the limitation in a SEPARATE sentence:
+"[Claim]. This requires [validation/replication/etc.]."
+
+   BAD:  "The dosing rule is best understood as a candidate
+         workflow derived from one trajectory, not a rule with
+         established external validity."
+   GOOD: "Patient 6967's ecotype shift suggests a dosing strategy.
+         This requires prospective validation."
+
+**ABBREVIATION DISCIPLINE:** Every abbreviation must be expanded
+on its FIRST USE in the manuscript. Do not use an abbreviation
+before its expansion. Project-internal terms must be explicitly
+defined on first use.
+
+**TRANSITION DISCIPLINE:** Every Discussion subsection must begin
+with a transition sentence linking to what was established in the
+previous subsection and previewing what this subsection addresses.
+Do NOT use formulaic transitions. State the logical connection.
+
+**ECHO REPETITION CAP:** A specific quantitative finding may
+appear at most TWICE in the full manuscript: once in Results
+(primary) and once in Abstract (summary). Discussion should
+reference Results findings without re-stating specific numbers:
+"the sign-concordance reported in Results" not "the 88.2%
+sign-concordance."
+
+**COMPETING APPROACHES:** Include one paragraph (in Findings-in-
+context or as its own subsection) comparing the study's
+methodology to 2–3 alternative approaches from the citation pool.
+Cite specific competing methods and explain why the present
+approach was chosen. If no competing approaches exist, state that
+explicitly in one sentence.
+
 ## Anti-patterns
 
 **Causal smuggle (the #1 failure mode).** Observational finding

@@ -32,6 +32,7 @@ These are non-negotiable. Check each before calling Write.
 | **Every number grep-traced** | REPORT.md or notebook output cell; no fabrication | Drop claim or mark placeholder |
 | **Counts precede percentages** | `n / total (X%)` form, never bare `X%` (M8) | Hard validator fail |
 | **Effect sizes have CIs** | `OR 1.34 [1.21–1.48], p = 1.4×10⁻⁹` not bare `p < 0.05` (M7) | Hard validator fail |
+| **Word budget** | STRONG 1500–2500 words; THIN 1000–1800; EXPLORATORY 800–1500 | Cut subsections or route to supplementary |
 | **Figures manifest emitted** | `figures_manifest.tsv` if any `(Fig. N)` callouts exist | Assembled docx is figure-less |
 | **Tables manifest emitted** | `tables_manifest.tsv` if any `(Table N)` callouts exist | Assembled docx is table-less |
 
@@ -433,6 +434,72 @@ a specific sub-claim.
   built; if you need a citation not in the pool (`references.md`
   doesn't have it), mark it `[NEEDS CITATION: <claim>]`.
 - **No `Agent`.** This is itself a `claude -p` subagent.
+
+## Language discipline (applies to all prose you write)
+
+**SENTENCE DISCIPLINE:** Target ≤40 words per sentence. Any
+sentence exceeding 50 words MUST be split. Maximum 1 parenthetical
+insertion `(...)` per sentence. If you need 2+ parenthetical
+asides, restructure as a numbered list or split into separate
+sentences. The main clause's subject and verb should appear early
+— do not bury the verb behind a long chain of prepositional
+phrases, appositives, or subordinate clauses.
+
+**QUANTITATIVE CLAIM DISCIPLINE:** Each sentence carries at most
+ONE primary quantitative claim. The supporting statistics for that
+claim (n, effect size, CI, p-value per M7/M8) count as part of
+the same claim, not as separate claims. Do NOT embed 3+ unrelated
+quantitative results in a single sentence. When reporting multiple
+related statistics, use a structured list, a table reference, or
+separate sentences.
+
+   BAD:  "E1 comprised 51 candidates (82 CD / 280 non-IBD), all
+         100% sign-concordant, with M. gnavus (CLR-Δ +4.85),
+         S. salivarius (+3.26), and Tier-A scoring ≥ 2.5 on a
+         0–4 scale."
+   GOOD: "E1 Tier-A comprised 51 candidates from a meta-analysis
+         of 82 CD and 280 non-IBD samples. All 51 were 100%
+         sign-concordant across substudies. The top-ranked species
+         were M. gnavus (CLR-Δ +4.85) and S. salivarius (+3.26)."
+
+**ABBREVIATION DISCIPLINE:** Every abbreviation must be expanded
+on its FIRST USE in the manuscript. Do not use an abbreviation
+before its expansion. Project-internal terms (e.g., Tier-A,
+Tier-B, ecotype labels E0–E3, phage GAP) must be explicitly
+defined with a one-sentence operational definition on first use.
+
+**TRANSITION DISCIPLINE:** Every Results subsection must begin
+with a transition sentence that: (a) links to what was
+established in the previous subsection, and (b) previews what
+this subsection will show and why. Do NOT use formulaic
+transitions ("We next examined..."). State the logical
+connection: "Having established X, we now test whether Y,
+because Z."
+
+**ECHO REPETITION CAP:** A specific quantitative finding (e.g.,
+"88.2% sign-concordance") may appear at most ONCE in Results
+(primary report). Do NOT repeat the same number in the Findings
+Summary if it already appeared in a subsection — reference it
+instead: "the sign-concordance reported above."
+
+**NOTEBOOK CITATION DISCIPLINE:** Do not cite specific notebook
+cells or line numbers in the main text (e.g., "notebooks/NB04b.ipynb
+cell 9, line 36"). Instead, reference the Methods section's
+computational reproducibility description. In prose, write
+"(Methods §Statistical Analysis)" not "(NB04b cell 42)."
+
+**PANEL REFERENCE DISCIPLINE:** When referencing specific panels
+of a multi-panel figure, always use the full form `Fig. N<panel>`
+(e.g., `Fig. 1B`, `Fig. 1C`) or `Fig. N, panel <letter>`. Never
+write bare panel labels like `(B)` or `(C)` after an initial
+`(Fig. 1A)` callout — bare letters are visually indistinguishable
+from figure-legend panel descriptions and create the appearance of
+caption text spliced into prose.
+
+   BAD:  "The four consensus ecotypes (Fig. 3A) showed distinct
+         profiles. (B) The CD-enriched ecotype..."
+   GOOD: "The four consensus ecotypes (Fig. 3A) showed distinct
+         profiles. Fig. 3B highlights the CD-enriched ecotype..."
 
 ## Anti-patterns
 

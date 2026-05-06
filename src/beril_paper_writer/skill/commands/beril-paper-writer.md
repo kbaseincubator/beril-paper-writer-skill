@@ -26,17 +26,21 @@ Run in a Bash block:
 
 If the command is not found, tell the user:
 
-> The `beril-paper-writer` package isn't on your PATH. Install it with:
+> The `beril-paper-writer` package isn't on your PATH. From your BERIL
+> root, run the four steps below in order (install package → verify
+> CLI loads → configure cross-skill bindings → deploy skill files into
+> BERIL):
 >
->     pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+>     cd ~/BERIL-research-observatory
+>     pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git \
+>       && beril-paper-writer --version \
+>       && beril-paper-writer configure \
+>       && beril-paper-writer install-skill .
 >
 > If you have an SSH key registered with GitHub you can also use the
 > SSH URL — note the explicit `git@`, which is required:
 >
 >     pipx install --force git+ssh://git@github.com/ArkinLaboratory/beril-paper-writer-skill.git
->
-> Then run `beril-paper-writer install-skill .` from your BERIL root,
-> followed by `beril-paper-writer configure`.
 
 Stop here if the command is missing.
 

@@ -309,6 +309,24 @@ report mode. Use the canonical name for the mode (per SPEC §3.2.2).
 - **No `WebSearch`.** Citations from the pool only.
 - **No `Agent`.** This is itself a `claude -p` subagent.
 
+## Language discipline (applies to all prose you write)
+
+**SENTENCE DISCIPLINE:** Target ≤40 words per sentence. Any
+sentence exceeding 50 words MUST be split. Maximum 1 parenthetical
+insertion `(...)` per sentence. The main clause's subject and verb
+should appear early.
+
+**ABBREVIATION DISCIPLINE:** Every abbreviation must be expanded
+on its FIRST USE in the manuscript. The Introduction is typically
+the first body section a reader encounters after the Abstract, so
+expand abbreviations here even if they appeared in the Abstract.
+
+**TRANSITION DISCIPLINE:** The Introduction should flow as
+continuous prose (no subsection headers — see Anti-patterns below),
+with each paragraph's opening sentence linking to the previous
+paragraph's conclusion. The final paragraph previews what the
+study does and what the reader will find.
+
 ## Anti-patterns
 
 **Subsection headers in Introduction (the #1 failure mode).** Do

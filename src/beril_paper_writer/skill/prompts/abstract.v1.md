@@ -333,6 +333,30 @@ the references.
 - **No `WebSearch`.** No citations in Abstract.
 - **No `Agent`.** This is itself a `claude -p` subagent.
 
+## Language discipline (applies to all prose you write)
+
+**SENTENCE DISCIPLINE:** Target ≤40 words per sentence. Any
+sentence exceeding 50 words MUST be split. Maximum 1 parenthetical
+insertion `(...)` per sentence. The main clause's subject and verb
+should appear early.
+
+**HEDGING DISCIPLINE:** Each claim may carry at most ONE hedging
+marker (e.g., "may," "suggests," "candidate"). Do not stack
+hedges. If a claim needs qualification, state the limitation in a
+SEPARATE sentence.
+
+**ABBREVIATION DISCIPLINE:** Every abbreviation must be expanded
+on its FIRST USE in the manuscript. The Abstract is typically the
+first section a reader encounters, so expand abbreviations even if
+they were expanded in the body.
+
+**ECHO REPETITION CAP:** The Abstract is one of the two permitted
+locations for a specific quantitative finding (the other is
+Results). Each number in the Abstract must match Results exactly,
+but do NOT repeat numbers that don't appear in the Results
+Findings Summary — the Abstract draws from the summary, not from
+subsection detail.
+
 ## Anti-patterns
 
 **Kitchen-sink Results subsection (the #1 failure mode).**
