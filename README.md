@@ -18,8 +18,9 @@ deployment. Sister skills:
 
 ## Status
 
-**v0.7.1** — production pipeline. 720 tests. Live-tested on two
-BERDL projects (functional_dark_matter, genotype_to_phenotype_enigma).
+**v0.7.2** — production pipeline. 801 tests. Live-tested on three
+BERDL projects (functional_dark_matter, genotype_to_phenotype_enigma,
+ibd_phage_targeting).
 
 ## What it does
 

@@ -8,25 +8,26 @@ produced this draft is documented at
 https://github.com/ArkinLaboratory/beril-paper-writer-skill (version
 {paper_writer_version}).
 
-## Data sources
+## Data sources — BERDL / K-BERDL
 
-This analysis used data from the following BERDL databases, accessed
-via K-BERDL:
+{kberdl_block}
 
-{kberdl_databases_block}
+## Data sources — external / public
 
-## Public accessions and external data
+{external_block}
 
-{public_accessions_block}
+## Derived data artifacts
+
+{derived_block}
+
+## Data accessions
+
+{accessions_block}
 
 ## Restricted access
 
-{restricted_access_block}
+{restricted_block}
 
 ## Methods reproducibility pointer
 
-For the software environment (package versions, statistical-test
-implementations) used to produce these analyses, see Methods §"Software
-and Versions" and §"Computational Environment". A machine-readable
-manifest is at {requirements_file_path} (extracted from notebook imports
-+ requirements.txt / pyproject.toml / environment.yml if present).
+{reproducibility_block}

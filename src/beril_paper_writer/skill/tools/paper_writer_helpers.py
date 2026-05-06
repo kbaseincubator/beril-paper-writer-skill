@@ -1944,82 +1944,195 @@ def cmd_score_caption(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------------------
 # Data availability extraction (Item 5.1)
+#
+# v0.7.2 rewrite: extraction now reads structured tables from REPORT.md
+# (## Data / ### Sources and ### Generated data) instead of regex-matching
+# against methods_provenance.md or curated _KNOWN_DATA_SOURCES patterns.
+# This eliminates three bugs from the ibd_phage_targeting live test:
+#   1. Confabulated K-BERDL databases from filename.ext matches
+#   2. PMIDs listed as data accessions (they're bibliography)
+#   3. Incidental pattern matches (e.g. STRING) from curated list
 # ---------------------------------------------------------------------------
 
 
-# Curated list of public data-source names + their accession patterns.
-# Matched against RESEARCH_PLAN.md / REPORT.md text. Order matters for
-# display; entries earlier in the list surface first when present.
-_KNOWN_DATA_SOURCES = [
-    {
-        "name": "Fitness Browser (RB-TnSeq)",
-        "patterns": [r"Fitness\s+Browser", r"\bFB\b(?!\w)", r"RB-TnSeq", r"Price\s*(?:et\s*al\.?)?\s*\(?20(?:18|24)\)?"],
-        "url": "https://fit.genomics.lbl.gov/",
-        "citation": "Price et al. (2018) Nature 557:503-509",
-    },
-    {
-        "name": "GTDB",
-        "patterns": [r"GTDB\s*(?:r\d+)?", r"Genome\s+Taxonomy\s+Database"],
-        "url": "https://gtdb.ecogenomic.org/",
-        "citation": "Parks et al. (2022) Nucleic Acids Research",
-    },
-    {
-        "name": "NMDC",
-        "patterns": [r"\bNMDC\b", r"National\s+Microbiome\s+Data\s+Collaborative"],
-        "url": "https://microbiomedata.org/",
-        "citation": "Wood-Charlson et al. (2020) Nature Reviews Microbiology",
-    },
-    {
-        "name": "NCBI BioSample",
-        "patterns": [r"NCBI\s+BioSample", r"BioSample"],
-        "url": "https://www.ncbi.nlm.nih.gov/biosample/",
-        "citation": "Barrett et al. (2012) Nucleic Acids Research",
-    },
-    {
-        "name": "AlphaEarth embeddings",
-        "patterns": [r"AlphaEarth", r"alphaearth"],
-        "url": "https://github.com/google-deepmind/alphaearth",
-        "citation": "see project documentation",
-    },
-    {
-        "name": "PaperBLAST",
-        "patterns": [r"PaperBLAST"],
-        "url": "https://papers.genomics.lbl.gov/",
-        "citation": "Price & Arkin (2017) mSystems",
-    },
-    {
-        "name": "GapMind",
-        "patterns": [r"GapMind"],
-        "url": "https://papers.genomics.lbl.gov/cgi-bin/gapView.cgi",
-        "citation": "Price et al. (2020) PLoS Computational Biology; (2022) mSystems",
-    },
-    {
-        "name": "eggNOG",
-        "patterns": [r"eggNOG", r"EggNOG"],
-        "url": "http://eggnog5.embl.de/",
-        "citation": "Huerta-Cepas et al. (2019) Nucleic Acids Research",
-    },
-    {
-        "name": "Bakta",
-        "patterns": [r"Bakta"],
-        "url": "https://github.com/oschwengers/bakta",
-        "citation": "Schwengers et al. (2021) Microbial Genomics",
-    },
-    {
-        "name": "STRING",
-        "patterns": [r"STRING\s*(?:v?\d+)?", r"STRING\s+v\d+"],
-        "url": "https://string-db.org/",
-        "citation": "Szklarczyk et al. (2023) Nucleic Acids Research",
-    },
-    {
-        "name": "PubMed",
-        "patterns": [r"PubMed", r"\bPMID\b"],
-        "url": "https://pubmed.ncbi.nlm.nih.gov/",
-        "citation": "—",
-    },
-]
+def _parse_markdown_table(text: str, header_marker: str) -> list[dict]:
+    """Parse a markdown table following a header line that contains
+    *header_marker* (e.g. "### Sources"). Returns a list of dicts keyed
+    by the column headers found in the table's header row.
+
+    Handles:
+    - Pipe-delimited markdown tables with header + separator rows
+    - Leading/trailing pipes and whitespace
+    - Empty cells (→ empty string)
+    - Tables that end at the next header, blank line, or EOF
+
+    Returns [] if the section or table is not found.
+    """
+    # Find the header line.
+    header_re = re.compile(
+        r"^#{1,4}\s+" + re.escape(header_marker.lstrip("# ").strip()) + r"\s*$",
+        re.MULTILINE,
+    )
+    hdr_match = header_re.search(text)
+    if not hdr_match:
+        return []
+
+    # Extract lines after the header until the next header or EOF.
+    after = text[hdr_match.end():]
+    lines: list[str] = []
+    for line in after.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#") and stripped.lstrip("#").strip():
+            break  # next section
+        lines.append(stripped)
+
+    # Find the table: first line with pipes = header row, next = separator.
+    table_lines: list[str] = []
+    col_names: list[str] = []
+    in_table = False
+    for line in lines:
+        if not in_table:
+            if "|" in line and not re.match(r"^\s*\|?\s*[-:]+", line):
+                # This is the header row.
+                col_names = [c.strip() for c in line.strip("|").split("|")]
+                in_table = True
+            continue
+        # Skip separator row (e.g. |---|---|---|)
+        if re.match(r"^\s*\|?\s*[-:|]+\s*\|?\s*$", line):
+            continue
+        # End of table on blank line or non-pipe line.
+        if not line or "|" not in line:
+            break
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        # Pad or truncate to match header count.
+        while len(cells) < len(col_names):
+            cells.append("")
+        cells = cells[:len(col_names)]
+        table_lines.append(dict(zip(col_names, cells)))
+
+    return table_lines
+
+
+def _extract_report_sources(report_text: str) -> list[dict]:
+    """Parse REPORT.md's ``## Data / ### Sources`` markdown table.
+
+    Expected columns: ``Collection | Tables used | Purpose``.
+
+    Returns: list of ``{"collection": str, "tables": str, "purpose": str}``.
+    Returns [] (fail closed) if the section or table is absent.
+    """
+    rows = _parse_markdown_table(report_text, "### Sources")
+    out: list[dict] = []
+    for row in rows:
+        collection = row.get("Collection", "").strip()
+        if not collection:
+            continue
+        out.append({
+            "collection": collection,
+            "tables": row.get("Tables used", "").strip(),
+            "purpose": row.get("Purpose", "").strip(),
+        })
+    return out
+
+
+def _extract_generated_data(report_text: str) -> list[dict]:
+    """Parse REPORT.md's ``## Data / ### Generated data`` markdown table.
+
+    Expected columns: ``File | Rows | Description``.
+
+    Returns: list of ``{"file": str, "rows": str, "description": str}``.
+    Handles row-count variants (``varies``, ``—``, integers).
+    Tolerates ``**(superseded)**`` and ``**(retracted)**`` annotations
+    in Description (preserved, not stripped — downstream cross-walk
+    decides whether to include them).
+
+    Returns [] (fail closed) if the section or table is absent.
+    """
+    rows = _parse_markdown_table(report_text, "### Generated data")
+    out: list[dict] = []
+    for row in rows:
+        filepath = row.get("File", "").strip()
+        if not filepath:
+            continue
+        out.append({
+            "file": filepath,
+            "rows": row.get("Rows", "").strip(),
+            "description": row.get("Description", "").strip(),
+        })
+    return out
+
+
+def _extract_external_sources(
+    sources: list[dict], generated_data: list[dict]
+) -> list[dict]:
+    """Derive external / public data sources from REPORT.md tables.
+
+    Identifies external sources by:
+    - Sources table rows whose Collection contains a URL (http/https)
+    - Sources table rows whose Collection matches known external database
+      names (curatedMetagenomicData, HMP2, GTDB, PhageFoundry, etc.)
+    - Generated data Description column references to external databases
+
+    Returns deduplicated list of ``{"name": str, "source": str}`` in
+    document order. ``source`` is "Sources table" or "Generated data".
+    """
+    # Known external database name patterns (case-insensitive).
+    _EXTERNAL_PATTERNS = [
+        re.compile(r"curatedMetagenomicData", re.IGNORECASE),
+        re.compile(r"\bHMP2?\b"),
+        re.compile(r"\bGTDB\b"),
+        re.compile(r"\bPhageFoundry\b", re.IGNORECASE),
+        re.compile(r"\bGaborieau\b", re.IGNORECASE),
+        re.compile(r"\bNCBI\b"),
+        re.compile(r"\bGenBank\b", re.IGNORECASE),
+        re.compile(r"\bBioProject\b", re.IGNORECASE),
+        re.compile(r"\bUniProt\b", re.IGNORECASE),
+        re.compile(r"\bPfam\b", re.IGNORECASE),
+        re.compile(r"\bCOG\b"),
+        re.compile(r"\beggNOG\b", re.IGNORECASE),
+        re.compile(r"\bPaperBLAST\b", re.IGNORECASE),
+        re.compile(r"\bGapMind\b", re.IGNORECASE),
+        re.compile(r"\bFitness\s*Browser\b", re.IGNORECASE),
+        re.compile(r"\bSTRING\b"),
+        re.compile(r"\bKEGG\b"),
+        re.compile(r"\bMetaPhlAn\b", re.IGNORECASE),
+    ]
+
+    seen_names: set[str] = set()
+    out: list[dict] = []
+
+    def _add(name: str, source: str) -> None:
+        key = name.lower()
+        if key not in seen_names:
+            seen_names.add(key)
+            out.append({"name": name, "source": source})
+
+    # Check Sources table — URL-containing or external-name collections.
+    for s in sources:
+        text = s["collection"] + " " + s.get("tables", "") + " " + s.get("purpose", "")
+        if re.search(r"https?://", text):
+            _add(s["collection"], "Sources table")
+            continue
+        for pat in _EXTERNAL_PATTERNS:
+            if pat.search(text):
+                _add(s["collection"], "Sources table")
+                break
+
+    # Check Generated data descriptions for external references.
+    for g in generated_data:
+        desc = g.get("description", "")
+        for pat in _EXTERNAL_PATTERNS:
+            m = pat.search(desc)
+            if m:
+                _add(m.group(0), "Generated data")
+
+    return out
+
 
 # Typed-accession patterns. Match against any text; collect literal IDs.
+# v0.7.2: PMID REMOVED — PMIDs are bibliography references, not data
+# accessions. A reviewer reading "accession: PMID 39188957" would
+# conclude 45 datasets were accessed when they're just citations.
 _ACCESSION_PATTERNS = [
     (re.compile(r"\bPRJ[A-Z]{2}\d+\b"), "BioProject"),
     (re.compile(r"\b(?:GSE|GSM|GPL)\d+\b"), "GEO"),
@@ -2028,67 +2141,18 @@ _ACCESSION_PATTERNS = [
     (re.compile(r"\bSAMN\d+\b"), "BioSample"),
     (re.compile(r"\b[A-Z]{2}\d{6}(?:\.\d+)?\b"), "GenBank"),
     (re.compile(r"\bDOI:\s*10\.\d{4,9}/[\w./()-]+\b", re.IGNORECASE), "DOI"),
-    (re.compile(r"\bPMID:?\s*\d+\b", re.IGNORECASE), "PMID"),
+    # curatedMetagenomicData version identifiers.
+    (re.compile(r"\bcMD\s+v\d+(?:\.\d+)*\b", re.IGNORECASE), "cMD version"),
 ]
-
-
-def _extract_kberdl_databases(methods_provenance_text: str) -> list[dict]:
-    """Walk SQL blocks under ## Spark / K-BERDL Queries; return one dict per
-    unique database (sorted) with the tables seen.
-
-    Returns: [{"database": "kescience_fitnessbrowser",
-               "tables": ["gene", "specificphenotype", ...]}, ...].
-    """
-    # Find the section. Match an H2 line that begins "Spark / K-BERDL".
-    sec_re = re.compile(
-        r"^##\s+Spark\s*/?\s*K-BERDL[^\n]*\n([\s\S]*?)(?=^##\s+|\Z)",
-        re.MULTILINE | re.IGNORECASE,
-    )
-    m = sec_re.search(methods_provenance_text)
-    body = m.group(1) if m else methods_provenance_text  # fallback: scan whole file
-
-    # FROM <db>.<table> and JOIN <db>.<table>. Database names use lowercase
-    # underscores; tables similar. Allow optional schema-style backticks.
-    qualified_re = re.compile(
-        r"\b(?:FROM|JOIN)\s+`?([a-z][a-z0-9_]+)`?\s*\.\s*`?([a-z][a-z0-9_]+)`?",
-        re.IGNORECASE,
-    )
-
-    db_to_tables: dict[str, set[str]] = {}
-    for dbm in qualified_re.finditer(body):
-        db = dbm.group(1).lower()
-        table = dbm.group(2).lower()
-        # Skip obvious aliases / non-database keywords.
-        if db in {"select", "where", "and", "or", "as", "on"}:
-            continue
-        db_to_tables.setdefault(db, set()).add(table)
-
-    return [
-        {"database": db, "tables": sorted(tables)}
-        for db, tables in sorted(db_to_tables.items())
-    ]
-
-
-def _extract_named_data_sources(text: str) -> list[dict]:
-    """Scan combined RESEARCH_PLAN + REPORT text for known data-source
-    names (curated `_KNOWN_DATA_SOURCES`). Return the matched entries
-    in display order, deduplicated.
-    """
-    found: list[dict] = []
-    for entry in _KNOWN_DATA_SOURCES:
-        for pat in entry["patterns"]:
-            if re.search(pat, text, re.IGNORECASE):
-                found.append(entry)
-                break
-    return found
 
 
 def _extract_typed_accessions(text: str) -> list[tuple[str, str]]:
     """Return (kind, accession) tuples for typed identifiers. Deduplicated
     in document order. Normalizes the accession literal: strips the
-    type-prefix when present (e.g., `PMID: 29769716` → `29769716`,
-    `DOI: 10.x/y` → `10.x/y`) so downstream display can use
-    `<kind>: <acc>` without duplication.
+    type-prefix when present (e.g., `DOI: 10.x/y` → `10.x/y`) so
+    downstream display can use `<kind>: <acc>` without duplication.
+
+    v0.7.2: PMID removed from patterns (bibliography, not data).
     """
     seen: set[tuple[str, str]] = set()
     out: list[tuple[str, str]] = []
@@ -2096,9 +2160,7 @@ def _extract_typed_accessions(text: str) -> list[tuple[str, str]]:
         for m in pat.finditer(text):
             literal = m.group(0)
             # Strip prefix tokens that are themselves the kind label.
-            if kind == "PMID":
-                literal = re.sub(r"^PMID:?\s*", "", literal, flags=re.IGNORECASE)
-            elif kind == "DOI":
+            if kind == "DOI":
                 literal = re.sub(r"^DOI:?\s*", "", literal, flags=re.IGNORECASE)
             key = (kind, literal)
             if key in seen:
@@ -2108,50 +2170,212 @@ def _extract_typed_accessions(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def _format_kberdl_block(databases: list[dict]) -> str:
-    if not databases:
+def _format_kberdl_block(sources: list[dict]) -> str:
+    """Format K-BERDL / BERDL sources from the REPORT.md Sources table.
+
+    Input: list from ``_extract_report_sources`` (already filtered by
+    the cross-walk in Tier B, or unfiltered for Tier A testing).
+
+    v0.7.2: Reads structured table data instead of regex SQL extraction.
+    """
+    if not sources:
         return (
-            "No K-BERDL queries detected in `methods_provenance.md`. "
-            "If this analysis used K-BERDL data, review provenance "
-            "extraction and fill manually before submission."
+            "[K-BERDL COLLECTIONS: TBD — no Sources table found in "
+            "REPORT.md § Data. Review REPORT.md and fill manually.]"
         )
     lines = []
-    for d in databases:
-        tables_str = ", ".join(f"`{t}`" for t in d["tables"])
-        lines.append(f"- **`{d['database']}`** — tables: {tables_str}")
+    for s in sources:
+        tables_str = s["tables"] if s["tables"] else "see Purpose"
+        purpose_str = f" ({s['purpose']})" if s["purpose"] else ""
+        lines.append(
+            f"- **`{s['collection']}`** — tables: {tables_str}{purpose_str}"
+        )
     lines.append("")
     lines.append(
         "K-BERDL is the BERDL data-lakehouse query layer "
         "(https://berdatalakehouse.github.io/kberdl-docs/); access requires "
-        "BERDL credentials. The full SQL queries are in "
-        "`methods_provenance.md` §\"Spark / K-BERDL Queries\"."
+        "BERDL credentials."
     )
     return "\n".join(lines)
 
 
-def _format_public_accessions_block(
-    sources: list[dict], accessions: list[tuple[str, str]]
-) -> str:
-    if not sources and not accessions:
+def _format_external_sources_block(external: list[dict]) -> str:
+    """Format external / public data sources block."""
+    if not external:
         return (
-            "No public accessions or named external data sources detected. "
-            "Review RESEARCH_PLAN.md and fill manually before submission "
-            "if external data was used."
+            "[EXTERNAL DATA SOURCES: TBD — no external data sources "
+            "detected in REPORT.md. Review and fill manually if "
+            "external data was used.]"
         )
-    parts: list[str] = []
-    if sources:
-        parts.append("This analysis incorporated the following publicly available data sources:")
-        parts.append("")
-        for s in sources:
-            parts.append(f"- **{s['name']}** — {s['url']}; {s['citation']}.")
-        parts.append("")
-    if accessions:
-        parts.append("Specific accessions referenced in the manuscript:")
-        parts.append("")
-        for kind, acc in accessions:
-            parts.append(f"- {kind}: `{acc}`")
-        parts.append("")
-    return "\n".join(parts).rstrip()
+    parts = [
+        "This analysis incorporated the following publicly available "
+        "data sources (identified from REPORT.md):",
+        "",
+    ]
+    for e in external:
+        parts.append(f"- **{e['name']}** (from {e['source']})")
+    return "\n".join(parts)
+
+
+def _format_derived_data_block(generated: list[dict]) -> str:
+    """Format derived data artifacts block from Generated data table."""
+    if not generated:
+        return (
+            "[DERIVED DATA: TBD — no Generated data table found in "
+            "REPORT.md § Data. Review and fill manually.]"
+        )
+    parts = [
+        "Key derived data artifacts produced by the analysis pipeline:",
+        "",
+    ]
+    for g in generated:
+        rows_str = f" ({g['rows']} rows)" if g["rows"] and g["rows"] != "—" else ""
+        desc = g["description"]
+        parts.append(f"- `{g['file']}`{rows_str} — {desc}")
+    return "\n".join(parts)
+
+
+def _format_accessions_block(accessions: list[tuple[str, str]]) -> str:
+    """Format typed data accessions (BioProject, SRA, GEO, etc.).
+
+    v0.7.2: PMIDs no longer appear here (removed from _ACCESSION_PATTERNS).
+    """
+    if not accessions:
+        return (
+            "[DATA ACCESSIONS: TBD — no typed data accessions "
+            "(BioProject, SRA, GEO, BioSample, GenBank) detected. "
+            "Review and fill manually before submission.]"
+        )
+    parts = [
+        "Specific data accessions referenced in the manuscript:",
+        "",
+    ]
+    for kind, acc in accessions:
+        parts.append(f"- {kind}: `{acc}`")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Data availability cross-walk (v0.7.2 Tier B)
+#
+# The REPORT.md Sources table lists ALL collections the *project* touches.
+# The paper uses a subset. The cross-walk determines which notebooks the
+# manuscript actually cites, then filters Sources and Generated data to
+# only include rows referencing those notebooks.
+# ---------------------------------------------------------------------------
+
+# Regex for notebook identifiers: NB00, NB01b, NB04b–e, NB12+, etc.
+# The lookahead handles: word boundary, dash/en-dash, underscore (NB03_name),
+# plus sign (NB12+), comma, period, paren, or end of string.
+_NB_RE = re.compile(r"\bNB(\d{2,3})([a-z]?)(?=[_\b\s,.);\-–+/]|$)")
+
+
+def _extract_cited_notebooks(methods_text: str) -> set[str]:
+    """Extract notebook IDs referenced in the manuscript Methods section.
+
+    Finds patterns like:
+    - ``notebooks/NB13_phagefoundry_predictions...``
+    - ``NB04b–e``  (expands range: NB04b, NB04c, NB04d, NB04e)
+    - ``NB05``
+    - ``NB12+`` (treated as NB12)
+
+    Returns a set of canonical IDs: ``{"NB00", "NB01", "NB04", ...}``.
+    The suffix letter is stripped for matching purposes (NB04b → NB04)
+    since the Sources table references at the NB-number level.
+    """
+    ids: set[str] = set()
+
+    # Handle range patterns first: NB04b–e, NB04b-e
+    range_re = re.compile(
+        r"\bNB(\d{2,3})([a-z])\s*[–\-]\s*([a-z])\b"
+    )
+    for m in range_re.finditer(methods_text):
+        nb_num = m.group(1)
+        ids.add(f"NB{nb_num}")
+
+    # Handle all standalone NB references.
+    for m in _NB_RE.finditer(methods_text):
+        nb_num = m.group(1)
+        ids.add(f"NB{nb_num}")
+
+    # Also catch full path references: notebooks/NB13_something...
+    path_re = re.compile(r"notebooks/NB(\d{2,3})")
+    for m in path_re.finditer(methods_text):
+        nb_num = m.group(1)
+        ids.add(f"NB{nb_num}")
+
+    return ids
+
+
+def _crosswalk_sources(
+    sources: list[dict], cited_nbs: set[str]
+) -> list[dict]:
+    """Filter Sources table to rows referenced by the manuscript.
+
+    Include a row if:
+    - Its Purpose mentions a cited notebook (e.g. "NB12–NB13" matches
+      if NB12 or NB13 is cited), OR
+    - Its Purpose does NOT start with "queued" (non-queued = active)
+
+    Exclude rows whose Purpose starts with "queued for NB..." where
+    the target notebook is NOT in the cited set.
+    """
+    out: list[dict] = []
+    queued_re = re.compile(r"queued\s+for\s+NB(\d{2,3})", re.IGNORECASE)
+
+    for s in sources:
+        purpose = s.get("purpose", "")
+
+        # Check if this is a "queued for NB..." row.
+        queued_match = queued_re.search(purpose)
+        if queued_match:
+            target_nb = f"NB{queued_match.group(1)}"
+            if target_nb not in cited_nbs:
+                continue  # Exclude: queued for uncited notebook.
+
+        # Check if any cited notebook is mentioned in Purpose.
+        purpose_nbs = {f"NB{m.group(1)}" for m in _NB_RE.finditer(purpose)}
+        if purpose_nbs and not purpose_nbs.intersection(cited_nbs):
+            # Purpose references specific notebooks, none of which are cited.
+            # Still include if it's not a "queued" row (conservative).
+            if queued_match:
+                continue
+
+        out.append(s)
+    return out
+
+
+def _crosswalk_generated_data(
+    generated: list[dict], cited_nbs: set[str]
+) -> list[dict]:
+    """Filter Generated data to rows referenced by cited notebooks.
+
+    Include a row if its File path or Description references a cited
+    notebook. Exclude retracted/superseded rows entirely — the paper
+    should not cite retracted intermediates in Data Availability.
+    """
+    retracted_re = re.compile(
+        r"\*\*\((?:retracted|superseded)\)\*\*", re.IGNORECASE
+    )
+
+    out: list[dict] = []
+    for g in generated:
+        # Skip retracted/superseded entries.
+        if retracted_re.search(g.get("description", "")):
+            continue
+
+        # Check file path and description for cited notebook references.
+        combined = g.get("file", "") + " " + g.get("description", "")
+        row_nbs = {f"NB{m.group(1)}" for m in _NB_RE.finditer(combined)}
+        # Also check for nb\d+ in file paths (e.g. data/nb05_tier_a_scored.tsv).
+        path_nb_re = re.compile(r"\bnb(\d{2,3})", re.IGNORECASE)
+        for m in path_nb_re.finditer(combined):
+            row_nbs.add(f"NB{m.group(1)}")
+
+        if row_nbs.intersection(cited_nbs):
+            out.append(g)
+
+    return out
 
 
 def cmd_cumulative_cost(args: argparse.Namespace) -> int:
@@ -3618,34 +3842,68 @@ def cmd_compute_caption_stats(args: argparse.Namespace) -> int:
 
 
 def cmd_extract_data_availability(args: argparse.Namespace) -> int:
-    """Read methods_provenance.md + RESEARCH_PLAN.md + REPORT.md from the
-    project; emit three template-fill blocks (kberdl_databases_block,
-    public_accessions_block, restricted_access_block) as JSON to stdout.
+    """Read REPORT.md (primary) + RESEARCH_PLAN.md from the project;
+    emit template-fill blocks as JSON to stdout.
+
+    v0.7.2 rewrite: extraction now reads structured tables from REPORT.md
+    ``## Data`` section instead of regex-matching methods_provenance.md.
+    Emits six template blocks:
+      - kberdl_block (from ### Sources table)
+      - external_block (external sources derived from Sources + Generated)
+      - derived_block (from ### Generated data table)
+      - accessions_block (typed accessions from REPORT text, no PMIDs)
+      - restricted_block (defensive default)
+      - reproducibility_block (pointer to Methods)
 
     The orchestrator's bash phase consumes the JSON and passes the values
-    into `fill-template`. Falls back to [TBD] markers if extraction
+    into ``fill-template``. Falls back to [TBD] markers if extraction
     surfaces nothing — never blocks the pipeline.
     """
     draft_dir = Path(args.draft_dir).expanduser().resolve()
     project_root = Path(args.project_root).expanduser().resolve()
 
-    methods_path = draft_dir / "methods_provenance.md"
-    research_plan_path = project_root / "RESEARCH_PLAN.md"
     report_path = project_root / "REPORT.md"
+    research_plan_path = project_root / "RESEARCH_PLAN.md"
 
-    methods_text = methods_path.read_text(encoding="utf-8") if methods_path.is_file() else ""
-    research_text = research_plan_path.read_text(encoding="utf-8") if research_plan_path.is_file() else ""
     report_text = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
+    research_text = research_plan_path.read_text(encoding="utf-8") if research_plan_path.is_file() else ""
 
-    # K-BERDL databases — from methods_provenance.md SQL.
-    databases = _extract_kberdl_databases(methods_text)
-    kberdl_block = _format_kberdl_block(databases)
+    # K-BERDL / BERDL collections — from REPORT.md ### Sources table.
+    sources_all = _extract_report_sources(report_text)
 
-    # Public accessions — from RESEARCH_PLAN.md + REPORT.md combined.
-    combined = research_text + "\n\n" + report_text
-    sources = _extract_named_data_sources(combined)
+    # Generated data — from REPORT.md ### Generated data table.
+    generated_all = _extract_generated_data(report_text)
+
+    # Cross-walk: if methods_path is provided, filter Sources and
+    # Generated data to only include rows cited by the manuscript.
+    methods_path = None
+    if hasattr(args, "methods_path") and args.methods_path:
+        methods_path = Path(args.methods_path).expanduser().resolve()
+
+    cited_nbs: set[str] = set()
+    if methods_path and methods_path.is_file():
+        methods_text = methods_path.read_text(encoding="utf-8")
+        cited_nbs = _extract_cited_notebooks(methods_text)
+        sources = _crosswalk_sources(sources_all, cited_nbs)
+        generated = _crosswalk_generated_data(generated_all, cited_nbs)
+    else:
+        # No cross-walk — include everything.
+        sources = sources_all
+        generated = generated_all
+
+    kberdl_block = _format_kberdl_block(sources)
+    derived_block = _format_derived_data_block(generated)
+
+    # External / public data sources — derived from (filtered) Sources
+    # table and Generated data descriptions.
+    external = _extract_external_sources(sources, generated)
+    external_block = _format_external_sources_block(external)
+
+    # Typed accessions — from REPORT.md + RESEARCH_PLAN.md combined.
+    # v0.7.2: PMIDs removed from patterns (bibliography, not data).
+    combined = report_text + "\n\n" + research_text
     accessions = _extract_typed_accessions(combined)
-    public_block = _format_public_accessions_block(sources, accessions)
+    accessions_block = _format_accessions_block(accessions)
 
     # Restricted access — defensive default.
     restricted_block = (
@@ -3654,28 +3912,33 @@ def cmd_extract_data_availability(args: argparse.Namespace) -> int:
         "used. Confirm before submission."
     )
 
-    # Fall back to [TBD] markers ONLY if BOTH extractors return nothing
-    # (defensive — covers the case where input files are missing).
-    if not databases and not sources and not accessions:
-        kberdl_block = (
-            "[K-BERDL DATABASES: TBD — extraction surfaced no databases; "
-            "review methods_provenance.md and fill manually.]"
-        )
-        public_block = (
-            "[PUBLIC ACCESSIONS: TBD — extraction surfaced no accessions; "
-            "review RESEARCH_PLAN.md and fill manually.]"
-        )
+    # Methods reproducibility pointer.
+    reproducibility_block = (
+        "For the software environment (package versions, "
+        "statistical-test implementations) used to produce these "
+        "analyses, see Methods §\"Software and Versions\" and "
+        "§\"Computational Environment\"."
+    )
 
     out = {
-        "kberdl_databases_block": kberdl_block,
-        "public_accessions_block": public_block,
-        "restricted_access_block": restricted_block,
+        "kberdl_block": kberdl_block,
+        "external_block": external_block,
+        "derived_block": derived_block,
+        "accessions_block": accessions_block,
+        "restricted_block": restricted_block,
+        "reproducibility_block": reproducibility_block,
         "diagnostics": {
-            "n_kberdl_databases": len(databases),
-            "n_named_sources": len(sources),
+            "n_report_sources_total": len(sources_all),
+            "n_report_sources_filtered": len(sources),
+            "n_generated_data_total": len(generated_all),
+            "n_generated_data_filtered": len(generated),
+            "n_external_sources": len(external),
             "n_typed_accessions": len(accessions),
-            "kberdl_databases": [d["database"] for d in databases],
-            "named_sources": [s["name"] for s in sources],
+            "n_cited_notebooks": len(cited_nbs),
+            "cited_notebooks": sorted(cited_nbs),
+            "report_sources": [s["collection"] for s in sources],
+            "external_sources": [e["name"] for e in external],
+            "crosswalk_applied": bool(cited_nbs),
         },
     }
     print(json.dumps(out, indent=2))
@@ -4323,6 +4586,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_ed.add_argument("draft_dir")
     p_ed.add_argument("--project-root", required=True,
                       help="Path to <projects>/<project_id>/ (where RESEARCH_PLAN.md and REPORT.md live).")
+    p_ed.add_argument("--methods-path", default=None,
+                      help="Path to drafted 01_methods.md (enables cross-walk filter). "
+                           "If omitted, no cross-walk is applied — all Sources/Generated data are included.")
     p_ed.set_defaults(func=cmd_extract_data_availability)
 
     # cumulative-cost (Item 5.2) — sum estimated_cost_usd across all

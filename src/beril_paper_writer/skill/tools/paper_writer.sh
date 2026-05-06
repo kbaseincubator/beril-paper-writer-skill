@@ -1217,55 +1217,66 @@ phase_data_avail() {
     local pw_version
     pw_version="$("$PYTHON_BIN" -c 'from beril_paper_writer import __version__; print(__version__)' 2>/dev/null || echo '0.1.0')"
 
-    # v0.2: extract K-BERDL databases + public accessions from project
-    # artifacts; falls back to [TBD] markers if extraction surfaces nothing
-    # (defensive — never blocks the pipeline).
+    # v0.7.2: extract data sources from REPORT.md structured tables
+    # (### Sources, ### Generated data) with cross-walk filter against
+    # cited notebooks in 01_methods.md. Falls back to [TBD] markers if
+    # extraction surfaces nothing (defensive — never blocks the pipeline).
     local extraction_json="$draft_dir/audit/data_availability_extraction.json"
+    local methods_arg=""
+    if [[ -f "$draft_dir/01_methods.md" ]]; then
+        methods_arg="--methods-path $draft_dir/01_methods.md"
+    fi
+    # shellcheck disable=SC2086
     "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" extract-data-availability \
-        "$draft_dir" --project-root "$project_root" \
+        "$draft_dir" --project-root "$project_root" $methods_arg \
         > "$extraction_json" 2> "$draft_dir/audit/data_availability_extraction.log" \
         || log_warn "extract-data-availability exited non-zero; falling back to [TBD] markers"
 
-    # Pull the three blocks out of the JSON for fill-template. Use
-    # --<key>-json file-passing to avoid bash word-splitting hazards
-    # on multi-line block content.
-    local kberdl_block_path="$draft_dir/audit/.data_avail_kberdl.txt"
-    local public_block_path="$draft_dir/audit/.data_avail_public.txt"
-    local restricted_block_path="$draft_dir/audit/.data_avail_restricted.txt"
+    # Pull the six blocks out of the JSON for fill-template. Use
+    # file-passing to avoid bash word-splitting hazards on multi-line
+    # block content.
+    local block_dir="$draft_dir/audit"
+    local block_keys="kberdl_block external_block derived_block accessions_block restricted_block reproducibility_block"
 
-    "$PYTHON_BIN" - <<PYEOF "$extraction_json" "$kberdl_block_path" "$public_block_path" "$restricted_block_path"
-import json, sys
-src, kp, pp, rp = sys.argv[1:]
+    "$PYTHON_BIN" - <<PYEOF "$extraction_json" "$block_dir"
+import json, sys, os
+src, block_dir = sys.argv[1], sys.argv[2]
+keys = ["kberdl_block", "external_block", "derived_block",
+        "accessions_block", "restricted_block", "reproducibility_block"]
 try:
     with open(src) as f:
         d = json.load(f)
-    kberdl = d.get("kberdl_databases_block", "")
-    public = d.get("public_accessions_block", "")
-    restricted = d.get("restricted_access_block", "")
     diag = d.get("diagnostics", {})
+    crosswalk = "yes" if diag.get("crosswalk_applied") else "no"
     print(
-        f"[data-availability] {diag.get('n_kberdl_databases', 0)} K-BERDL database(s); "
-        f"{diag.get('n_named_sources', 0)} named source(s); "
-        f"{diag.get('n_typed_accessions', 0)} typed accession(s)",
+        f"[data-availability] {diag.get('n_report_sources_filtered', '?')}/"
+        f"{diag.get('n_report_sources_total', '?')} source(s); "
+        f"{diag.get('n_generated_data_filtered', '?')}/"
+        f"{diag.get('n_generated_data_total', '?')} generated file(s); "
+        f"{diag.get('n_external_sources', 0)} external; "
+        f"{diag.get('n_typed_accessions', 0)} accession(s); "
+        f"crosswalk={crosswalk} ({diag.get('n_cited_notebooks', 0)} NBs)",
         file=sys.stderr,
     )
+    for key in keys:
+        val = d.get(key, f"[{key.upper()}: TBD — extraction failed]")
+        with open(os.path.join(block_dir, f".data_avail_{key}.txt"), "w") as f:
+            f.write(val)
 except Exception as e:
     print(f"[data-availability] extraction JSON parse failed: {e}; using TBD fallback", file=sys.stderr)
-    kberdl = "[K-BERDL DATABASES: TBD — extraction failed; review methods_provenance.md and fill manually before submission.]"
-    public = "[PUBLIC ACCESSIONS: TBD — extraction failed; review RESEARCH_PLAN.md and fill manually before submission.]"
-    restricted = "[RESTRICTED ACCESS: TBD — extraction failed; default assumption is 'all publicly available' but confirm before submission.]"
-with open(kp, "w", encoding="utf-8") as f:
-    f.write(kberdl)
-with open(pp, "w", encoding="utf-8") as f:
-    f.write(public)
-with open(rp, "w", encoding="utf-8") as f:
-    f.write(restricted)
+    for key in keys:
+        with open(os.path.join(block_dir, f".data_avail_{key}.txt"), "w") as f:
+            f.write(f"[{key.upper()}: TBD — extraction failed; review REPORT.md and fill manually.]")
 PYEOF
 
-    local kberdl_block public_block restricted_block
-    kberdl_block="$(cat "$kberdl_block_path")"
-    public_block="$(cat "$public_block_path")"
-    restricted_block="$(cat "$restricted_block_path")"
+    # Read each block from its temp file.
+    local kberdl_block external_block derived_block accessions_block restricted_block reproducibility_block
+    kberdl_block="$(cat "$block_dir/.data_avail_kberdl_block.txt")"
+    external_block="$(cat "$block_dir/.data_avail_external_block.txt")"
+    derived_block="$(cat "$block_dir/.data_avail_derived_block.txt")"
+    accessions_block="$(cat "$block_dir/.data_avail_accessions_block.txt")"
+    restricted_block="$(cat "$block_dir/.data_avail_restricted_block.txt")"
+    reproducibility_block="$(cat "$block_dir/.data_avail_reproducibility_block.txt")"
 
     "$PYTHON_BIN" "$TOOLS_DIR/paper_writer_helpers.py" fill-template \
         "$REFERENCES_DIR/data_availability_template.md" \
@@ -1273,16 +1284,46 @@ PYEOF
         --var code_repo_url="[CODE REPO: TBD — fill before submission]" \
         --var code_repo_ref="HEAD" \
         --var paper_writer_version="$pw_version" \
-        --var kberdl_databases_block="$kberdl_block" \
-        --var public_accessions_block="$public_block" \
-        --var restricted_access_block="$restricted_block" \
-        --var requirements_file_path="requirements.txt" \
+        --var kberdl_block="$kberdl_block" \
+        --var external_block="$external_block" \
+        --var derived_block="$derived_block" \
+        --var accessions_block="$accessions_block" \
+        --var restricted_block="$restricted_block" \
+        --var reproducibility_block="$reproducibility_block" \
         > /dev/null
 
     # Cleanup tempfiles on success.
-    rm -f "$kberdl_block_path" "$public_block_path" "$restricted_block_path"
+    rm -f "$block_dir"/.data_avail_*.txt
 
-    log_ok "data_avail phase complete (BERDL-specific extraction landed v0.2)"
+    log_ok "data_avail phase complete (v0.7.2 REPORT.md extraction + cross-walk)"
+}
+
+# ==============================================================================
+# Phase: check_data_availability — advisory post-checker (v0.7.2)
+# ==============================================================================
+
+phase_check_data_availability() {
+    local project_root="$1"
+    local draft_dir="$2"
+
+    local target="$draft_dir/07_data_availability.md"
+    if [[ ! -f "$target" ]]; then
+        return 0  # Nothing to check.
+    fi
+
+    log_step "check_data_availability (advisory)"
+    local report_arg=""
+    if [[ -f "$project_root/REPORT.md" ]]; then
+        report_arg="--report $project_root/REPORT.md"
+    fi
+    # shellcheck disable=SC2086
+    "$PYTHON_BIN" "$TOOLS_DIR/check_data_availability.py" \
+        "$draft_dir" $report_arg \
+        2>&1 | while IFS= read -r line; do
+            log_step "  $line"
+        done
+    # Advisory — always succeeds.
+    return 0
 }
 
 # ==============================================================================
@@ -3250,6 +3291,7 @@ main() {
                         || halt_with "$draft_dir" "reframing repair dispatch failed; inspect audit/reframing_repair_summary.txt"
                     phase_data_avail    "$project_root" "$draft_dir" "$project_id" \
                         || halt_with "$draft_dir" "data_availability template fill failed (orchestrator-side, no LLM); inspect tools/paper_writer_helpers.py"
+                    phase_check_data_availability "$project_root" "$draft_dir"
                     phase_finalize_citations "$draft_dir" \
                         || halt_with "$draft_dir" "finalize_citations failed; inspect audit/finalize_citations.log"
                     phase_check_figures_manifest "$draft_dir"
