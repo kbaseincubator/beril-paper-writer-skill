@@ -22,7 +22,7 @@ Per SPEC_v0_8 §4.6 + DECISIONS.md D-034 Q2:
 
 Pipeline:
 
-  1. Deterministic regex extraction (THIS conversation: B1.a + B1.b):
+  1. Deterministic regex extraction (B1.a + B1.b):
        - Six pattern classes (percentages, ratios with units, p-values,
          CIs, n-counts, metrics — AUC/R²/RMSE/MAE).
        - Sentence segmentation with carve-outs for decimals, common
@@ -30,20 +30,37 @@ Pipeline:
          paragraph breaks.
        - One candidate row per sentence containing ≥1 match. Multi-
          numeric sentences collapse to ONE candidate marked
-         notes="unresolved" (LLM at B1.c demarcates them).
+         notes="unresolved".
        - Effect-size / CI / p-value flags are aggregated PER SENTENCE
          from regex class membership. Tool-emitted, not LLM-emitted —
          per feedback_llm_arithmetic_unreliable, deterministic post-
          checks beat LLM self-counts.
 
-  2. LLM demarcation pass (NEXT conversation: B1.c — NOT in this code):
+  2. LLM demarcation pass (B1.c):
        - Haiku-4.5 over `unresolved` candidates only.
-       - Splits multi-numeric sentences into distinct claim_ids; assigns
-         source_notebook+cell from methods_provenance.md;
+       - Splits multi-numeric sentences into distinct claim_ids;
+         assigns source_notebook+cell from methods_provenance.md;
          cross-links to figures/tables when applicable.
-       - Cost ceiling $0.10/run (SPEC §4.6).
+       - Cost ceiling $0.10/run (SPEC §4.6); soft warning, not a hard
+         halt — the orchestrator's circuit-breaker handles cumulative
+         caps.
+       - The LLM seam is monkeypatchable via the module-level
+         `demarcator_llm_call` reference.
+       - One input candidate may produce 1..N output rows; each output
+         row's claim_text is a substring of the source sentence.
+       - Per-row flags are RECOMPUTED from each demarcated claim_text
+         via the same deterministic regex sweep — not inherited from
+         the original sentence.
 
-  3. Validator + idempotency cache (NEXT-NEXT — B1.d).
+  3. Validator + idempotency cache (B1.d):
+       - Validator: claim_text substring of input sentence; source_notebook
+         substring of methods_provenance.md; source_cell shape `^\\d+$`;
+         figure_or_table empty or substring of figures/tables inventory.
+         Coverage: every input candidate has ≥1 row.
+       - Cache: SHA-256 over six-tuple (report_sha, methods_sha,
+         figures_sha, tables_sha, prompt_sha, parser_VERSION).
+         Lives at <output-dir>/audit/claim_inventory_cache.json.
+         Re-run is byte-stable on unchanged inputs.
 
 I/O contract (this milestone):
 
@@ -66,15 +83,17 @@ I/O contract (this milestone):
 Exit codes:
   0 — success (TSV written; inventory size may be zero).
   1 — usage error (--help, missing required flag).
-  2 — input parse error (a required file is missing or empty).
-  3 — LLM call failure. In this milestone the LLM seam raises
-      LLMNotImplemented; with --no-llm not set AND any unresolved
-      (multi-numeric) candidates exist, main() maps the stub to
-      exit 3 with a clear message ("pass --no-llm for the
-      deterministic-only path"). Once B1.c lands, this becomes a
-      real subprocess error code.
-  4 — validator rejection of LLM output. Lands when B1.d's
-      validator does. Reserved here.
+  2 — input parse error (a required file is missing or unreadable).
+  3 — LLM call failure (subprocess crash, JSON unparseable after lenient
+      repair, transport error). With --no-llm set, the LLM seam is
+      never reached and exit 3 is impossible.
+  4 — validator rejection of LLM output: missing input coverage,
+      non-substring claim_text, fabricated source_notebook, malformed
+      source_cell, ungrounded figure_or_table. The LLM was called and
+      billed; the audit JSONL line records the cost. Re-run after
+      re-reading the prompt; if the validator keeps rejecting, the
+      prompt needs a contract update (bump prompt version → cache
+      invalidates).
 
 Audit JSONL line schema (one line per invocation, appended to
 <output-dir>/audit/phase0.jsonl):
@@ -82,7 +101,7 @@ Audit JSONL line schema (one line per invocation, appended to
   {
     "timestamp": "2026-05-07T14:23:01Z",
     "tool": "claim_inventory",
-    "version": "0.8.0-m1-B1.ab",
+    "version": "0.8.0-m1-B1.abcd",
     "inputs": {
       "report": "<sha256>",
       "methods_provenance": "<sha256>",
@@ -91,11 +110,23 @@ Audit JSONL line schema (one line per invocation, appended to
     },
     "output_path": "<absolute path to claim_inventory.tsv>",
     "inventory_size": 12,
-    "unresolved_count": 3,
-    "cost_usd": 0.0,
+    "unresolved_count": 0,
+    "cost_usd": 0.0234,
     "cache_hit": false,
     "exit_status": 0
   }
+
+Idempotency cache (B1.d):
+
+  <output-dir>/audit/claim_inventory_cache.json — JSON map of
+  cache_key (hex SHA-256 over the six-tuple report_sha +
+  methods_provenance_sha + figures_inventory_sha + tables_inventory_sha
+  + prompt_sha + parser_VERSION) → cached payload. On hit, the LLM is
+  skipped, demarcations are re-validated against the current inputs,
+  and the same expanded TSV is re-emitted byte-identical. The audit
+  JSONL still appends with `cache_hit: true` so reruns stay observable
+  (per SPEC §4.7). Any input SHA change OR prompt-file change OR
+  parser_VERSION bump invalidates the cache.
 
 Discipline notes baked into this module (per auto-memory):
 
@@ -130,20 +161,24 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 # Module version. Distinct from package version because audit consumers
 # may want to track precisely which sub-milestone wrote a given line.
 # Bump on contract-affecting changes (new audit fields, schema changes).
-# B1.a + B1.b lands as "0.8.0-m1-B1.ab"; B1.c bump to "B1.abc"; B1.d to
-# "B1.abcd"; M1 close lands as "0.8.0-m1".
-VERSION = "0.8.0-m1-B1.ab"
+# B1.a + B1.b shipped as "0.8.0-m1-B1.ab"; B1.c + B1.d (this commit)
+# bumps to "B1.abcd". M1 close will land as "0.8.0-m1" once Tier C/D/E
+# wrap.
+VERSION = "0.8.0-m1-B1.abcd"
 
 
 # ---------------------------------------------------------------------------
@@ -826,40 +861,776 @@ def lenient_json_load(text: str, *, source: str = "<json>") -> object:
 
 
 # ---------------------------------------------------------------------------
-# LLM seam stub (B1.c lands in a follow-up conversation)
+# LLM demarcation seam (B1.c) + validator (B1.d)
+# ---------------------------------------------------------------------------
+#
+# Symmetric to discrepancy_register's A1.c/A1.d split. B1.c is the LLM
+# call surface (subprocess wrapper + prompt assembly + response parse).
+# B1.d is the post-LLM validator + idempotency cache.
+
+# Resolve the prompt path relative to this module so the runtime SHA is
+# stable across invocations. The prompt SHA is one of the six cache-key
+# components — bumping the prompt invalidates cache entries automatically.
+_MODULE_DIR = Path(__file__).resolve().parent
+_SKILL_DIR = _MODULE_DIR.parent
+_PROMPT_PATH = _SKILL_DIR / "prompts" / "claim_demarcate.v1.md"
+
+
+# Cost ceiling per SPEC §4.6. Soft warning, not a hard halt — the audit
+# line records the actual spend; the orchestrator decides escalation.
+# Hard halts belong in the bash-level cost circuit-breaker
+# (paper_writer.sh's MAX_COST_USD), not in this individual tool.
+_DEMARCATOR_COST_CEILING_USD = 0.10
+
+
+# LLM model alias (Haiku 4.5 per SPEC §4.6 cost target). Public for
+# CLI override and test monkeypatch.
+DEFAULT_DEMARCATOR_MODEL = "claude-haiku-4-5-20251001"
+
+
+# Soft cap on context texts inlined into the user prompt. Prevents a
+# malformed-fixture run from passing megabytes of provenance to the
+# LLM. ~12K chars is roughly 3K tokens — fits inside the SPEC §4.6
+# 5K-token user-prompt budget alongside the candidate sentences.
+# When the cap fires, the head + tail are kept and a marker line in the
+# middle records the truncation; the LLM still sees enough surface to
+# ground notebook + figure cites.
+_CONTEXT_CHAR_CAP = 12000
+
+
+class LLMCallError(RuntimeError):
+    """Subprocess crashed, JSON unparseable, response body wrong shape.
+
+    Caller maps to exit code 3. The validator distinguishes call-shape
+    failure (this exception → retry the LLM) from schema-content
+    failure (ValidationError → re-read the prompt or candidate set).
+    """
+
+
+class ValidationError(RuntimeError):
+    """The LLM produced syntactically-valid JSON but the content
+    violated the schema (out-of-bounds candidate_index, missing input
+    coverage, non-substring claim_text, fabricated notebook cite,
+    malformed source_cell, ungrounded figure_or_table). Caller maps to
+    exit code 4.
+
+    Carries a `.diagnostics` dict so the audit line and stderr message
+    can name the specific candidate and field that failed.
+    """
+    def __init__(self, message: str, diagnostics: Optional[dict] = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+@dataclass
+class DemarcatorEntry:
+    """One LLM-emitted demarcated claim — pre-validation.
+
+    Public so tests can construct fakes directly. `figure_or_table` may
+    be empty string; everything else must be non-empty per the prompt
+    contract (validator enforces).
+    """
+    input_candidate_index: int
+    claim_text: str
+    source_notebook: str
+    source_cell: str
+    figure_or_table: str
+    severity_justification: str
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+# Type alias for the LLM-call seam — system prompt, user prompt, model →
+# (response_text, cost_usd). Tests replace this with a canned-response
+# fake; the real implementation calls `claude -p --output-format json`.
+DemarcatorLLMCall = Callable[[str, str, str], tuple[str, float]]
+
+
+def _invoke_demarcator_llm_subprocess(
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+) -> tuple[str, float]:
+    """Default LLM seam: subprocess to `claude -p`. Returns
+    (response_text, cost_usd).
+
+    Mirrors discrepancy_register._invoke_classifier_llm_subprocess
+    line-for-line so any envelope-shape change can be applied
+    consistently across both Phase-0 tools.
+
+    Uses `--output-format json` so we can capture cost from the
+    envelope's `total_cost_usd` field rather than parse a stream-json
+    event log. The CLI is invoked with `CLAUDECODE` removed from env
+    to detach from any inherited Claude Code session env (matches the
+    convention in paper_writer.sh and adversarial_review.sh).
+
+    No `--allowedTools` grant — this prompt produces inline JSON, not a
+    file write; the LLM has no need for filesystem tools and granting
+    them invites a stochastic Write-tool detour.
+
+    Raises LLMCallError on subprocess failure or unparseable envelope.
+    """
+    if shutil.which("claude") is None:
+        raise LLMCallError(
+            "'claude' CLI not found on PATH; cannot invoke LLM "
+            "demarcator. Pass --no-llm for the deterministic-only path."
+        )
+
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+
+    cmd = [
+        "claude", "-p",
+        "--model", model,
+        "--system-prompt", system_prompt,
+        "--output-format", "json",
+        "--dangerously-skip-permissions",
+        user_prompt,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=180.0,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise LLMCallError(
+            f"claude -p timed out after {e.timeout}s without responding"
+        ) from e
+    except OSError as e:
+        raise LLMCallError(f"claude -p failed to launch: {e}") from e
+
+    if proc.returncode != 0:
+        raise LLMCallError(
+            f"claude -p exited {proc.returncode}; stderr:\n{proc.stderr.strip()}"
+        )
+
+    raw = proc.stdout.strip()
+    if not raw:
+        raise LLMCallError("claude -p returned empty stdout")
+
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise LLMCallError(
+            f"claude -p envelope was not parseable JSON: {e.msg} "
+            f"(line {e.lineno} col {e.colno})"
+        ) from e
+
+    if not isinstance(envelope, dict):
+        raise LLMCallError(
+            f"claude -p envelope was not a JSON object: type={type(envelope).__name__}"
+        )
+
+    if envelope.get("is_error"):
+        raise LLMCallError(
+            f"claude -p reported is_error=true: {envelope.get('result', '<no result>')}"
+        )
+
+    response_text = envelope.get("result")
+    if not isinstance(response_text, str):
+        raise LLMCallError(
+            f"envelope missing string 'result' field; got: {type(response_text).__name__}"
+        )
+
+    cost_raw = envelope.get("total_cost_usd")
+    if isinstance(cost_raw, (int, float)):
+        cost_usd = float(cost_raw)
+    else:
+        sys.stderr.write(
+            "  note: claude -p envelope did not include total_cost_usd; "
+            "audit will record cost_usd=0.0\n"
+        )
+        cost_usd = 0.0
+
+    return response_text, cost_usd
+
+
+# Module-level seam reference. Tests monkeypatch this to a fake.
+demarcator_llm_call: DemarcatorLLMCall = _invoke_demarcator_llm_subprocess
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly
 # ---------------------------------------------------------------------------
 
-class LLMNotImplemented(NotImplementedError):
-    """Stub raised by demarcate_unresolved_with_llm() in this milestone.
-
-    The LLM seam at B1.c lands in a follow-up conversation. Until then,
-    --no-llm is the only path that emits a complete TSV. Without
-    --no-llm, if any candidate has notes="unresolved", main() catches
-    LLMNotImplemented and maps to exit 3.
-
-    Symmetric to discrepancy_register's A1.c → A1.cd progression: that
-    module's A1.b shipped with the LLM stage stubbed out; A1.c bumped
-    the stub to a real subprocess call and the validator landed
-    alongside in A1.d.
+def _truncate_context(text: str, *, label: str) -> str:
+    """Truncate a context block to <= _CONTEXT_CHAR_CAP, preserving
+    head + tail with a marker. Prevents a malformed-fixture run from
+    sending megabytes to the LLM.
     """
+    if len(text) <= _CONTEXT_CHAR_CAP:
+        return text
+    head_n = _CONTEXT_CHAR_CAP // 2 - 50
+    tail_n = _CONTEXT_CHAR_CAP - head_n - 80
+    head = text[:head_n]
+    tail = text[-tail_n:]
+    return (
+        f"{head}\n"
+        f"\n... [{label} truncated; "
+        f"{len(text) - head_n - tail_n} chars elided] ...\n\n"
+        f"{tail}"
+    )
 
 
-def demarcate_unresolved_with_llm(*args: object, **kwargs: object) -> None:
-    """Stub. B1.c will replace this with the real Haiku-4.5 demarcation
-    call (read methods_provenance.md, split multi-numeric sentences,
-    assign source_notebook+cell+figure_or_table, validate against
-    fabricated cell references).
+def build_demarcator_user_prompt(
+    unresolved_candidates: list["ClaimCandidate"],
+    *,
+    methods_provenance_text: str,
+    figures_inventory_text: str,
+    tables_inventory_text: str,
+) -> str:
+    """Render the user-prompt half of the LLM call: a list of N
+    multi-numeric sentences + the methods/figures/tables context.
+
+    Public so tests can pin the wire format.
+    """
+    n = len(unresolved_candidates)
+    lines: list[str] = [
+        f"You will demarcate N={n} multi-numeric sentence(s) from REPORT.md.",
+        "",
+        "For each input sentence, emit one output row per distinct numeric",
+        "assertion it contains. Multi-row outputs share the same",
+        "input_candidate_index. Quote the claim_text verbatim from the source",
+        "sentence; cite the source_notebook + source_cell from",
+        "methods_provenance.md; cross-link to a figure or table from",
+        "figures_inventory.md or tables_inventory.md if applicable.",
+        "",
+        "Return a JSON array, in input_candidate_index ascending order,",
+        "conforming to the schema in your system prompt. The first character",
+        "of your response must be `[` and the last `]`. No prose, no fences.",
+        "",
+        "INPUTS:",
+        "",
+    ]
+    for i, c in enumerate(unresolved_candidates):
+        # Single-line repr keeps the prompt compact + makes the
+        # substring rule's expected target unambiguous.
+        lines.append(f"[{i}] sentence_text: {c.claim_text!r}")
+        lines.append("")
+
+    lines.append("CONTEXT — methods_provenance.md (excerpt):")
+    lines.append("")
+    lines.append(_truncate_context(
+        methods_provenance_text, label="methods_provenance.md",
+    ))
+    lines.append("")
+    lines.append("CONTEXT — figures_inventory.md (excerpt):")
+    lines.append("")
+    lines.append(_truncate_context(
+        figures_inventory_text, label="figures_inventory.md",
+    ))
+    lines.append("")
+    lines.append("CONTEXT — tables_inventory.md (excerpt):")
+    lines.append("")
+    lines.append(_truncate_context(
+        tables_inventory_text, label="tables_inventory.md",
+    ))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Response parse
+# ---------------------------------------------------------------------------
+
+def _strip_code_fences(text: str) -> str:
+    """Strip a leading ```json (or ```) fence and trailing ``` if the LLM
+    ignored the no-fence rule. Defensive — the prompt forbids fences but
+    cheap robustness costs nothing."""
+    s = text.strip()
+    if s.startswith("```"):
+        first_nl = s.find("\n")
+        if first_nl != -1:
+            s = s[first_nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+    return s.strip()
+
+
+def parse_demarcator_response(
+    response_text: str,
+) -> list[DemarcatorEntry]:
+    """Parse the LLM's response into DemarcatorEntry list.
+
+    Distinct from discrepancy_register.parse_classifier_response in
+    that the array length is NOT bounded by input length — one input
+    candidate may yield 1..N output entries. We do not check coverage
+    here (that's the validator's job, since it needs to know the input
+    list).
+
+    Raises LLMCallError on JSON-level failures (unparseable after
+    lenient repair, wrong top-level type, missing required field on an
+    entry). Schema-level failures (out-of-bounds index, non-substring
+    claim_text) come later in validate_demarcations and raise
+    ValidationError instead.
+    """
+    cleaned = _strip_code_fences(response_text)
+    try:
+        data = lenient_json_load(cleaned, source="<demarcator-response>")
+    except json.JSONDecodeError as e:
+        raise LLMCallError(
+            f"demarcator response was not valid JSON after lenient repair: "
+            f"{e.msg} (line {e.lineno} col {e.colno})"
+        ) from e
+
+    if not isinstance(data, list):
+        raise LLMCallError(
+            f"demarcator response top-level type was {type(data).__name__}, "
+            f"expected list"
+        )
+
+    entries: list[DemarcatorEntry] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise LLMCallError(
+                f"demarcator entry {i} was {type(item).__name__}, "
+                f"expected object"
+            )
+        try:
+            entries.append(DemarcatorEntry(
+                input_candidate_index=int(item["input_candidate_index"]),
+                claim_text=str(item["claim_text"]),
+                source_notebook=str(item["source_notebook"]),
+                # source_cell is "string" per the schema (digit-only
+                # rendered as a string), but tolerate an integer in the
+                # JSON since the prompt's example shows a stringified
+                # int and Haiku occasionally emits a bare integer.
+                source_cell=str(item["source_cell"]),
+                # figure_or_table is required-but-may-be-empty; default
+                # to empty string if the LLM omits it (validator doesn't
+                # care about empty).
+                figure_or_table=str(item.get("figure_or_table", "")),
+                severity_justification=str(item.get("severity_justification", "")),
+            ))
+        except KeyError as e:
+            raise LLMCallError(
+                f"demarcator entry {i} missing required field: {e.args[0]}"
+            ) from e
+        except (TypeError, ValueError) as e:
+            raise LLMCallError(
+                f"demarcator entry {i} had a field of the wrong type: {e}"
+            ) from e
+
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Validator (B1.d)
+# ---------------------------------------------------------------------------
+
+# source_cell shape: non-empty digit-only string. The validator does
+# NOT check that the cell exists in the notebook — that's a Tier C
+# smoke concern. Shape-only here.
+_SOURCE_CELL_SHAPE_RE = re.compile(r"^\d+$")
+
+
+def validate_demarcations(
+    demarcations: list[DemarcatorEntry],
+    unresolved_candidates: list["ClaimCandidate"],
+    *,
+    methods_provenance_text: str,
+    figures_inventory_text: str,
+    tables_inventory_text: str,
+) -> None:
+    """Reject schema-violating entries with structured ValidationError.
+
+    Checks (each → exit 4 with diagnostics):
+      - Every demarcation row's input_candidate_index in [0, N).
+      - Rows are sorted by input_candidate_index ascending (within an
+        index, source-order is by emission order — not separately
+        validated; we trust the LLM here because we cannot detect
+        source-order violations without re-running the regex pass on
+        each claim_text and matching positions, which is overengineering
+        for the recall payoff).
+      - Coverage: every input_candidate_index in [0, N) has ≥1 row.
+        No gaps allowed.
+      - Per-row: claim_text non-empty AND substring of the input
+        sentence_text.
+      - Per-row: source_notebook non-empty AND substring of
+        methods_provenance.md.
+      - Per-row: source_cell matches `^\\d+$`.
+      - Per-row: figure_or_table is empty OR substring of
+        figures_inventory.md OR tables_inventory.md.
+
+    Pass-through is a no-op return; the caller continues with the
+    validated entries.
+    """
+    n = len(unresolved_candidates)
+
+    if n == 0:
+        # No unresolved candidates means we shouldn't have called the
+        # LLM at all. If demarcations is non-empty here, that's an
+        # upstream invariant violation — but we do not need to
+        # validate empty against empty.
+        if demarcations:
+            raise ValidationError(
+                f"validator: {len(demarcations)} demarcation(s) emitted but "
+                "no unresolved candidates to bind them to",
+                {"demarcations": len(demarcations), "unresolved": 0},
+            )
+        return
+
+    # Order check (ascending by input_candidate_index). Within the same
+    # index, emission order is preserved as-is.
+    last_idx = -1
+    for pos, e in enumerate(demarcations):
+        if e.input_candidate_index < last_idx:
+            raise ValidationError(
+                f"validator: demarcation rows are not sorted by "
+                f"input_candidate_index ascending; row {pos} has "
+                f"index {e.input_candidate_index} after row "
+                f"{pos - 1} index {last_idx}",
+                {"position": pos, "index": e.input_candidate_index, "prev": last_idx},
+            )
+        last_idx = e.input_candidate_index
+
+    # Coverage check: every index in [0, N) must appear at least once.
+    seen_indices = {e.input_candidate_index for e in demarcations}
+    expected = set(range(n))
+    if not expected.issubset(seen_indices):
+        missing = sorted(expected - seen_indices)
+        raise ValidationError(
+            f"validator: demarcations do not cover all input "
+            f"candidates; missing indices: {missing}",
+            {"missing": missing, "total": n},
+        )
+    extra = sorted(seen_indices - expected)
+    if extra:
+        raise ValidationError(
+            f"validator: demarcations contain out-of-bounds "
+            f"input_candidate_index value(s): {extra} (valid range: "
+            f"[0, {n}))",
+            {"out_of_bounds": extra, "bound": n},
+        )
+
+    # Per-row checks.
+    for pos, e in enumerate(demarcations):
+        cand = unresolved_candidates[e.input_candidate_index]
+
+        # claim_text non-empty + substring of input sentence.
+        if not e.claim_text:
+            raise ValidationError(
+                f"validator: row {pos} has empty claim_text",
+                {"position": pos, "input_candidate_index": e.input_candidate_index},
+            )
+        if e.claim_text not in cand.claim_text:
+            raise ValidationError(
+                f"validator: row {pos}'s claim_text is not a substring "
+                f"of the input sentence_text. Got: {e.claim_text!r}; "
+                f"expected substring of: {cand.claim_text!r}",
+                {
+                    "position": pos,
+                    "field": "claim_text",
+                    "value": e.claim_text,
+                    "input": cand.claim_text,
+                    "input_candidate_index": e.input_candidate_index,
+                },
+            )
+
+        # source_notebook non-empty + substring of methods_provenance.md.
+        if not e.source_notebook:
+            raise ValidationError(
+                f"validator: row {pos} has empty source_notebook",
+                {"position": pos, "input_candidate_index": e.input_candidate_index},
+            )
+        if e.source_notebook not in methods_provenance_text:
+            raise ValidationError(
+                f"validator: row {pos}'s source_notebook is not a "
+                f"substring of methods_provenance.md (LLM may have "
+                f"fabricated the path). Got: {e.source_notebook!r}",
+                {
+                    "position": pos,
+                    "field": "source_notebook",
+                    "value": e.source_notebook,
+                    "input_candidate_index": e.input_candidate_index,
+                },
+            )
+
+        # source_cell shape check.
+        if not _SOURCE_CELL_SHAPE_RE.match(e.source_cell):
+            raise ValidationError(
+                f"validator: row {pos}'s source_cell does not match "
+                f"non-empty digit-only shape. Got: {e.source_cell!r}",
+                {
+                    "position": pos,
+                    "field": "source_cell",
+                    "value": e.source_cell,
+                    "input_candidate_index": e.input_candidate_index,
+                },
+            )
+
+        # figure_or_table: empty is OK; non-empty must ground.
+        if e.figure_or_table:
+            if (
+                e.figure_or_table not in figures_inventory_text
+                and e.figure_or_table not in tables_inventory_text
+            ):
+                raise ValidationError(
+                    f"validator: row {pos}'s figure_or_table "
+                    f"{e.figure_or_table!r} is not a substring of "
+                    f"figures_inventory.md or tables_inventory.md "
+                    f"(LLM may have fabricated the cite)",
+                    {
+                        "position": pos,
+                        "field": "figure_or_table",
+                        "value": e.figure_or_table,
+                        "input_candidate_index": e.input_candidate_index,
+                    },
+                )
+
+
+# ---------------------------------------------------------------------------
+# Cache (B1.d idempotency)
+# ---------------------------------------------------------------------------
+
+def compute_cache_key(
+    *,
+    report_sha: str,
+    methods_provenance_sha: str,
+    figures_inventory_sha: str,
+    tables_inventory_sha: str,
+    prompt_sha: str,
+    parser_version: str,
+) -> str:
+    """SHA-256 over the six-tuple. parser_version inclusion follows
+    feedback_cache_key_chunked_only_when_chunked: it's the safety net
+    against silently-invisible parser fixes.
+
+    Six components vs A1.d's four because B1.c consumes
+    figures_inventory.md and tables_inventory.md as additional grounding
+    surfaces — a change in either materially affects which cross-links
+    the LLM is allowed to emit, so they must invalidate the cache.
+    """
+    h = hashlib.sha256()
+    payload = json.dumps(
+        {
+            "report_sha": report_sha,
+            "methods_provenance_sha": methods_provenance_sha,
+            "figures_inventory_sha": figures_inventory_sha,
+            "tables_inventory_sha": tables_inventory_sha,
+            "prompt_sha": prompt_sha,
+            "parser_version": parser_version,
+        },
+        sort_keys=True,
+    )
+    h.update(payload.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _read_cache(cache_path: Path) -> dict:
+    """Return the cache dict (key → cached payload). Empty dict if the
+    file doesn't exist or is unparseable."""
+    if not cache_path.is_file():
+        return {}
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # Corruption recovery: treat as empty. Don't crash a run because
+        # a previous abort left half-written cache JSON.
+        return {}
+
+
+def _write_cache(cache_path: Path, cache: dict) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic-ish: write to .tmp, then rename. Cache files are small
+    # and rarely contended; this is cheap insurance.
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(cache, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    tmp.replace(cache_path)
+
+
+def _cached_payload_to_demarcations(
+    payload: dict,
+) -> list[DemarcatorEntry]:
+    """Reconstruct DemarcatorEntry list from a cached dict."""
+    rows = payload.get("demarcations", [])
+    return [
+        DemarcatorEntry(
+            input_candidate_index=int(r["input_candidate_index"]),
+            claim_text=str(r["claim_text"]),
+            source_notebook=str(r["source_notebook"]),
+            source_cell=str(r["source_cell"]),
+            figure_or_table=str(r.get("figure_or_table", "")),
+            severity_justification=str(r.get("severity_justification", "")),
+        )
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Top-level LLM seam
+# ---------------------------------------------------------------------------
+
+def demarcate_unresolved_with_llm(
+    unresolved_candidates: list["ClaimCandidate"],
+    *,
+    methods_provenance_text: str,
+    figures_inventory_text: str,
+    tables_inventory_text: str,
+    model: str = DEFAULT_DEMARCATOR_MODEL,
+    prompt_path: Optional[Path] = None,
+    llm_call: Optional[DemarcatorLLMCall] = None,
+) -> tuple[list[DemarcatorEntry], float]:
+    """B1.c entry point. Demarcates multi-numeric sentences via the LLM
+    seam and returns (validated_demarcations, cost_usd).
+
+    The empty-input shortcut returns ([], 0.0) without calling the LLM
+    — saves cost on projects whose deterministic pre-pass already
+    surfaced no multi-numeric sentences.
 
     Raises:
-      LLMNotImplemented — always. Pass --no-llm for the deterministic-
-      only path.
+      LLMCallError on subprocess / JSON-shape failures (exit 3).
+      ValidationError on schema violations (exit 4).
+
+    `llm_call` defaults to the module-level `demarcator_llm_call` seam
+    (the subprocess wrapper). Tests pass a fake.
     """
-    raise LLMNotImplemented(
-        "B1.c LLM demarcation pass is not implemented yet. "
-        "Run with --no-llm for the deterministic-only path; "
-        "multi-numeric sentences will be marked notes='unresolved' "
-        "in the TSV."
+    if not unresolved_candidates:
+        return [], 0.0
+
+    prompt_path = prompt_path or _PROMPT_PATH
+    if not prompt_path.is_file():
+        raise LLMCallError(
+            f"claim_demarcate prompt not found at {prompt_path}; "
+            f"the skill installation is incomplete"
+        )
+
+    system_prompt = prompt_path.read_text(encoding="utf-8")
+    user_prompt = build_demarcator_user_prompt(
+        unresolved_candidates,
+        methods_provenance_text=methods_provenance_text,
+        figures_inventory_text=figures_inventory_text,
+        tables_inventory_text=tables_inventory_text,
     )
+
+    call = llm_call or demarcator_llm_call
+    response_text, cost_usd = call(system_prompt, user_prompt, model)
+
+    if cost_usd > _DEMARCATOR_COST_CEILING_USD:
+        # Soft warning; don't block. Cost overrun is observability,
+        # not a hard halt — the orchestrator's circuit-breaker handles
+        # cumulative caps.
+        sys.stderr.write(
+            f"  warn: demarcator call cost ${cost_usd:.4f} exceeded "
+            f"ceiling ${_DEMARCATOR_COST_CEILING_USD:.4f}/run\n"
+        )
+
+    demarcations = parse_demarcator_response(response_text)
+    validate_demarcations(
+        demarcations,
+        unresolved_candidates,
+        methods_provenance_text=methods_provenance_text,
+        figures_inventory_text=figures_inventory_text,
+        tables_inventory_text=tables_inventory_text,
+    )
+
+    return demarcations, cost_usd
+
+
+# ---------------------------------------------------------------------------
+# Candidate expansion (replace unresolved rows with demarcated rows)
+# ---------------------------------------------------------------------------
+
+def _flags_for_claim_text(claim_text: str) -> tuple[str, str, str]:
+    """Re-run the deterministic regex sweep on a single claim_text and
+    return (effect_size_present, ci_present, pvalue_present).
+
+    Used after LLM demarcation to give each split row its OWN flag
+    aggregation rather than inheriting the original sentence's flags
+    (which would overstate per-row rigor — e.g., the AUC row inheriting
+    ci_present=yes from a sentence whose CI was a separate clause).
+    """
+    matches = extract_numeric_matches(claim_text)
+    class_names = [m.match_class for m in matches]
+    return _flags_from_classes(class_names)
+
+
+def expand_with_demarcations(
+    candidates: list["ClaimCandidate"],
+    unresolved_candidates: list["ClaimCandidate"],
+    demarcations: list[DemarcatorEntry],
+) -> list["ClaimCandidate"]:
+    """Replace each `notes='unresolved'` row in `candidates` with the
+    LLM's demarcated rows. Renumbers all `claim_id`s C001..CMMM where
+    M = len(non-unresolved) + len(demarcations).
+
+    Source-order preservation: candidates appear in REPORT.md order;
+    expanded rows for an unresolved candidate appear in
+    demarcation-emission order at the unresolved row's position.
+
+    Flag aggregation: each demarcated row's flags are RECOMPUTED from
+    its own claim_text via the deterministic regex sweep — NOT inherited
+    from the source unresolved sentence. Per feedback_llm_arithmetic_unreliable
+    the LLM never touches flag values; flags stay deterministic.
+    """
+    # Index unresolved candidates by their position in the unresolved
+    # list (0-based) — that's what input_candidate_index references.
+    # The unresolved_candidates list is what was passed into the LLM,
+    # so the indices match by construction.
+    by_input_idx: dict[int, list[DemarcatorEntry]] = {}
+    for d in demarcations:
+        by_input_idx.setdefault(d.input_candidate_index, []).append(d)
+
+    # Map each unresolved candidate's position in the GLOBAL `candidates`
+    # list to its position in the unresolved-only list (LLM input index).
+    unresolved_id_set = {id(c) for c in unresolved_candidates}
+    # Use id() because ClaimCandidate doesn't have a hashable identity
+    # by default (it's a mutable dataclass) — though dataclass without
+    # eq/frozen actually IS hashable by id by default in Python 3.10+.
+    # id() is the explicit form.
+
+    unresolved_position_for_id: dict[int, int] = {
+        id(c): i for i, c in enumerate(unresolved_candidates)
+    }
+
+    out: list[ClaimCandidate] = []
+    next_id = 1
+
+    for c in candidates:
+        if c.notes != "unresolved" or id(c) not in unresolved_id_set:
+            # Pass-through, just renumber.
+            new = dataclasses.replace(c, claim_id=f"C{next_id:03d}")
+            out.append(new)
+            next_id += 1
+            continue
+
+        # Unresolved: replace with one row per demarcation.
+        ipos = unresolved_position_for_id[id(c)]
+        rows = by_input_idx.get(ipos, [])
+        # The validator already enforced ≥1 row per index, so this
+        # should be non-empty — but defensively handle the empty case
+        # by passing the original unresolved row through unchanged.
+        if not rows:
+            new = dataclasses.replace(c, claim_id=f"C{next_id:03d}")
+            out.append(new)
+            next_id += 1
+            continue
+
+        for d in rows:
+            eff, ci, pv = _flags_for_claim_text(d.claim_text)
+            out.append(ClaimCandidate(
+                claim_id=f"C{next_id:03d}",
+                claim_text=d.claim_text,
+                source_notebook=d.source_notebook,
+                source_cell=d.source_cell,
+                figure_or_table=d.figure_or_table,
+                effect_size_present=eff,
+                ci_present=ci,
+                pvalue_present=pv,
+                # notes cleared on resolved rows; severity_justification
+                # is informational only, dropped at TSV emit time.
+                notes="",
+            ))
+            next_id += 1
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -905,11 +1676,16 @@ def emit_audit_line(
     """Append one JSONL audit line to <output-dir>/audit/phase0.jsonl.
 
     `cache_hit=True` records that the LLM call was skipped because the
-    idempotency cache had a hit; lands when B1.d's cache does. For
-    M1-B1.ab cache_hit is always False.
+    idempotency cache had a hit on the six-tuple (report_sha,
+    methods_provenance_sha, figures_inventory_sha, tables_inventory_sha,
+    prompt_sha, parser_VERSION). The append still happens — every
+    invocation is observable per SPEC §4.7. Cost on a hit is 0.0 (no
+    LLM bill); we don't re-charge the original cached call to the
+    rerun.
 
-    `cost_usd=0.0` in deterministic-only mode (no LLM call). When B1.c
-    lands, this becomes the actual classifier subprocess cost.
+    `cost_usd=0.0` in deterministic-only mode (no LLM call). With
+    --no-llm not set AND unresolved candidates, this is the actual
+    demarcator subprocess cost.
     """
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -950,12 +1726,21 @@ class RunResult:
     unresolved_count: int
     cost_usd: float
     cache_hit: bool = False
+    # Full demarcations kept on the result so the cache writer + tests
+    # can introspect them. Empty list when no_llm or no unresolved
+    # candidates surfaced.
+    demarcations: list[DemarcatorEntry] = field(default_factory=list)
 
 
 def run_inventory(
     *,
     report_text: str,
+    methods_provenance_text: str = "",
+    figures_inventory_text: str = "",
+    tables_inventory_text: str = "",
     no_llm: bool,
+    llm_call: Optional[DemarcatorLLMCall] = None,
+    cached_demarcations: Optional[list[DemarcatorEntry]] = None,
 ) -> RunResult:
     """Pure-function orchestration: segment + extract + build candidates
     + (LLM if requested and unresolved candidates exist).
@@ -964,30 +1749,86 @@ def run_inventory(
     this function is straightforward to unit-test.
 
     With `no_llm=True`: returns deterministic candidates only.
-    Multi-numeric sentences are marked notes="unresolved".
+    Multi-numeric sentences are marked notes="unresolved". The methods/
+    figures/tables texts are unused on this path (they default to "").
 
     With `no_llm=False`: if any candidate is "unresolved",
-    demarcate_unresolved_with_llm() fires — and in this milestone
-    raises LLMNotImplemented (caller maps to exit 3). When B1.c lands,
-    it splits the unresolved candidates into multiple resolved rows.
+    demarcate_unresolved_with_llm() fires — splits unresolved
+    candidates into multiple resolved rows, recomputes per-row flags
+    via the deterministic regex sweep, and renumbers all claim_ids.
+    Raises LLMCallError on subprocess/JSON-shape failures (caller maps
+    to exit 3) or ValidationError on schema violations (caller maps to
+    exit 4).
+
+    `llm_call` overrides the module-level `demarcator_llm_call` seam —
+    used by tests to inject canned responses.
+
+    `cached_demarcations` short-circuits the LLM call when supplied
+    (the cache layer in main() does this on a cache hit). Cached
+    demarcations are STILL re-validated against current inputs — if
+    a hand-edit poisoned the cache, we fall through to a fresh LLM
+    call rather than ship a broken row.
     """
     sentences = segment_sentences(report_text)
     matches = extract_numeric_matches(report_text)
     candidates = build_candidates(matches, sentences)
-    unresolved = sum(1 for c in candidates if c.notes == "unresolved")
+    unresolved_candidates = [c for c in candidates if c.notes == "unresolved"]
 
-    if not no_llm and unresolved > 0:
-        # Future B1.c lands here; for now this raises LLMNotImplemented.
-        demarcate_unresolved_with_llm()  # noqa: blocking call once implemented
-        # ^ unreachable in M1-B1.ab; kept here so the integration point
-        # is in the orchestrator, not in main().
+    cost_usd = 0.0
+    cache_hit = False
+    demarcations: list[DemarcatorEntry] = []
+
+    if not no_llm and unresolved_candidates:
+        if cached_demarcations is not None:
+            # Cache-hit path: skip LLM, re-validate cached entries
+            # (defensive — the cache file could have been hand-edited
+            # between runs; if validation fails we rebuild rather
+            # than ship stale rows).
+            try:
+                validate_demarcations(
+                    cached_demarcations,
+                    unresolved_candidates,
+                    methods_provenance_text=methods_provenance_text,
+                    figures_inventory_text=figures_inventory_text,
+                    tables_inventory_text=tables_inventory_text,
+                )
+                demarcations = cached_demarcations
+                cache_hit = True
+                cost_usd = 0.0
+            except ValidationError:
+                sys.stderr.write(
+                    "  note: claim_inventory_cache.json failed re-validation; "
+                    "falling through to a fresh LLM call\n"
+                )
+                demarcations, cost_usd = demarcate_unresolved_with_llm(
+                    unresolved_candidates,
+                    methods_provenance_text=methods_provenance_text,
+                    figures_inventory_text=figures_inventory_text,
+                    tables_inventory_text=tables_inventory_text,
+                    llm_call=llm_call,
+                )
+        else:
+            demarcations, cost_usd = demarcate_unresolved_with_llm(
+                unresolved_candidates,
+                methods_provenance_text=methods_provenance_text,
+                figures_inventory_text=figures_inventory_text,
+                tables_inventory_text=tables_inventory_text,
+                llm_call=llm_call,
+            )
+
+        # Expand the candidate list: replace each unresolved row with
+        # the LLM's demarcated rows, recompute per-row flags, renumber.
+        candidates = expand_with_demarcations(
+            candidates, unresolved_candidates, demarcations,
+        )
 
     return RunResult(
         candidates=candidates,
         inventory_size=len(candidates),
-        unresolved_count=unresolved,
-        cost_usd=0.0,
-        cache_hit=False,
+        unresolved_count=sum(1 for c in candidates if c.notes == "unresolved"),
+        cost_usd=cost_usd,
+        cache_hit=cache_hit,
+        demarcations=demarcations,
     )
 
 
@@ -1018,8 +1859,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         required=True,
         help=(
             "Path to methods_provenance.md (emitted by extract_methods.py). "
-            "Currently passed through; B1.c LLM uses it to assign "
-            "source_notebook+cell."
+            "B1.c LLM uses it to ground source_notebook + source_cell cites; "
+            "validator rejects cites that don't appear in this file."
         ),
     )
     p.add_argument(
@@ -1028,8 +1869,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         required=True,
         help=(
             "Path to figures_inventory.md (emitted by extract_figures.py). "
-            "Currently passed through; B1.c LLM uses it to cross-link "
-            "figure_or_table."
+            "B1.c LLM uses it to ground figure_or_table cross-links; "
+            "validator rejects ungrounded non-empty cites."
         ),
     )
     p.add_argument(
@@ -1038,8 +1879,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         required=True,
         help=(
             "Path to tables_inventory.md (emitted by extract_tables.py). "
-            "Currently passed through; B1.c LLM uses it to cross-link "
-            "figure_or_table."
+            "B1.c LLM uses it to ground figure_or_table cross-links; "
+            "validator rejects ungrounded non-empty cites."
         ),
     )
     p.add_argument(
@@ -1101,8 +1942,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         report_text = report_path.read_text(encoding="utf-8")
+        methods_provenance_text = methods_path.read_text(encoding="utf-8")
+        figures_inventory_text = figs_path.read_text(encoding="utf-8")
+        tables_inventory_text = tbls_path.read_text(encoding="utf-8")
     except OSError as e:
-        print(f"error: cannot read REPORT.md: {e}", file=sys.stderr)
+        print(f"error: cannot read input file: {e}", file=sys.stderr)
         emit_audit_line(
             audit_path=audit_path,
             report_path=report_path,
@@ -1117,13 +1961,41 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    try:
-        result = run_inventory(report_text=report_text, no_llm=args.no_llm)
-    except LLMNotImplemented as e:
-        print(
-            f"error: LLM demarcation pass (B1.c) not implemented yet: {e}",
-            file=sys.stderr,
+    # Idempotency cache lookup (B1.d). Skipped when --no-llm is set
+    # (no LLM call to cache) or when the prompt file is missing (we
+    # can't compute a stable cache key without it). Cache key is the
+    # six-tuple SHA-256 over (report_sha, methods_sha, figures_sha,
+    # tables_sha, prompt_sha, parser_VERSION).
+    cache_path = out_dir / "audit" / "claim_inventory_cache.json"
+    cache_key: Optional[str] = None
+    cached_demarcations: Optional[list[DemarcatorEntry]] = None
+
+    if not args.no_llm and _PROMPT_PATH.is_file():
+        cache_key = compute_cache_key(
+            report_sha=_sha256_of_path(report_path),
+            methods_provenance_sha=_sha256_of_path(methods_path),
+            figures_inventory_sha=_sha256_of_path(figs_path),
+            tables_inventory_sha=_sha256_of_path(tbls_path),
+            prompt_sha=_sha256_of_path(_PROMPT_PATH),
+            parser_version=VERSION,
         )
+        cache = _read_cache(cache_path)
+        if cache_key in cache:
+            cached_demarcations = _cached_payload_to_demarcations(
+                cache[cache_key]
+            )
+
+    try:
+        result = run_inventory(
+            report_text=report_text,
+            methods_provenance_text=methods_provenance_text,
+            figures_inventory_text=figures_inventory_text,
+            tables_inventory_text=tables_inventory_text,
+            no_llm=args.no_llm,
+            cached_demarcations=cached_demarcations,
+        )
+    except LLMCallError as e:
+        print(f"error: LLM call failed: {e}", file=sys.stderr)
         emit_audit_line(
             audit_path=audit_path,
             report_path=report_path,
@@ -1137,10 +2009,56 @@ def main(argv: Optional[list[str]] = None) -> int:
             exit_status=3,
         )
         return 3
+    except ValidationError as e:
+        print(
+            f"error: validator rejected LLM output: {e}",
+            file=sys.stderr,
+        )
+        if e.diagnostics:
+            print(
+                f"  diagnostics: {json.dumps(e.diagnostics, sort_keys=True)}",
+                file=sys.stderr,
+            )
+        # The LLM was called and billed before the validator ran; we
+        # don't have direct access to the cost from outside
+        # run_inventory on the exception path. Record 0.0 with a note
+        # rather than guess.
+        emit_audit_line(
+            audit_path=audit_path,
+            report_path=report_path,
+            methods_provenance_path=methods_path,
+            figures_inventory_path=figs_path,
+            tables_inventory_path=tbls_path,
+            output_path=output_path,
+            inventory_size=0,
+            unresolved_count=0,
+            cost_usd=0.0,
+            exit_status=4,
+        )
+        return 4
 
     # Write the TSV.
     tsv_text = format_claim_inventory_tsv(result.candidates)
     output_path.write_text(tsv_text, encoding="utf-8")
+
+    # Persist the cache only after a fresh LLM call (NOT on a cache hit
+    # — we don't need to re-write what we just read; NOT on --no-llm —
+    # there's nothing to cache; NOT when no demarcations were emitted —
+    # no LLM call happened). Mirrors discrepancy_register.main()'s
+    # cache-write conditions.
+    if (
+        cache_key is not None
+        and not result.cache_hit
+        and not args.no_llm
+        and result.demarcations
+    ):
+        cache = _read_cache(cache_path)
+        cache[cache_key] = {
+            "demarcations": [d.to_dict() for d in result.demarcations],
+            "cost_usd": result.cost_usd,
+            "timestamp": _utc_now_iso(),
+        }
+        _write_cache(cache_path, cache)
 
     emit_audit_line(
         audit_path=audit_path,
@@ -1163,6 +2081,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if result.unresolved_count
             else ""
         )
+        + (" [cache hit]" if result.cache_hit else "")
         + ")",
         file=sys.stderr,
     )
