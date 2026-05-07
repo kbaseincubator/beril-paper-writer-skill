@@ -9,9 +9,9 @@ Per SPEC_v0_8 §4.5 + DECISIONS.md D-034 Q1:
   did post-hoc in prose, so the holistic write (Phase 2) sees discrepancies
   *before* it drafts.
 
-Pipeline:
+Pipeline (all four sub-tiers shipped as A1.abcd):
 
-  1. Deterministic pre-pass (this conversation: A1.a + A1.b):
+  1. Deterministic pre-pass (A1.a + A1.b):
        - Parse RESEARCH_PLAN.md for analysis declarations under headings
          matching /analys[ei]s|method|test|stat/i (bullets / numbered list).
        - Parse methods_provenance.md (already a structured artifact emitted
@@ -19,13 +19,28 @@ Pipeline:
        - Normalize each phrase (lowercase + stopword removal + light Porter
          stem), then partition into plan_only / exec_only / overlap.
 
-  2. LLM classification pass (NEXT conversation: A1.c — NOT in this code):
+  2. LLM classification pass (A1.c):
        - Haiku-4.5 over `overlap` candidates only, deciding
          {equivalent | paraphrase | discrepancy}. Equivalent + paraphrase
          pairs do NOT become register entries; discrepancy pairs do.
-       - Cost ceiling $0.05/run (SPEC §4.5).
+       - Cost ceiling $0.05/run (SPEC §4.5; soft warning, not a hard halt).
+       - LLM seam at `classifier_llm_call`; tests monkeypatch.
 
-  3. Validator + idempotency cache (NEXT-NEXT — A1.d).
+  3. Validator + idempotency cache (A1.d):
+       - Validator: ascending candidate_index with no gaps; label ∈
+         {equivalent, paraphrase, discrepancy}; severity ∈ {load-bearing,
+         cosmetic, unclear}; severity_justification non-empty;
+         plan_quote_verbatim non-empty AND substring of input plan_quote;
+         exec_quote_verbatim non-empty AND substring of the concatenated
+         exec text. The empty-string non-emptiness checks landed
+         2026-05-07 alongside the prompt-tool contract clarification
+         (the user prompt sends exec_test_name/exec_library/exec_notebook
+         as separate fields; the substring check is over their
+         concatenation `<test_name> | <library> | <notebook> cell <N> line <M>`).
+       - Cache: SHA-256 over four-tuple (methods_sha, plan_sha,
+         prompt_sha, parser_VERSION). Cache hit re-validates against the
+         current inputs (defensive against hand-edits); on validation
+         failure, falls through to a fresh LLM call.
 
 I/O contract (this milestone):
 
@@ -61,7 +76,7 @@ Audit JSONL line schema (one line per invocation, appended to
   {
     "timestamp": "2026-05-07T14:23:01Z",
     "tool": "discrepancy_register",
-    "version": "0.8.0-m1-A1.cd",
+    "version": "0.8.0-m1-A1.abcd",
     "inputs": {
       "methods_provenance": "<sha256>",
       "research_plan": "<sha256>"
@@ -121,7 +136,13 @@ from typing import Callable, Iterable, Optional
 # Module version. Distinct from package version because audit consumers
 # may want to track precisely which sub-milestone wrote a given line.
 # Bump on contract-affecting changes (new audit fields, schema changes).
-VERSION = "0.8.0-m1-A1.cd"
+# A1.a + A1.b shipped as "0.8.0-m1-A1.ab"; A1.c + A1.d added in a
+# subsequent commit; this version label corrects a stale-doc lag noted
+# 2026-05-07 (the file already contained the c+d functions but the
+# label still read ".cd"). Per claim_inventory.py's convention, the
+# suffix tracks the FULL set shipped, not the latest delta — hence
+# .abcd, not .cd.
+VERSION = "0.8.0-m1-A1.abcd"
 
 
 # ---------------------------------------------------------------------------
@@ -477,10 +498,10 @@ class PrePassCandidate:
         execution found.
       - exec_only: executed in a notebook, no normalized-equivalent
         prescription found.
-      - overlap: both sides match on normalized phrase. The LLM step
-        (A1.c — NOT in this conversation) decides whether such pairs
-        are equivalent / paraphrase / discrepancy. Without LLM, we
-        skip emission and report the count.
+      - overlap: both sides match on normalized phrase. The A1.c LLM
+        step decides whether such pairs are equivalent / paraphrase /
+        discrepancy. Without LLM (--no-llm flag), we skip emission and
+        report the count.
 
     `plan` and `exec_` are populated for plan_only/exec_only/overlap as
     appropriate (plan_only has only plan; exec_only has only exec_;
@@ -1233,11 +1254,49 @@ def validate_classifications(
                 },
             )
 
-        # Anti-fabrication: substring checks against the input candidate.
+        # Anti-fabrication: non-empty + substring checks against the
+        # input candidate. The non-empty checks tighten the original
+        # truthiness-gated guards (which silently accepted empty strings,
+        # leaving the substring rule unenforced — asymmetric with
+        # claim_inventory.py's discipline at its validator's
+        # `if not e.claim_text` line).
+        #
+        # severity_justification is checked across ALL labels because
+        # equivalent + paraphrase rows ARE persisted in the cache for
+        # traceability (a reviewer wanting to know why the LLM dropped a
+        # pair benefits from a grounded justification). For discrepancy
+        # rows it is also load-bearing because classification_to_register_entry
+        # interpolates it directly into the recommendation prose; an
+        # empty string emits malformed output ("Reconcile in Methods: . ...").
         cand = overlap_candidates[ce.candidate_index]
         plan_text = cand.plan.plan_quote if cand.plan else ""
         exec_text = _candidate_exec_text(cand)
-        if ce.plan_quote_verbatim and ce.plan_quote_verbatim not in plan_text:
+
+        if not ce.severity_justification:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index} has empty "
+                f"severity_justification (prompt requires non-empty; "
+                f"interpolated into recommendation prose for "
+                f"discrepancy-labeled rows + retained in cache for "
+                f"traceability of equivalent/paraphrase rows)",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "severity_justification",
+                },
+            )
+
+        if not ce.plan_quote_verbatim:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index} has empty "
+                f"plan_quote_verbatim (the verbatim quote is the "
+                f"anti-fabrication anchor; prompt §'Field rules' requires "
+                f"non-empty)",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "plan_quote_verbatim",
+                },
+            )
+        if ce.plan_quote_verbatim not in plan_text:
             raise ValidationError(
                 f"validator: candidate {ce.candidate_index}'s "
                 f"plan_quote_verbatim is not a substring of the input "
@@ -1251,7 +1310,19 @@ def validate_classifications(
                     "input": plan_text,
                 },
             )
-        if ce.exec_quote_verbatim and ce.exec_quote_verbatim not in exec_text:
+
+        if not ce.exec_quote_verbatim:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index} has empty "
+                f"exec_quote_verbatim (the verbatim quote is the "
+                f"anti-fabrication anchor; prompt §'Field rules' requires "
+                f"non-empty)",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "exec_quote_verbatim",
+                },
+            )
+        if ce.exec_quote_verbatim not in exec_text:
             raise ValidationError(
                 f"validator: candidate {ce.candidate_index}'s "
                 f"exec_quote_verbatim is not a substring of the input "

@@ -787,6 +787,90 @@ class TestA2dValidator:
         assert rc == 0
         assert (out_dir / "discrepancy_register.md").is_file()
 
+    # ---- Empty-string anti-fab regression tests (defects 1 + 2) ----------
+    # Pre-2026-05-07 the validator's substring guards were truthiness-
+    # gated (`if ce.plan_quote_verbatim and ...`), so an empty string
+    # bypassed the substring check and slipped through. The recommendation
+    # render then interpolated `severity_justification` blindly, producing
+    # malformed prose ("Reconcile in Methods: . Update..."). These three
+    # tests pin the tightened rule: empty severity_justification, empty
+    # plan_quote_verbatim, and empty exec_quote_verbatim each land
+    # exit 4. Required for ALL labels — the cache persists equivalent /
+    # paraphrase rows for traceability so non-empty matters across the
+    # whole adjudication output, not just discrepancy-labeled rows.
+
+    def test_empty_severity_justification_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM emits severity_justification='' → validator rejects with
+        exit 4 + audit line records exit_status=4. Without this guard,
+        classification_to_register_entry would emit malformed prose
+        like 'Reconcile in Methods: .  Update...' for discrepancy rows
+        (and lose traceability content for equivalent/paraphrase rows
+        carried in the cache)."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy",
+            severity="load-bearing",
+            severity_justification="",  # empty — the defect
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        assert record["exit_status"] == 4
+
+    def test_empty_plan_quote_verbatim_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM emits plan_quote_verbatim='' → validator rejects with
+        exit 4. The verbatim quote is the anti-fabrication anchor; an
+        empty string previously slipped past the truthiness-gated
+        substring check, leaving the rule unenforced."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy",
+            severity="load-bearing",
+            plan_quote_verbatim="",  # empty — the defect
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+
+    def test_empty_exec_quote_verbatim_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM emits exec_quote_verbatim='' → validator rejects with
+        exit 4. Symmetric with the plan-side guard. Mirrors
+        claim_inventory.py:1316's discipline (explicit non-empty check
+        BEFORE the substring rule)."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy",
+            severity="load-bearing",
+            exec_quote_verbatim="",  # empty — the defect
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+
 
 # ===========================================================================
 # A2.e — Idempotency cache

@@ -98,22 +98,43 @@ caller a re-run and ~$0.05.
   - `unclear`: you cannot tell from the inputs whether the difference is
     load-bearing. Use sparingly; reserve for genuinely ambiguous cases.
 
-- `severity_justification` (string, required, ≤200 chars): one sentence
-  explaining the severity choice. Concrete; cite the test family / claim
-  type / mechanism by which the difference does or does not bite. Vague
-  "the tests are different" justifications are not useful and indicate
-  you should re-read the candidate.
+- `severity_justification` (string, required, non-empty, ≤200 chars):
+  one sentence explaining the severity choice. Concrete; cite the test
+  family / claim type / mechanism by which the difference does or does
+  not bite. Vague "the tests are different" justifications are not
+  useful and indicate you should re-read the candidate. The validator
+  rejects empty strings — required for ALL labels (equivalent /
+  paraphrase / discrepancy), because (a) for discrepancy rows it is
+  interpolated directly into the recommendation prose downstream, and
+  (b) for equivalent / paraphrase rows it is retained in the cache for
+  traceability of why the LLM dropped a register entry.
 
-- `plan_quote_verbatim` (string, required): the plan-side quote from the
-  candidate, copied EXACTLY. The validator runs a substring check — if
-  your quote is not a substring of the input candidate's `plan_quote`,
-  the run fails with exit code 4. Do not paraphrase, do not strip
-  punctuation, do not "tidy". Copy character-for-character.
+- `plan_quote_verbatim` (string, required, non-empty): the plan-side
+  quote from the candidate, copied EXACTLY. The validator runs a
+  substring check — if your quote is not a substring of the input
+  candidate's `plan_quote`, the run fails with exit code 4. Do not
+  paraphrase, do not strip punctuation, do not "tidy". Copy
+  character-for-character. Empty string is invalid even when you'd
+  rather signal "no specific span in the plan to anchor on" — quote at
+  least the canonical test name.
 
-- `exec_quote_verbatim` (string, required): the execution-side quote
-  from the candidate (the test name from `methods_provenance.md`), copied
-  EXACTLY. Same substring rule applies against the input candidate's
-  `exec_quote`.
+- `exec_quote_verbatim` (string, required, non-empty): the execution-side
+  quote from the candidate, copied EXACTLY. The user prompt does NOT
+  ship a single `exec_quote` field — instead it provides
+  `exec_test_name`, `exec_library`, `exec_notebook`, `cell`, and `line`
+  as separate fields. The validator builds the substring-check target
+  by concatenating them as
+  `<exec_test_name> | <exec_library> | <exec_notebook> cell <N> line <M>`,
+  so any of these strings — quoted individually — passes the substring
+  rule. Common safe demarcations:
+  - the canonical test name: `"Pearson correlation"`,
+  - the library path: `"scipy.stats.pearsonr"`,
+  - a notebook+cell+line span: `"notebooks/01.ipynb cell 4 line 12"`.
+
+  You MAY NOT paraphrase, normalize whitespace, or stitch fragments from
+  different sub-fields with characters not in the concatenation
+  (e.g. don't write `"Pearson — scipy.stats.pearsonr"`; the em-dash
+  separator isn't in the concatenation, so the substring check fails).
 
 ## Inputs the user prompt will pass
 
