@@ -974,4 +974,127 @@ triage; prompts CPN.3 finding.
 
 ---
 
+## D-034 — 2026-05-07 — v0.8.0 architectural redesign: holistic write + 3-tier review (M0 sign-off)
+
+**Decision.** v0.8.0 replaces the v0.4–v0.7.x per-section orchestrator
+with an 8-phase pipeline: Phase 0 deterministic tooling (existing +
+NEW discrepancy_register + claim_inventory) → Phase 1 interactive
+story builder → Phase 2 holistic write (one pass, Opus 4.6) → Phase 3
+tiered review cascade (deterministic → Haiku light → canonical
+adversarial; fail-fast; 2/2/2 caps) → Phase 4 selective optimizers
+(abstract + methods audit always; reviewer-flagged conditional) →
+Phase 5 iterative citation rounds (5–8 adaptive; bounded supplementary
+pool round when `[NEEDS CITATION]` markers exist) → Phase 6 compliance
+gate (deterministic, build-fails-if-missing) → Phase 7 copy-edit
+(clarity + concision; semantic-invariance post-check) → Phase 8 docx.
+SPEC_v0_8.md is the authoritative spec; M1–M8 are scoped milestones.
+
+**Rationale.** Three converging signals (per the auto-memory entry
+`project_paper_writer_v0_8_architecture.md`): (1) the per-section
+sprawl pattern is asymptotic — every live-test failure since v0.4
+produced a per-section patch, indicating the bottleneck is upstream;
+(2) AI Scientist (Lu et al., *Nature* 2026) empirically reached
+workshop-bar-not-main-bar for fully-AI papers with the most-engineered
+per-section pipeline, validating that the bottleneck is story
+selection / integrative finding curation, not per-section
+sophistication; (3) the IBD one-shot exercise (2026-05-06/07) showed
+BERIL won on methodology honesty (provenance, citation pool, scope
+discipline — all Phase-0 outputs) but lost on integrative biology
+to a single Claude conversation that saw the whole project at once.
+Conclusion: BERIL's edge is the deterministic tooling, not the
+section prompts. Subtraction-over-addition: most v0.4–v0.7 complexity
+is downstream patches of upstream prompt weakness; v0.8 replaces
+the patches with a stronger upstream pass.
+
+**Twelve sign-off sub-decisions (Q1–Q12; all locked 2026-05-07).**
+
+1. **Q1 — discrepancy register: LLM-assisted classification.** Pure
+   string-match is too fragile for synonym/paraphrase robustness in
+   hand-authored RESEARCH_PLAN.md text. (SPEC_v0_8 §4.5)
+2. **Q2 — claim_inventory: full coverage; no salience filter.** TSV
+   form scales; the holistic prompt's word budget is the natural cut.
+   Revisit at v0.8.x if a project's inventory exceeds ~150 claim_ids.
+   (§4.6)
+3. **Q3 — STRONG/THIN/EXPLORATORY triage: rolled into story builder.**
+   No separate `discovery.v1` step; outline is tier-shaped; verdict
+   recorded in `00_story_outline.md` frontmatter. (§5)
+4. **Q4 — holistic-write default model: Opus 4.6.** Accepted +$2–3/run
+   trade-off vs Sonnet for integrative-biology quality. Sonnet
+   available via `--model claude-sonnet-4-6`. (§6.7, §14)
+5. **Q5 — fallback reviewer: kept, rewritten to v3 schema.**
+   `fallback_reviewer.v2.md` runs at Tier 3 when beril-adversarial CLI
+   absent; logged in `audit/cascade.jsonl` as `reviewer:"fallback"` for
+   M7 score-sheet distinguishability. v0.8.0 does NOT hard-require
+   beril-adversarial. (§7.4, §15)
+6. **Q6 — `[NEEDS CITATION]` handling: bounded supplementary pool.**
+   Holistic write may emit `[NEEDS CITATION: <topic>]`. Tier 1 counts;
+   `phase_supplementary_pool` runs at Phase 5 boundary if any markers
+   exist (≤15 entries / 5 per topic / 1 round; verified-by-resolution;
+   tagged `source: "supplementary_round"` in pool.json). Residual
+   markers halt to `phase=citation_gap_blocked` with three user
+   choices (scope-down / accept-as-limitation / manual-citation).
+   (§9.5)
+7. **Q7 — copy-edit: on by default; broader scope (clarity + concision).**
+   Line-diff cap replaced by per-claim semantic-invariance post-check:
+   5 hard invariants (claim_id cross-walk, citation cross-walk,
+   numeric-token preservation, hedge-marker non-increase, header
+   preservation) + 1 budget invariant (≤15% manuscript-level
+   word-count delta, retry-once on overrun). Failing 1–5 rejects
+   wholesale; failing 6 retries with tightened prompt budget. (§11)
+8. **Q8 — M7 cut-over reviewer: Adam-only.** Structured user-centered
+   review deferred to a post-v0.8.0 launch milestone. M7 is a
+   research-iteration decision, not a public launch. (§16)
+9. **Q9 — release shape: v0.8.0 IS the cut-over.** No parallel-track
+   v0.9.0 staging release. M7 gate is the decision point. (§17 M8)
+10. **Q10 — archive layout: directory-layout interpretation.**
+    `prompts/archive/v0_7/` mirrors active `prompts/` filenames;
+    resurrection is path-mechanical; no PROVENANCE.md (git history
+    is the canonical record). (§15)
+11. **Q11 — old V0_8_0_PUNCH_LIST.md disposition: renamed.** Renamed
+    to `archive-v0_8_language_quality_punch_list.md` 2026-05-07.
+12. **Q12 — SPEC.md vs SPEC_v0_8.md: coexist through v0.8.x.**
+    Consolidate at v1.0.
+
+**Alternatives considered.** Continuing v0.7.x patch cycle (rejected:
+asymptotic; downstream symptoms of upstream weakness); a different
+review-tier shape (e.g., 5-reviewer ensemble per AI Scientist —
+rejected: AI Scientist's empirical failure to clear the main-conf
+bar suggests reviewer-count-doubling is not the lever); requiring
+beril-adversarial as a hard dependency (rejected per Q5: skill must
+remain installable in environments without the sibling skill);
+strict no-`[NEEDS CITATION]` policy at holistic write (rejected
+per Q6: forces fabrication or premature reframing).
+
+**Migration discipline.** v0.7.x stays default until M7 cut-over
+decision. v0.8.0 ships as opt-in `--writer-version v0_8` during
+M2–M6. M8 is the cut-over commit + release notes + MIGRATION_NOTES.md
++ state-schema migration script. v0.7.x section prompts move to
+`prompts/archive/v0_7/` rather than being deleted (per Q10).
+
+**Cut-over gate (M7).** A/B run on ibd_phage_targeting; v0.8.0 must
+dominate v0.7.x on ≥4 of 6 metrics (token cost, wall-clock,
+adversarial findings count, plan-vs-execution gap count, citation
+accuracy, paper-review skill assessment) OR have documented
+accepted-trade-off reason. If gate fails: keep v0.7.x default; ship
+v0.8.0 as experimental flag.
+
+**Per-milestone discipline (per `feedback_punch_list_release_pattern.md`).**
+Each milestone: punch list at start (`M{N}_PUNCH_LIST.md`), smoke
+test at end (`tests/smoke/m{N}_smoke.py`), decision-log entry on
+non-obvious choices, memory summary at close.
+
+**Cost target.** Typical run $7.50–$16 / 22–38 min (1.7–2.0× v0.7.x);
+explicit accepted trade-off for the integrative-biology quality gain.
+M7 measures actual cost; if v0.8.0 cost lands above 1.3× *and*
+quality dominance is unclear, M7 go/no-go shifts toward keeping
+v0.7.x as default.
+
+**Related:** SPEC_v0_8.md (authoritative spec for all 8 phases);
+auto-memory `project_paper_writer_v0_8_architecture.md` (decision
+context); auto-memory `project_paper_writer_v0_8_m0.md` (M0 ship
+summary); the prior `archive-v0_8_language_quality_punch_list.md`
+(superseded approach, kept for trail).
+
+---
+
 *Append new decisions below this line. Use the next D-NNN ID.*
