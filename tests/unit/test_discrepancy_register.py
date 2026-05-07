@@ -1,7 +1,6 @@
 """Tests for skill/tools/discrepancy_register.py — Phase 0 NEW tool (M1).
 
-Coverage in this conversation (Tier A1.a + A1.b only — A1.c LLM
-classifier deferred):
+Coverage (Tier A1.a + A1.b + A1.c + A1.d):
 
   - A2.a (3 tests) Pre-pass parsing + classification
       - plan-only candidate (prescribed but not executed)
@@ -12,26 +11,43 @@ classifier deferred):
       - stopword removal
       - stem-equivalence ("test" ≡ "testing" ≡ "tests")
 
-  - A2.f partial (3 tests) I/O contract
+  - A2.c (4 tests) LLM contract — uses a fake llm_call seam:
+      - equivalent label drops to no register entry
+      - paraphrase label drops to no register entry
+      - discrepancy label produces a register entry
+      - malformed JSON (trailing-comma flavor) is repaired
+
+  - A2.d (4 tests) Validator (exit 4 on schema violation):
+      - out-of-enum severity rejected
+      - out-of-enum label rejected
+      - non-substring quote rejected (anti-fabrication)
+      - valid pass-through accepted
+
+  - A2.e (2 tests) Idempotency cache:
+      - identical-input rerun is byte-stable + zero LLM calls
+      - prompt SHA bump invalidates the cache
+
+  - A2.f (3 tests) I/O contract
       - audit JSONL emitted with required fields per SPEC §4.7
-      - exit codes correct (0 success, 2 input parse error, 3 LLM gap)
+      - exit codes correct (0, 2, 3)
       - --no-llm path bypasses the LLM seam
+
+  - A2.g (2 tests) Render
+      - markdown output is well-formed for LLM-classified discrepancies
+      - D-NNN numbering increments correctly across reruns with new
+        findings (cache invalidates on input change → fresh ids)
 
   - Render-smoke (1 test) — per feedback_render_test_must_evaluate_fstring,
       evaluate format_register_md against synthetic entries rather than
       grepping the source. Format function is a regular function not an
       f-string template, but the discipline still applies.
 
-  - JSON helper (2 tests) — pre-baked for A1.c reuse, smoke today.
+  - JSON helper (2 tests) — exercises lenient_json_load directly.
 
   - Synthetic-fixture end-to-end (1 test) — exercises the
       tests/fixtures/m1/discrepancy_synthetic_001/ AC: 5 plan analyses
       + 4 exec analyses (3 overlap + 1 unprescribed) → pre-pass yields
       6 candidates: 2 plan_only + 1 exec_only + 3 overlap.
-
-Out of scope here (filed in tasks for the next conversation):
-  A2.c LLM contract, A2.d Validator, A2.e Idempotency, A2.g Render
-  numbering across reruns. These need A1.c / A1.d to land first.
 """
 
 from __future__ import annotations
@@ -314,13 +330,13 @@ class TestA2fIOContract:
         assert record["inputs"]["research_plan"] is None  # missing
         assert record["inputs"]["methods_provenance"] is not None  # present
 
-    def test_exit_code_3_when_llm_seam_not_implemented_and_no_llm_unset(
-        self, tmp_path: Path,
+    def test_exit_code_3_on_llm_call_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
-        """Without --no-llm, the run should drive into the LLM seam. In
-        this milestone (A1.b), A1.c is not implemented; the seam raises
-        LLMNotImplemented, which main() maps to exit 3 + audit line.
-        Validates the exit-code-3 contract from M1_PUNCH_LIST A1.a."""
+        """Without --no-llm, the run drives into the LLM seam. If the
+        seam raises LLMCallError (subprocess crash, malformed envelope,
+        etc.) main() maps to exit 3 + audit line. Validates the
+        exit-code-3 contract from M1_PUNCH_LIST A1.a."""
         plan_p = tmp_path / "RESEARCH_PLAN.md"
         prov_p = tmp_path / "methods_provenance.md"
         # Need at least one overlap candidate to drive into the LLM seam.
@@ -330,6 +346,11 @@ class TestA2fIOContract:
         """), encoding="utf-8")
         prov_p.write_text(_PROVENANCE_OVERLAP_EXAMPLE, encoding="utf-8")
         out_dir = tmp_path / "out"
+
+        # Force the LLM seam to fail synthetically — no real subprocess.
+        def _boom(sys_p, usr_p, model):
+            raise dr.LLMCallError("simulated subprocess crash")
+        monkeypatch.setattr(dr, "classifier_llm_call", _boom)
 
         rc = dr.main([
             "--methods-provenance", str(prov_p),
@@ -514,3 +535,435 @@ class TestCLI:
         assert "--research-plan" in proc.stdout
         assert "--output-dir" in proc.stdout
         assert "--no-llm" in proc.stdout
+
+
+# ===========================================================================
+# Helpers for A2.c/d/e/g — common overlap-fixture + canned-LLM patterns.
+# ===========================================================================
+
+# A single-overlap fixture used widely: plan and exec both reference
+# Pearson correlation. The LLM seam decides what the label is.
+_PLAN_SINGLE_OVERLAP = textwrap.dedent("""\
+    ## Analysis Plan
+    - Pearson correlation between dose and OD600.
+""")
+
+
+def _canned_llm(response_text: str, cost_usd: float = 0.012):
+    """Construct a fake llm_call seam returning the given response text
+    and cost. Asserts called exactly once per run (sanity check that
+    we don't accidentally call the LLM twice in a single
+    classify_overlap_candidates_with_llm invocation)."""
+    state = {"calls": 0}
+
+    def _call(sys_p: str, usr_p: str, model: str) -> tuple[str, float]:
+        state["calls"] += 1
+        return response_text, cost_usd
+    _call.calls = lambda: state["calls"]  # type: ignore[attr-defined]
+    return _call
+
+
+def _write_overlap_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    plan_p = tmp_path / "RESEARCH_PLAN.md"
+    prov_p = tmp_path / "methods_provenance.md"
+    out_dir = tmp_path / "out"
+    plan_p.write_text(_PLAN_SINGLE_OVERLAP, encoding="utf-8")
+    prov_p.write_text(_PROVENANCE_OVERLAP_EXAMPLE, encoding="utf-8")
+    return plan_p, prov_p, out_dir
+
+
+def _canned_response(
+    *,
+    label: str = "discrepancy",
+    severity: str = "load-bearing",
+    plan_quote_verbatim: str = "Pearson correlation between dose and OD600.",
+    exec_quote_verbatim: str = "Pearson correlation",
+    severity_justification: str = "Test families differ.",
+    candidate_index: int = 0,
+) -> str:
+    """A valid one-element JSON array the parse + validator both accept
+    (plan_quote_verbatim is a substring of the canonical plan bullet
+    in _PLAN_SINGLE_OVERLAP; exec_quote_verbatim is a substring of the
+    test_name in _PROVENANCE_OVERLAP_EXAMPLE)."""
+    return json.dumps([{
+        "candidate_index": candidate_index,
+        "label": label,
+        "severity": severity,
+        "severity_justification": severity_justification,
+        "plan_quote_verbatim": plan_quote_verbatim,
+        "exec_quote_verbatim": exec_quote_verbatim,
+    }])
+
+
+# ===========================================================================
+# A2.c — LLM contract (mocked seam: equivalent / paraphrase / discrepancy
+# / malformed-JSON repair)
+# ===========================================================================
+
+class TestA2cLLMContract:
+    def test_equivalent_label_drops_to_no_register_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """When the LLM labels the only overlap candidate `equivalent`,
+        the register has zero LLM-classified entries (per SPEC §4.5:
+        equivalent + paraphrase pairs are dropped)."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(label="equivalent", severity="cosmetic"))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+        md = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+        # Empty LLM-classified register → no D-NNN entries surfaced.
+        assert "## D-001" not in md
+        # The deterministic pre-pass also emitted nothing here (the only
+        # candidate is the overlap), so the register is empty by design.
+        assert "Discrepancy Register" in md
+
+    def test_paraphrase_label_drops_to_no_register_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Paraphrase is dropped just like equivalent (v0.8.0 SPEC §4.5)."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(label="paraphrase", severity="cosmetic"))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+        md = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+        assert "## D-001" not in md
+
+    def test_discrepancy_label_produces_register_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """When the LLM labels the overlap `discrepancy`, that pair
+        becomes a register entry with type=plan-prescribed-not-executed,
+        the LLM's severity, and a recommendation built from the
+        severity_justification."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy",
+            severity="load-bearing",
+            severity_justification=(
+                "Plan prescribed parametric Pearson; exec applied a "
+                "different test family."
+            ),
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+        md = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+        assert "## D-001 — type: plan-prescribed-not-executed" in md
+        assert "Severity: load-bearing" in md
+        # Recommendation echoes the severity justification.
+        assert "Plan prescribed parametric Pearson" in md
+        # Execution citation has the notebook+cell from the provenance.
+        assert "notebooks/01.ipynb" in md
+        assert "cell 4" in md
+
+    def test_malformed_json_trailing_comma_repaired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Trailing commas in the LLM response are repairable per
+        feedback_llm_json_trailing_commas_repairable. The lenient
+        loader fixes them silently; the run completes with exit 0."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        # Construct a malformed-but-repairable response: trailing comma
+        # before closing `]` AND inside the inner object.
+        valid = _canned_response(label="discrepancy")
+        # Inject a trailing comma after the last array element.
+        malformed = valid.rstrip("]") + ",]"
+        fake = _canned_llm(malformed)
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+        # Trailing-comma repair note goes to stderr; we can't easily
+        # capture it across the subprocess-free main() path here, so
+        # rely on register correctness as the AC.
+        md = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+        assert "## D-001" in md
+
+
+# ===========================================================================
+# A2.d — Validator (exit 4 on schema violation)
+# ===========================================================================
+
+class TestA2dValidator:
+    def test_out_of_enum_severity_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM emits severity='catastrophic' (not in the enum) →
+        validator raises ValidationError → main() returns 4 + audit
+        line records exit_status=4."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy", severity="catastrophic",
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        assert record["exit_status"] == 4
+
+    def test_out_of_enum_label_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM emits label='unrelated' → validator rejects → exit 4."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="unrelated", severity="cosmetic",
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+
+    def test_non_substring_quote_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM fabricates a plan_quote_verbatim that is NOT a substring
+        of the input candidate's plan_quote → validator rejects → exit
+        4. Anti-fabrication discipline."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy",
+            severity="load-bearing",
+            plan_quote_verbatim="A FABRICATED QUOTE NOT IN THE PLAN",
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+
+    def test_valid_pass_through_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A schema-compliant LLM response passes the validator → exit 0
+        + register written. Pass-through baseline."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy", severity="load-bearing",
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+        assert (out_dir / "discrepancy_register.md").is_file()
+
+
+# ===========================================================================
+# A2.e — Idempotency cache
+# ===========================================================================
+
+class TestA2eIdempotency:
+    def test_identical_input_rerun_skips_llm_and_emits_byte_stable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Running twice on identical inputs: first run calls LLM,
+        second run hits cache, makes zero LLM calls, writes
+        byte-identical register markdown. Audit JSONL records both
+        runs (cache_hit=false then cache_hit=true)."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(label="discrepancy"))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        # First run: cache miss, fake LLM called once.
+        rc1 = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc1 == 0
+        first_md = (out_dir / "discrepancy_register.md").read_bytes()
+        assert fake.calls() == 1  # type: ignore[attr-defined]
+
+        # Second run: cache hit, fake should NOT be called again.
+        rc2 = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc2 == 0
+        second_md = (out_dir / "discrepancy_register.md").read_bytes()
+        assert second_md == first_md, (
+            "rerun should be byte-identical to first run"
+        )
+        assert fake.calls() == 1, (  # type: ignore[attr-defined]
+            "second run should hit cache; LLM should not be called"
+        )
+
+        # Audit confirms cache_hit=false then cache_hit=true.
+        audit_lines = (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()
+        assert len(audit_lines) == 2
+        rec1 = json.loads(audit_lines[0])
+        rec2 = json.loads(audit_lines[1])
+        assert rec1["cache_hit"] is False
+        assert rec2["cache_hit"] is True
+        # cost_usd on hit is 0.0 (no fresh bill).
+        assert rec2["cost_usd"] == 0.0
+
+    def test_prompt_sha_bump_invalidates_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Bumping the prompt file's content (simulating a prompt
+        version bump) invalidates the cache and forces a fresh LLM
+        call. parser_VERSION is included in the cache key for the
+        same reason; we exercise the prompt-change leg here because
+        it's the user-facing one."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(label="discrepancy"))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        # First run: caches result.
+        rc1 = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc1 == 0
+        assert fake.calls() == 1  # type: ignore[attr-defined]
+
+        # Simulate a prompt SHA change by repointing _PROMPT_PATH at a
+        # synthetic alternate prompt file. The validator + parser
+        # side-effects are the same; only the SHA differs → cache miss.
+        alt_prompt = tmp_path / "discrepancy_classify.alt.md"
+        alt_prompt.write_text(
+            dr._PROMPT_PATH.read_text(encoding="utf-8") + "\n# bumped\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(dr, "_PROMPT_PATH", alt_prompt)
+
+        rc2 = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc2 == 0
+        assert fake.calls() == 2, (  # type: ignore[attr-defined]
+            "prompt SHA change should invalidate cache → fresh LLM call"
+        )
+
+
+# ===========================================================================
+# A2.g — Render: markdown well-formed for LLM-classified discrepancies
+# + D-NNN numbering across reruns
+# ===========================================================================
+
+class TestA2gRender:
+    def test_register_markdown_well_formed_for_llm_classified_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The register markdown produced after an LLM-classified
+        discrepancy is well-formed per SPEC §4.5: D-NNN heading, plan
+        quote with section reference, execution citation, severity,
+        recommendation. Uses an evaluating render check (per
+        feedback_render_test_must_evaluate_fstring) on the rendered
+        bytes, not a grep of source."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(
+            label="discrepancy",
+            severity="load-bearing",
+            severity_justification="Methods drift requires reconciliation.",
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 0
+        md = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+
+        # SPEC §4.5 D-001 example fields all present.
+        assert "# Discrepancy Register" in md
+        assert "## D-001 — type: plan-prescribed-not-executed" in md
+        assert '- Plan §Analysis Plan: "Pearson correlation between dose and OD600."' in md
+        assert "- Execution: notebook notebooks/01.ipynb cell 4 line 12 applies Pearson correlation" in md
+        assert "- Severity: load-bearing" in md
+        assert "- Recommendation: Reconcile in Methods" in md
+        assert "Methods drift requires reconciliation" in md
+
+    def test_dnnn_numbering_increments_correctly_across_reruns_with_new_findings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """When inputs change between runs (cache invalidates), the
+        register is rewritten with fresh D-NNN ids starting at D-001.
+        Run 1: 1 plan-only finding → D-001. Run 2 (new input): 1
+        plan-only + 1 LLM-classified discrepancy → D-001, D-002 (fresh
+        run, fresh ids). The append-only spec (SPEC §4.5) is at the
+        AUDIT level (jsonl); the register MARKDOWN is per-run state."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        fake = _canned_llm(_canned_response(label="discrepancy"))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        # Run 1: no plan-only candidates (overlap only); LLM produces 1
+        # discrepancy → D-001 only.
+        rc1 = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc1 == 0
+        md1 = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+        assert "## D-001 — type: plan-prescribed-not-executed" in md1
+        assert "## D-002" not in md1
+
+        # Run 2: ADD a plan-only bullet to the plan. Cache invalidates
+        # (input SHA changed). New register has 2 entries: D-001 (the
+        # plan-only) and D-002 (the LLM discrepancy).
+        plan_p.write_text(
+            _PLAN_SINGLE_OVERLAP + "- Permutation test on the difference of medians.\n",
+            encoding="utf-8",
+        )
+        rc2 = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc2 == 0
+        md2 = (out_dir / "discrepancy_register.md").read_text(encoding="utf-8")
+        assert "## D-001" in md2
+        assert "## D-002" in md2
+        assert "## D-003" not in md2
+        # D-001 is the plan-only (deterministic pre-pass first); D-002
+        # is the LLM-classified overlap.
+        first_entry_block = md2.split("## D-002")[0]
+        assert "Permutation test on the difference of medians" in first_entry_block

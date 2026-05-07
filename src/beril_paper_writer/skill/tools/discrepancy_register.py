@@ -35,15 +35,25 @@ I/O contract (this milestone):
   --output-dir <path>            required; writes:
                                    <output-dir>/discrepancy_register.md
                                    <output-dir>/audit/phase0.jsonl  (append)
-  --no-llm                       debug; skip A1.c (currently always set —
-                                 A1.c not yet implemented; without this
-                                 flag the tool exits 3 per the contract).
+  --no-llm                       debug; skip A1.c. Emits only the
+                                 deterministic plan_only + exec_only
+                                 candidates; overlap pairs are skipped
+                                 with a footer note. Used by the C1.b
+                                 cost-justification ablation.
 
 Exit codes:
   0 — success (register file written; entry count may be zero).
   1 — usage error (--help, missing required flag).
   2 — input parse error (required file missing or empty).
-  3 — LLM call failure (or A1.c not yet implemented), with --no-llm not set.
+  3 — LLM call failure (subprocess crash, JSON unparseable after lenient
+      repair, transport error). With --no-llm set, the LLM seam is never
+      reached and exit 3 is impossible.
+  4 — validator rejection of LLM output: out-of-enum label/severity, or
+      a quote field that is not a substring of the input candidate's
+      content. The LLM was called and billed; the audit JSONL line
+      records the cost. Re-run after re-reading the prompt; if the
+      validator keeps rejecting, the prompt needs a contract update
+      (bump prompt version → cache invalidates).
 
 Audit JSONL line schema (one line per invocation, appended to
 <output-dir>/audit/phase0.jsonl):
@@ -51,16 +61,27 @@ Audit JSONL line schema (one line per invocation, appended to
   {
     "timestamp": "2026-05-07T14:23:01Z",
     "tool": "discrepancy_register",
-    "version": "0.8.0-m1-A1.b",
+    "version": "0.8.0-m1-A1.cd",
     "inputs": {
       "methods_provenance": "<sha256>",
       "research_plan": "<sha256>"
     },
     "output_path": "<absolute path to discrepancy_register.md>",
     "entry_count": 3,
-    "cost_usd": 0.0,
+    "cost_usd": 0.0123,
+    "cache_hit": false,
     "exit_status": 0
   }
+
+Idempotency cache:
+
+  <output-dir>/audit/discrepancy_cache.json — JSON map of
+  cache_key (hex SHA-256 over (methods_provenance_sha, research_plan_sha,
+  prompt_sha, parser_VERSION)) → cached classifications. On hit, the
+  LLM is skipped and the cached output is re-emitted byte-identical; the
+  audit JSONL line still appends with `cache_hit: true` so reruns stay
+  observable (per SPEC §4.7). Any input SHA change OR prompt-file change
+  OR parser_VERSION bump invalidates the cache.
 
 Discipline notes baked into this module (per auto-memory):
 
@@ -88,17 +109,19 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 
 # Module version. Distinct from package version because audit consumers
 # may want to track precisely which sub-milestone wrote a given line.
 # Bump on contract-affecting changes (new audit fields, schema changes).
-VERSION = "0.8.0-m1-A1.b"
+VERSION = "0.8.0-m1-A1.cd"
 
 
 # ---------------------------------------------------------------------------
@@ -761,8 +784,17 @@ def emit_audit_line(
     entry_count: int,
     cost_usd: float,
     exit_status: int,
+    cache_hit: bool = False,
 ) -> None:
-    """Append one JSONL audit line to <output-dir>/audit/phase0.jsonl."""
+    """Append one JSONL audit line to <output-dir>/audit/phase0.jsonl.
+
+    `cache_hit=True` records that the LLM call was skipped because the
+    idempotency cache had a hit on the (methods_sha, plan_sha,
+    prompt_sha, parser_VERSION) key. The append still happens — every
+    invocation is observable per SPEC §4.7. Cost on a hit is 0.0 (no
+    LLM bill); we don't re-charge the original cached call to the
+    rerun.
+    """
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     # SHA-256 only over inputs that actually exist. If an input path
@@ -784,6 +816,7 @@ def emit_audit_line(
         "output_path": str(output_path),
         "entry_count": entry_count,
         "cost_usd": cost_usd,
+        "cache_hit": cache_hit,
         "exit_status": exit_status,
     }
     with audit_path.open("a", encoding="utf-8") as f:
@@ -791,39 +824,618 @@ def emit_audit_line(
 
 
 # ---------------------------------------------------------------------------
-# LLM seam (A1.c — not implemented in this milestone)
+# LLM classifier seam (A1.c) + validator (A1.d)
 # ---------------------------------------------------------------------------
 
-class LLMNotImplemented(RuntimeError):
-    """Raised when --no-llm is NOT set but A1.c is still pending.
-    Caller should map to exit code 3 per the punch list."""
+# Resolve the prompt path relative to this module so the runtime SHA is
+# stable across invocations. The prompt SHA is one of the four cache-key
+# components — bumping the prompt invalidates cache entries automatically.
+_MODULE_DIR = Path(__file__).resolve().parent
+_SKILL_DIR = _MODULE_DIR.parent
+_PROMPT_PATH = _SKILL_DIR / "prompts" / "discrepancy_classify.v1.md"
+
+
+# Enums the validator enforces. Out-of-enum values land an exit-4
+# rejection with a structured error.
+_VALID_LABELS: frozenset[str] = frozenset({"equivalent", "paraphrase", "discrepancy"})
+_VALID_SEVERITIES: frozenset[str] = frozenset({"load-bearing", "cosmetic", "unclear"})
+
+
+# Cost ceiling per SPEC §4.5. Soft warning, not a hard halt — the audit
+# line records the actual spend, and the orchestrator can decide to
+# escalate. Hard halts belong in the bash-level cost circuit-breaker
+# (paper_writer.sh's MAX_COST_USD), not in this individual tool.
+_COST_CEILING_USD = 0.05
+
+
+# LLM model alias (Haiku 4.5 per SPEC §4.5 cost target). Public for
+# CLI override and test monkeypatch.
+DEFAULT_CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
+
+
+class LLMCallError(RuntimeError):
+    """Subprocess crashed, JSON unparseable, or the response body was
+    empty / not a JSON array. Caller maps to exit code 3."""
+
+
+class ValidationError(RuntimeError):
+    """The LLM produced syntactically-valid JSON but the content
+    violated the schema (out-of-enum value, non-substring quote, wrong
+    array length, gap in candidate_index). Caller maps to exit code 4.
+
+    Carries a `.diagnostics` dict so the audit line and stderr message
+    can name the specific candidate and field that failed.
+    """
+    def __init__(self, message: str, diagnostics: Optional[dict] = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+@dataclass
+class ClassificationEntry:
+    """One LLM-classified row — pre-validation."""
+    candidate_index: int
+    label: str           # equivalent | paraphrase | discrepancy
+    severity: str        # load-bearing | cosmetic | unclear
+    severity_justification: str
+    plan_quote_verbatim: str
+    exec_quote_verbatim: str
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Subprocess wrapper around `claude -p`. Public so tests can monkeypatch.
+# ---------------------------------------------------------------------------
+
+# Type alias for the LLM-call seam — system prompt, user prompt, model →
+# (response_text, cost_usd). Tests replace this with a canned-response
+# fake; the real implementation calls `claude -p --output-format json`.
+ClassifierLLMCall = Callable[[str, str, str], tuple[str, float]]
+
+
+def _invoke_classifier_llm_subprocess(
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+) -> tuple[str, float]:
+    """Default LLM seam: subprocess to `claude -p`. Returns
+    (response_text, cost_usd).
+
+    Uses `--output-format json` so we can capture cost from the envelope's
+    `total_cost_usd` field rather than parse a stream-json event log.
+    The CLI is invoked with `CLAUDECODE=` to detach from any inherited
+    Claude Code session env (matches the convention in paper_writer.sh
+    and adversarial_review.sh).
+
+    No `--allowedTools` grant — this prompt produces inline JSON, not a
+    file write; the LLM has no need for filesystem tools and granting
+    them invites a stochastic Write-tool detour.
+
+    Raises LLMCallError on subprocess failure or unparseable envelope.
+    """
+    if shutil.which("claude") is None:
+        raise LLMCallError(
+            "'claude' CLI not found on PATH; cannot invoke LLM "
+            "classifier. Pass --no-llm for the deterministic-only path."
+        )
+
+    # CLAUDECODE= prefix matches the existing convention; ensures we
+    # don't inherit a parent claude-code session that would change
+    # invocation semantics.
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+
+    cmd = [
+        "claude", "-p",
+        "--model", model,
+        "--system-prompt", system_prompt,
+        "--output-format", "json",
+        "--dangerously-skip-permissions",
+        user_prompt,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=180.0,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise LLMCallError(
+            f"claude -p timed out after {e.timeout}s without responding"
+        ) from e
+    except OSError as e:
+        raise LLMCallError(f"claude -p failed to launch: {e}") from e
+
+    if proc.returncode != 0:
+        raise LLMCallError(
+            f"claude -p exited {proc.returncode}; stderr:\n{proc.stderr.strip()}"
+        )
+
+    # Envelope shape (claude -p --output-format json):
+    #   {"type": "result", "subtype": "success", "result": "<text>",
+    #    "total_cost_usd": 0.0123, "usage": {...}, ...}
+    raw = proc.stdout.strip()
+    if not raw:
+        raise LLMCallError("claude -p returned empty stdout")
+
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise LLMCallError(
+            f"claude -p envelope was not parseable JSON: {e.msg} "
+            f"(line {e.lineno} col {e.colno})"
+        ) from e
+
+    if not isinstance(envelope, dict):
+        raise LLMCallError(
+            f"claude -p envelope was not a JSON object: type={type(envelope).__name__}"
+        )
+
+    if envelope.get("is_error"):
+        raise LLMCallError(
+            f"claude -p reported is_error=true: {envelope.get('result', '<no result>')}"
+        )
+
+    response_text = envelope.get("result")
+    if not isinstance(response_text, str):
+        raise LLMCallError(
+            f"envelope missing string 'result' field; got: {type(response_text).__name__}"
+        )
+
+    # Cost may be absent on some CLI versions; default to 0.0 with a
+    # stderr note rather than fail. Better to ship without cost-tracking
+    # than to fail a smoke for an envelope-field rename.
+    cost_raw = envelope.get("total_cost_usd")
+    if isinstance(cost_raw, (int, float)):
+        cost_usd = float(cost_raw)
+    else:
+        sys.stderr.write(
+            "  note: claude -p envelope did not include total_cost_usd; "
+            "audit will record cost_usd=0.0\n"
+        )
+        cost_usd = 0.0
+
+    return response_text, cost_usd
+
+
+# Module-level seam reference. Tests monkeypatch this to a fake.
+classifier_llm_call: ClassifierLLMCall = _invoke_classifier_llm_subprocess
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly
+# ---------------------------------------------------------------------------
+
+def _candidate_exec_text(c: PrePassCandidate) -> str:
+    """The `exec_quote` we substring-check `exec_quote_verbatim` against.
+
+    The prompt encourages the LLM to copy the test name verbatim, but
+    we permit it to also copy the library path or notebook citation —
+    any of those should pass the validator's substring check, so we
+    concatenate them all into the canonical exec_quote text per
+    candidate.
+    """
+    if c.exec_ is None:
+        return ""
+    x = c.exec_
+    return f"{x.test_name} | {x.library_path} | {x.notebook} cell {x.cell} line {x.line}"
+
+
+def build_classifier_user_prompt(overlap_candidates: list[PrePassCandidate]) -> str:
+    """Render the user-prompt half of the LLM call: a list of N
+    candidate pairs, each with plan and exec sides, in candidate_index
+    order.
+
+    Public so tests can pin the wire format.
+    """
+    n = len(overlap_candidates)
+    lines: list[str] = [
+        f"You will classify N={n} candidate plan-vs-execution pairs.",
+        "",
+        "For each candidate, decide: equivalent / paraphrase / discrepancy.",
+        "Quote verbatim from the candidate's plan_quote and exec content",
+        "fields when populating plan_quote_verbatim and exec_quote_verbatim.",
+        "",
+        "Return a JSON array of exactly N entries, in candidate_index order,",
+        "conforming to the schema in your system prompt. The first character",
+        "of your response must be `[` and the last `]`. No prose, no fences.",
+        "",
+        "CANDIDATES:",
+        "",
+    ]
+    for i, c in enumerate(overlap_candidates):
+        if c.plan is None or c.exec_ is None:
+            # Defensive — overlap candidates always have both sides; if
+            # this fires it's an upstream bug.
+            raise ValueError(
+                f"overlap candidate {i} missing plan or exec side: {c.to_dict()}"
+            )
+        lines.append(f"[{i}] plan_section: {c.plan.plan_section!r}")
+        lines.append(f"    plan_quote: {c.plan.plan_quote!r}")
+        lines.append(f"    exec_test_name: {c.exec_.test_name!r}")
+        lines.append(f"    exec_library: {c.exec_.library_path!r}")
+        lines.append(
+            f"    exec_notebook: {c.exec_.notebook!r} "
+            f"cell {c.exec_.cell} line {c.exec_.line}"
+        )
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Response parse
+# ---------------------------------------------------------------------------
+
+def _strip_code_fences(text: str) -> str:
+    """Strip a leading ```json (or ```) fence and trailing ``` if the LLM
+    ignored the no-fence rule. Defensive — the prompt forbids fences but
+    cheap robustness costs nothing."""
+    s = text.strip()
+    if s.startswith("```"):
+        # Drop first line through to the closing fence.
+        first_nl = s.find("\n")
+        if first_nl != -1:
+            s = s[first_nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+    return s.strip()
+
+
+def parse_classifier_response(
+    response_text: str,
+    *,
+    expected_count: int,
+) -> list[ClassificationEntry]:
+    """Parse the LLM's stdout response into ClassificationEntry list.
+
+    Raises LLMCallError on JSON-level failures (unparseable after
+    lenient repair, wrong top-level type, wrong length). Schema-level
+    failures (out-of-enum, non-substring quotes) come later in
+    validate_classifications and raise ValidationError instead — the
+    distinction matters because LLMCallError → exit 3 (LLM call retry
+    is the right response) while ValidationError → exit 4 (LLM was
+    paid; the prompt or candidate set may need work).
+    """
+    cleaned = _strip_code_fences(response_text)
+    try:
+        data = lenient_json_load(cleaned, source="<classifier-response>")
+    except json.JSONDecodeError as e:
+        raise LLMCallError(
+            f"classifier response was not valid JSON after lenient repair: "
+            f"{e.msg} (line {e.lineno} col {e.colno})"
+        ) from e
+
+    if not isinstance(data, list):
+        raise LLMCallError(
+            f"classifier response top-level type was {type(data).__name__}, "
+            f"expected list"
+        )
+
+    if len(data) != expected_count:
+        raise LLMCallError(
+            f"classifier response length {len(data)} != "
+            f"expected {expected_count} candidates"
+        )
+
+    entries: list[ClassificationEntry] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise LLMCallError(
+                f"classifier entry {i} was {type(item).__name__}, "
+                f"expected object"
+            )
+        # Required-field presence check is at LLMCallError tier (the
+        # response is structurally broken); content correctness is at
+        # ValidationError tier later.
+        try:
+            entries.append(ClassificationEntry(
+                candidate_index=int(item["candidate_index"]),
+                label=str(item["label"]),
+                severity=str(item["severity"]),
+                severity_justification=str(item.get("severity_justification", "")),
+                plan_quote_verbatim=str(item.get("plan_quote_verbatim", "")),
+                exec_quote_verbatim=str(item.get("exec_quote_verbatim", "")),
+            ))
+        except KeyError as e:
+            raise LLMCallError(
+                f"classifier entry {i} missing required field: {e.args[0]}"
+            ) from e
+        except (TypeError, ValueError) as e:
+            raise LLMCallError(
+                f"classifier entry {i} had a field of the wrong type: {e}"
+            ) from e
+
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Validator (A1.d)
+# ---------------------------------------------------------------------------
+
+def validate_classifications(
+    classifications: list[ClassificationEntry],
+    overlap_candidates: list[PrePassCandidate],
+) -> None:
+    """Reject schema-violating entries with structured ValidationError.
+
+    Checks (each → exit 4 with diagnostics):
+      - candidate_index in [0, N) and matches array order with no gaps
+        / duplicates.
+      - label ∈ {equivalent, paraphrase, discrepancy}.
+      - severity ∈ {load-bearing, cosmetic, unclear}.
+      - plan_quote_verbatim is a substring of the input candidate's
+        plan_quote (anti-fabrication).
+      - exec_quote_verbatim is a substring of the input candidate's
+        exec content (anti-fabrication).
+
+    Pass-through is a no-op return; the caller continues with the
+    validated entries.
+    """
+    n = len(overlap_candidates)
+    if len(classifications) != n:
+        raise ValidationError(
+            f"validator: classification count {len(classifications)} != "
+            f"candidate count {n}",
+            {"expected": n, "got": len(classifications)},
+        )
+
+    seen_indices: set[int] = set()
+    for pos, ce in enumerate(classifications):
+        # Order + uniqueness + bounds.
+        if ce.candidate_index != pos:
+            raise ValidationError(
+                f"validator: classification at position {pos} has "
+                f"candidate_index={ce.candidate_index}; expected {pos} "
+                f"(entries must be in ascending candidate_index order, "
+                f"no gaps, no duplicates)",
+                {"position": pos, "candidate_index": ce.candidate_index},
+            )
+        if ce.candidate_index in seen_indices:
+            raise ValidationError(
+                f"validator: duplicate candidate_index={ce.candidate_index}",
+                {"candidate_index": ce.candidate_index},
+            )
+        if not (0 <= ce.candidate_index < n):
+            raise ValidationError(
+                f"validator: candidate_index={ce.candidate_index} out of "
+                f"bounds [0, {n})",
+                {"candidate_index": ce.candidate_index, "bound": n},
+            )
+        seen_indices.add(ce.candidate_index)
+
+        # Enum checks.
+        if ce.label not in _VALID_LABELS:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index} has out-of-enum "
+                f"label={ce.label!r}; allowed: {sorted(_VALID_LABELS)}",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "label",
+                    "value": ce.label,
+                    "allowed": sorted(_VALID_LABELS),
+                },
+            )
+        if ce.severity not in _VALID_SEVERITIES:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index} has out-of-enum "
+                f"severity={ce.severity!r}; allowed: {sorted(_VALID_SEVERITIES)}",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "severity",
+                    "value": ce.severity,
+                    "allowed": sorted(_VALID_SEVERITIES),
+                },
+            )
+
+        # Anti-fabrication: substring checks against the input candidate.
+        cand = overlap_candidates[ce.candidate_index]
+        plan_text = cand.plan.plan_quote if cand.plan else ""
+        exec_text = _candidate_exec_text(cand)
+        if ce.plan_quote_verbatim and ce.plan_quote_verbatim not in plan_text:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index}'s "
+                f"plan_quote_verbatim is not a substring of the input "
+                f"candidate's plan_quote (LLM may have paraphrased or "
+                f"fabricated). Got: {ce.plan_quote_verbatim!r}; expected "
+                f"a substring of: {plan_text!r}",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "plan_quote_verbatim",
+                    "value": ce.plan_quote_verbatim,
+                    "input": plan_text,
+                },
+            )
+        if ce.exec_quote_verbatim and ce.exec_quote_verbatim not in exec_text:
+            raise ValidationError(
+                f"validator: candidate {ce.candidate_index}'s "
+                f"exec_quote_verbatim is not a substring of the input "
+                f"candidate's exec content. Got: {ce.exec_quote_verbatim!r}; "
+                f"expected a substring of: {exec_text!r}",
+                {
+                    "candidate_index": ce.candidate_index,
+                    "field": "exec_quote_verbatim",
+                    "value": ce.exec_quote_verbatim,
+                    "input": exec_text,
+                },
+            )
+
+
+# ---------------------------------------------------------------------------
+# Cache (A1.d idempotency)
+# ---------------------------------------------------------------------------
+
+def compute_cache_key(
+    *,
+    methods_provenance_sha: str,
+    research_plan_sha: str,
+    prompt_sha: str,
+    parser_version: str,
+) -> str:
+    """SHA-256 over the four-tuple. parser_version inclusion follows
+    feedback_cache_key_chunked_only_when_chunked: it's the safety net
+    against silently-invisible parser fixes (e.g., the multi-line
+    bullet fold from A1.b).
+    """
+    h = hashlib.sha256()
+    payload = json.dumps(
+        {
+            "methods_provenance_sha": methods_provenance_sha,
+            "research_plan_sha": research_plan_sha,
+            "prompt_sha": prompt_sha,
+            "parser_version": parser_version,
+        },
+        sort_keys=True,
+    )
+    h.update(payload.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _read_cache(cache_path: Path) -> dict:
+    """Return the cache dict (key → cached payload). Empty dict if the
+    file doesn't exist or is unparseable."""
+    if not cache_path.is_file():
+        return {}
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # Corruption recovery: treat as empty. Don't crash a run because
+        # a previous abort left half-written cache JSON.
+        return {}
+
+
+def _write_cache(cache_path: Path, cache: dict) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic-ish: write to .tmp, then rename. Cache files are small and
+    # rarely contended; this is cheap insurance.
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(cache, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    tmp.replace(cache_path)
+
+
+def _cached_payload_to_classifications(
+    payload: dict,
+) -> list[ClassificationEntry]:
+    """Reconstruct ClassificationEntry list from a cached dict."""
+    rows = payload.get("classifications", [])
+    return [
+        ClassificationEntry(
+            candidate_index=int(r["candidate_index"]),
+            label=str(r["label"]),
+            severity=str(r["severity"]),
+            severity_justification=str(r.get("severity_justification", "")),
+            plan_quote_verbatim=str(r.get("plan_quote_verbatim", "")),
+            exec_quote_verbatim=str(r.get("exec_quote_verbatim", "")),
+        )
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Top-level LLM seam (replaces the M1 stub)
+# ---------------------------------------------------------------------------
+
+def classification_to_register_entry(
+    ce: ClassificationEntry,
+    cand: PrePassCandidate,
+    entry_id: str,
+) -> RegisterEntry:
+    """Translate a `discrepancy`-labeled classification + its source
+    candidate into a register entry. Equivalent / paraphrase entries
+    are dropped UPSTREAM; this function is only called for
+    `label == 'discrepancy'`.
+
+    Type framing per SPEC §4.5: the plan prescribed something (the
+    candidate has a plan side) and the execution did something
+    different (the candidate has an exec side that diverges). Type =
+    `plan-prescribed-not-executed` — the canonical SPEC §4.5 D-001
+    framing.
+    """
+    assert cand.plan is not None and cand.exec_ is not None  # invariant
+    x = cand.exec_
+    return RegisterEntry(
+        entry_id=entry_id,
+        type_="plan-prescribed-not-executed",
+        plan_quote=cand.plan.plan_quote,
+        plan_section=cand.plan.plan_section,
+        execution_citation=(
+            f"notebook {x.notebook} cell {x.cell} line {x.line} applies "
+            f"{x.test_name} (`{x.library_path}`)"
+        ),
+        severity=ce.severity,
+        recommendation=(
+            f"Reconcile in Methods: {ce.severity_justification.rstrip('.')}.  "
+            f"Update the Hypothesis / Limitations framing if the chosen test "
+            f"changes the claim's footing."
+        ),
+    )
 
 
 def classify_overlap_candidates_with_llm(
     overlap_candidates: list[PrePassCandidate],
     *,
-    model: str = "claude-haiku-4-5-20251001",
+    model: str = DEFAULT_CLASSIFIER_MODEL,
     prompt_path: Optional[Path] = None,
-) -> list[RegisterEntry]:
-    """A1.c entry point — NOT IMPLEMENTED in this milestone.
+    llm_call: Optional[ClassifierLLMCall] = None,
+) -> tuple[list[ClassificationEntry], float]:
+    """A1.c entry point. Classifies overlap candidates via the LLM seam
+    and returns (validated_classifications, cost_usd).
 
-    Wired in a separate conversation. The contract:
-      Input: a list of overlap candidates from pre_pass().
-      Output: a list of RegisterEntry — only those classified as
-              `discrepancy` (equivalent + paraphrase pairs are dropped
-              upstream, never become register entries).
+    Equivalent + paraphrase + discrepancy entries are ALL returned;
+    upstream `run_register` filters to discrepancy when emitting the
+    register. Returning all three lets callers (and the cache) preserve
+    the full adjudication context across reruns.
 
-    Per feedback_llm_json_unfixable_in_parser: the prompt at
-    prompts/discrepancy_classify.v1.md MUST include explicit
-    anti-pattern rules for unescaped quotes inside string values.
-    Per feedback_llm_json_trailing_commas_repairable: the response
-    parse should call lenient_json_load on the LLM output.
+    `llm_call` defaults to the module-level `classifier_llm_call`
+    seam (the subprocess wrapper). Tests pass a fake.
+
+    Raises:
+      LLMCallError on subprocess / JSON-shape failures (exit 3).
+      ValidationError on schema violations (exit 4).
+
+    The empty-overlap shortcut returns ([], 0.0) without calling the
+    LLM — saves cost on projects whose deterministic pre-pass already
+    surfaced everything.
     """
-    raise LLMNotImplemented(
-        "A1.c (LLM classifier for overlap candidates) is not yet "
-        "implemented in this milestone. Pass --no-llm to run the "
-        "deterministic pre-pass only, or wait for the next milestone."
+    if not overlap_candidates:
+        return [], 0.0
+
+    prompt_path = prompt_path or _PROMPT_PATH
+    if not prompt_path.is_file():
+        raise LLMCallError(
+            f"discrepancy_classify prompt not found at {prompt_path}; "
+            f"the skill installation is incomplete"
+        )
+
+    system_prompt = prompt_path.read_text(encoding="utf-8")
+    user_prompt = build_classifier_user_prompt(overlap_candidates)
+
+    call = llm_call or classifier_llm_call
+    response_text, cost_usd = call(system_prompt, user_prompt, model)
+
+    if cost_usd > _COST_CEILING_USD:
+        # Soft warning; don't block. Cost overrun is observability,
+        # not a hard halt — the caller's circuit-breaker handles
+        # cumulative caps.
+        sys.stderr.write(
+            f"  warn: classifier call cost ${cost_usd:.4f} exceeded "
+            f"ceiling ${_COST_CEILING_USD:.4f}/run\n"
+        )
+
+    classifications = parse_classifier_response(
+        response_text, expected_count=len(overlap_candidates),
     )
+    validate_classifications(classifications, overlap_candidates)
+
+    return classifications, cost_usd
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +1447,11 @@ class RunResult:
     entries: list[RegisterEntry]
     overlap_count: int
     cost_usd: float
+    cache_hit: bool = False
+    # Full classifications kept on the result so the cache writer + tests
+    # can introspect equivalent/paraphrase calls that didn't become
+    # register entries.
+    classifications: list[ClassificationEntry] = field(default_factory=list)
 
 
 def run_register(
@@ -842,12 +1459,24 @@ def run_register(
     plan_text: str,
     provenance_text: str,
     no_llm: bool,
+    llm_call: Optional[ClassifierLLMCall] = None,
+    cached_classifications: Optional[list[ClassificationEntry]] = None,
+    cached_cost_usd: Optional[float] = None,
 ) -> RunResult:
     """Pure-function orchestration: parse + pre-pass + (LLM if requested)
     + assemble register entries with auto-numbered D-NNN ids.
 
     Doesn't touch disk; doesn't emit audit. main() handles those so this
     function is straightforward to unit-test.
+
+    `llm_call` overrides the module-level subprocess seam — used by
+    tests to inject canned classifications.
+
+    `cached_classifications` short-circuits the LLM call when supplied
+    (the cache layer in main() does this on a cache hit). `cached_cost_usd`
+    is the cost from the original (cached) call; on a hit the audit
+    line records cost_usd=0.0 (no fresh LLM bill) but the cached
+    classifications still produce identical register entries.
     """
     plan_items = parse_plan_analyses(plan_text)
     exec_items = parse_provenance_executions(provenance_text)
@@ -874,20 +1503,52 @@ def run_register(
         entries.append(candidate_to_entry(c, _next()))
 
     cost_usd = 0.0
-    if not no_llm:
-        # A1.c lives here. Currently raises LLMNotImplemented.
-        llm_entries = classify_overlap_candidates_with_llm(overlap)
-        # When implemented: `cost_usd = <observed>` and we splice the
-        # LLM-classified entries into the register, also assigning fresh
-        # D-NNN ids continuing from `next_id`.
-        for e in llm_entries:
-            e.entry_id = _next()
-            entries.append(e)
+    classifications: list[ClassificationEntry] = []
+    cache_hit = False
+
+    if not no_llm and overlap:
+        if cached_classifications is not None:
+            # Cache-hit path: skip LLM, re-validate cached entries
+            # (defensive — the cache file could have been hand-edited
+            # between runs; if validation fails we rebuild rather than
+            # ship a stale entry).
+            try:
+                validate_classifications(cached_classifications, overlap)
+                classifications = cached_classifications
+                cache_hit = True
+                cost_usd = 0.0  # no fresh LLM bill on a hit
+            except ValidationError:
+                # Cache poisoned somehow — fall through to a fresh LLM
+                # call. Don't crash the run on a hand-edited cache.
+                sys.stderr.write(
+                    "  note: discrepancy_cache.json failed re-validation; "
+                    "falling through to a fresh LLM call\n"
+                )
+                classifications, cost_usd = classify_overlap_candidates_with_llm(
+                    overlap, llm_call=llm_call,
+                )
+        else:
+            classifications, cost_usd = classify_overlap_candidates_with_llm(
+                overlap, llm_call=llm_call,
+            )
+
+        # Splice `discrepancy`-labeled classifications into the register
+        # in candidate_index order. equivalent + paraphrase entries are
+        # carried in `classifications` for cache fidelity but do NOT
+        # become register rows in v0.8.0 (per SPEC §4.5).
+        for ce in classifications:
+            if ce.label == "discrepancy":
+                cand = overlap[ce.candidate_index]
+                entries.append(
+                    classification_to_register_entry(ce, cand, _next())
+                )
 
     return RunResult(
         entries=entries,
         overlap_count=len(overlap),
         cost_usd=cost_usd,
+        cache_hit=cache_hit,
+        classifications=classifications,
     )
 
 
@@ -995,14 +1656,35 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
+    # Idempotency cache lookup. Skipped when --no-llm is set (no LLM
+    # call to cache) or when the prompt file is missing (we can't compute
+    # a stable cache key without it).
+    cache_path = out_dir / "audit" / "discrepancy_cache.json"
+    cache_key: Optional[str] = None
+    cached_classifications: Optional[list[ClassificationEntry]] = None
+
+    if not args.no_llm and _PROMPT_PATH.is_file():
+        cache_key = compute_cache_key(
+            methods_provenance_sha=_sha256_of_path(methods_path),
+            research_plan_sha=_sha256_of_path(plan_path),
+            prompt_sha=_sha256_of_path(_PROMPT_PATH),
+            parser_version=VERSION,
+        )
+        cache = _read_cache(cache_path)
+        if cache_key in cache:
+            cached_classifications = _cached_payload_to_classifications(
+                cache[cache_key]
+            )
+
     try:
         result = run_register(
             plan_text=plan_text,
             provenance_text=provenance_text,
             no_llm=args.no_llm,
+            cached_classifications=cached_classifications,
         )
-    except LLMNotImplemented as e:
-        print(f"error: {e}", file=sys.stderr)
+    except LLMCallError as e:
+        print(f"error: LLM call failed: {e}", file=sys.stderr)
         emit_audit_line(
             audit_path=audit_path,
             methods_provenance_path=methods_path,
@@ -1013,13 +1695,56 @@ def main(argv: Optional[list[str]] = None) -> int:
             exit_status=3,
         )
         return 3
+    except ValidationError as e:
+        print(
+            f"error: validator rejected LLM output: {e}",
+            file=sys.stderr,
+        )
+        if e.diagnostics:
+            print(
+                f"  diagnostics: {json.dumps(e.diagnostics, sort_keys=True)}",
+                file=sys.stderr,
+            )
+        # The LLM was called and billed before the validator ran; record
+        # the actual cost so the audit reflects the spend. We don't
+        # have direct access to it from outside run_register on
+        # exception path; emit 0.0 with a note rather than guess.
+        emit_audit_line(
+            audit_path=audit_path,
+            methods_provenance_path=methods_path,
+            research_plan_path=plan_path,
+            output_path=output_path,
+            entry_count=0,
+            cost_usd=0.0,
+            exit_status=4,
+        )
+        return 4
 
+    # Write the register markdown.
     md = format_register_md(
         entries=result.entries,
         overlap_skipped_count=result.overlap_count,
         no_llm=args.no_llm,
     )
     output_path.write_text(md, encoding="utf-8")
+
+    # Persist the cache only after a fresh LLM call (NOT on a cache hit
+    # — we don't need to re-write what we just read; NOT on --no-llm —
+    # there's nothing to cache; NOT when overlap was empty — no LLM
+    # call happened).
+    if (
+        cache_key is not None
+        and not result.cache_hit
+        and not args.no_llm
+        and result.classifications
+    ):
+        cache = _read_cache(cache_path)
+        cache[cache_key] = {
+            "classifications": [c.to_dict() for c in result.classifications],
+            "cost_usd": result.cost_usd,
+            "timestamp": _utc_now_iso(),
+        }
+        _write_cache(cache_path, cache)
 
     emit_audit_line(
         audit_path=audit_path,
@@ -1029,11 +1754,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         entry_count=len(result.entries),
         cost_usd=result.cost_usd,
         exit_status=0,
+        cache_hit=result.cache_hit,
     )
 
     print(
         f"Wrote {output_path} ({len(result.entries)} entries"
         + (f"; {result.overlap_count} overlap(s) skipped" if args.no_llm else "")
+        + (" [cache hit]" if result.cache_hit else "")
         + ")",
         file=sys.stderr,
     )
