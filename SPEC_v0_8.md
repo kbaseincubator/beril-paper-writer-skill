@@ -1047,6 +1047,21 @@ End of milestone is Adam's sign-off on the spec questions in §19.
 `claim_inventory.py` + unit tests + smoke against `ibd_phage_targeting`.
 Independently testable; no orchestrator changes yet. ~400 LOC + ~40 tests.
 
+**M1 / M2 contract pointer (added 2026-05-07).** Phase 0's extracted
+artifacts are **`methods_provenance.md` + `figures_inventory.md` +
+`tables_inventory.md`** — the three markdowns produced by v0.7.x's
+`extract_methods.py` / `extract_figures.py` / `extract_tables.py`. The
+manifest TSVs (`figures_manifest.tsv`, `tables_manifest.tsv`) are NOT
+phase_extract artifacts; they are emitted by the `results.v1` LLM prompt
+during the writing pipeline and encode `paper_order_n` (throughline-driven,
+post-figure-selection). M2's holistic prompt grounds against the three
+markdowns; M1's downstream tools (`discrepancy_register.py`,
+`claim_inventory.py` per §4.5/§4.6) take the markdowns as inputs and have
+no manifest dependency. This contract was discovered via M1 §C0 CLI-surface
+verification on 2026-05-07; M1_PUNCH_LIST.md §C0 was corrected
+correspondingly. Carry this forward when wiring M2's prompt inputs and
+when assessing any future change to phase_extract's surface.
+
 **M2 — Holistic write + story builder.** `paper_writer_v0_8.md` (the
 holistic prompt) + `00_story_outline.md` builder prompt + Phase-1
 amendment loop + state.phase enum extension. Produces a draft on
