@@ -178,7 +178,7 @@ from typing import Callable, Optional
 # B1.a + B1.b shipped as "0.8.0-m1-B1.ab"; B1.c + B1.d (this commit)
 # bumps to "B1.abcd". M1 close will land as "0.8.0-m1" once Tier C/D/E
 # wrap.
-VERSION = "0.8.0-m1-B1.abcd"
+VERSION = "0.8.0-m1-B1.h"
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,14 @@ TSV_COLUMNS: tuple[str, ...] = (
 # integer percentages match too. Allows arbitrary digit count before
 # the decimal — projects with "1234%" expression growth don't get
 # silently truncated.
-PERCENTAGE_RE = re.compile(r"\b\d+(?:\.\d+)?%")
+#
+# B1.e (D-036) — allow optional whitespace between digit and `%`.
+# REPORT.md authors routinely write `95 %` (space form); the original
+# regex only matched `95%` and missed 9 of 12 percentage patterns in
+# the C2.b ground-truth check on ibd_phage_targeting. The space is
+# constrained to `\s{0,2}` (no newline-spanning) to keep the match
+# tightly scoped to the intended digit-unit pair.
+PERCENTAGE_RE = re.compile(r"\b\d+(?:\.\d+)?\s{0,2}%")
 
 
 # Class 2 — Ratios with units (e.g. "16.2 mg/L", "2.5 fold", "10×",
@@ -258,10 +265,18 @@ RATIO_WITH_UNIT_RE = re.compile(
 # "Speedup". `≤` (Unicode ≤ = U+2264) is not in the punch-list catalog
 # and we don't extend it here — C2.b will tell us if recall demands it
 # (it usually does in BERIL projects' Methods sections).
+#
+# B1.e (D-036) — two extensions to close C2.b recall gaps:
+#   1. Add `≤` (Unicode ≤ = U+2264) to the operator class. BERIL Methods
+#      sections use it interchangeably with `<=`.
+#   2. Make the dot+fractional optional in the scientific-notation
+#      branch. REPORT.md uses both `p=2.4e-6` (with dot) and `p=7e-17`
+#      (no dot in mantissa); the original branch missed the dot-less
+#      form on `ibd_phage_targeting`.
 P_VALUE_RE = re.compile(
-    r"\b[pP]\s*(?:<|<=|=|>=|>)\s*0\.\d+"
+    r"\b[pP]\s*(?:<|<=|=|>=|>|≤|≥)\s*0\.\d+"
     r"|"
-    r"\b[pP]\s*=\s*\d+\.\d+[eE]-?\d+",
+    r"\b[pP]\s*[<=]\s*\d+(?:\.\d+)?[eE]-?\d+",
 )
 
 
@@ -307,6 +322,61 @@ METRIC_RE = re.compile(
 )
 
 
+# B1.e (D-036) — five new classes added 2026-05-07. Each closes a
+# documented gap from the C2.b ground-truth check on
+# `ibd_phage_targeting/REPORT.md`. All five contribute to
+# `effect_size_present` because they are non-rigor-flagged effect
+# sizes / counts; the holistic prompt is told that any such claim
+# without a CI / p-value sibling needs a hedge.
+
+# Class 7 — Correlations: Pearson r and Spearman ρ. Forms covered:
+#   "r = 0.96", "ρ=1.000", "r=+0.456", "r=−0.747"
+# Sign optional (ASCII +, - and Unicode minus −=U+2212). Decimal
+# REQUIRED — integer "r=1" is sus and almost always a typo or schema
+# leak.
+CORRELATION_RE = re.compile(
+    r"\b[rρ]\s*[=:]\s*[+−-]?\d+\.\d+",
+)
+
+# Class 8 — Odds ratios. Form: "OR=1.38", "OR = 234". Decimal
+# REQUIRED for the same reason. Word-boundary on OR prevents
+# mid-token false positives (e.g., "factOR=2" hitting if regex were
+# anchored loosely).
+ODDS_RATIO_RE = re.compile(
+    r"\bOR\s*[=:]\s*\d+(?:\.\d+)?",
+)
+
+# Class 9 — log fold change. Forms covered:
+#   "log₂FC +2.67"  (subscript ₂ = U+2082)
+#   "log2FC +5.66"  (ASCII)
+#   "log_2 FC -1.4" (ASCII with underscore)
+# Sign optional. Decimal REQUIRED.
+LOG_FC_RE = re.compile(
+    r"\blog[₂2]?(?:_2)?\s*FC\s*[+−-]?\d+\.\d+",
+)
+
+# Class 10 — Counts in "M of N" / "M / N" forms (UC Davis cohort
+# coverage, candidate-list sizes). Permits commas in M and N.
+# Examples: "14 of 23", "3,929 / 17,672", "45 / 51". Word-boundary
+# on the leading digit; trailing context not constrained beyond the
+# `of`/`/` separator. The downstream LLM in B1.c can disambiguate
+# false-positive matches like "Section 14 of 23 pages" if needed
+# (very rare in scientific REPORT.md).
+COUNT_OF_RE = re.compile(
+    r"\b\d+(?:,\d{3})*\s*(?:/|of)\s*\d+(?:,\d{3})*",
+    re.IGNORECASE,
+)
+
+# Class 11 — Cliff's δ effect-delta. Forms:
+#   "cliff δ = +0.50", "cliff δ=−0.358", "cliff=-0.747"
+# `δ` is U+03B4. Match either with the literal δ glyph or without.
+# Sign optional; decimal REQUIRED.
+CLIFF_DELTA_RE = re.compile(
+    r"\bcliff(?:\s*δ)?\s*[=:]?\s*[+−-]?\d+\.\d+",
+    re.IGNORECASE,
+)
+
+
 # Ordered tuple of (class_name, pattern). Order is canonical so the
 # regex sweep visits classes in a deterministic order.
 #
@@ -321,6 +391,12 @@ PATTERN_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("confidence_interval", CI_RE),
     ("n_count", N_COUNT_RE),
     ("metric", METRIC_RE),
+    # B1.e (D-036) additions:
+    ("correlation", CORRELATION_RE),
+    ("odds_ratio", ODDS_RATIO_RE),
+    ("log_fc", LOG_FC_RE),
+    ("count_of", COUNT_OF_RE),
+    ("cliff_delta", CLIFF_DELTA_RE),
 )
 
 
@@ -330,11 +406,21 @@ _CLASS_TO_FLAG: dict[str, str] = {
     "p_value": "pvalue_present",
     "confidence_interval": "ci_present",
     "metric": "effect_size_present",
-    # percentage / ratio_with_unit / n_count do NOT set any of the three
-    # flags — they're numeric assertions but not statistical-rigor
-    # signals in the M7 sense. claim_inventory.tsv still records them
-    # as candidates with all three flags = "no"; the holistic prompt's
-    # constructive constraint is: such claims need a hedge.
+    # B1.e additions: correlation, odds_ratio, log_fc, cliff_delta are
+    # all effect-size signals (different shapes than METRIC_RE's
+    # AUC/R²/RMSE/MAE keyword set, but semantically the same — they
+    # report a measured effect). count_of stays unflagged like
+    # n_count (it's a count, not an effect size).
+    "correlation": "effect_size_present",
+    "odds_ratio": "effect_size_present",
+    "log_fc": "effect_size_present",
+    "cliff_delta": "effect_size_present",
+    # percentage / ratio_with_unit / n_count / count_of do NOT set any
+    # of the three flags — they're numeric assertions but not
+    # statistical-rigor signals in the M7 sense. claim_inventory.tsv
+    # still records them as candidates with all three flags = "no";
+    # the holistic prompt's constructive constraint is: such claims
+    # need a hedge.
 }
 
 
@@ -888,6 +974,34 @@ _DEMARCATOR_COST_CEILING_USD = 0.10
 DEFAULT_DEMARCATOR_MODEL = "claude-haiku-4-5-20251001"
 
 
+# B1.f (D-038, 2026-05-07) — batch unresolved candidates so a single
+# claude -p call doesn't exceed the model's effective output-token
+# budget OR the subprocess wrapper's 180s timeout. Live-LLM smoke on
+# `ibd_phage_targeting` after B1.e produced 133 unresolved candidates
+# in one call → LLM dropped 42 indices (truncation) on the first
+# attempt and timed out on subsequent attempts. Batching to ~15
+# candidates per call yields predictable per-call latency (~30s) and
+# output token counts well under the model's per-response cap. Total
+# cost on the project: 9 batches × ~$0.10 each ≈ ~$0.90 (15× the
+# legacy $0.10 single-call ceiling, but per D-037 ceiling is tracked
+# not enforced; observed data informs M2 caps).
+DEFAULT_DEMARCATOR_BATCH_SIZE = 15
+
+
+# B1.g (D-039, 2026-05-07) — bounded-retry envelope on missing input
+# indices. The Haiku 4.5 demarcator non-deterministically drops 1–3
+# input candidates per dense-project run; retrying ONLY the missing
+# candidates as a fresh batch typically recovers them within 1–2
+# rounds. After exhausting retries, residual misses fall back to the
+# original `notes='unresolved'` candidate via expand_with_demarcations'
+# defensive empty-rows path. Three retries was chosen because (a) two
+# is too tight if the first retry partially succeeds and the second
+# needs a third pass, (b) more than three doubles cost without
+# meaningful coverage gain in observation. Per Adam D-037 cost
+# reframing, retry cost is recorded in audit JSONL but not gated.
+MAX_DEMARCATOR_RETRIES = 3
+
+
 # Soft cap on context texts inlined into the user prompt. Prevents a
 # malformed-fixture run from passing megabytes of provenance to the
 # LLM. ~12K chars is roughly 3K tokens — fits inside the SPEC §4.6
@@ -1078,19 +1192,124 @@ def _truncate_context(text: str, *, label: str) -> str:
     )
 
 
+def _extract_notebook_paths(
+    methods_provenance_text: str,
+    project_root: Optional[Path] = None,
+) -> list[str]:
+    """Extract every notebook path the LLM should be allowed to cite.
+    Returns sorted unique list. B1.h uses these as an explicit
+    allowlist in the user prompt.
+
+    Two sources are merged:
+      1. `notebooks/<basename>.ipynb` paths mentioned in
+         methods_provenance.md (canonical: AST-extracted notebooks
+         with detected stat-test invocations).
+      2. When `project_root` is provided, every `.ipynb` file under
+         `project_root/notebooks/` (covers notebooks that exist on
+         disk but aren't in methods_provenance.md — the same
+         coverage gap that motivated B1.e's project_root validator
+         fallback). On `ibd_phage_targeting`, methods_provenance
+         lists 13 of 32 disk notebooks; the union is the right
+         allowlist for the LLM.
+    """
+    paths = re.findall(
+        r"notebooks/[A-Za-z0-9._\-]+\.ipynb",
+        methods_provenance_text,
+    )
+    paths_set: set[str] = set(paths)
+    if project_root is not None:
+        notebooks_dir = project_root / "notebooks"
+        if notebooks_dir.is_dir():
+            for nb in notebooks_dir.glob("*.ipynb"):
+                paths_set.add(f"notebooks/{nb.name}")
+    return sorted(paths_set)
+
+
+def _extract_figure_or_table_labels(
+    figures_inventory_text: str,
+    tables_inventory_text: str,
+) -> list[str]:
+    """Extract every figure/table label the LLM should be allowed to
+    cite from figures_inventory.md / tables_inventory.md headings.
+    Used as an explicit allowlist in the demarcator user prompt.
+
+    Three label formats supported in observation:
+      1. `## Fig N`/`## Tbl N`/`## Table N` — short canonical form
+         used by some BERIL projects (matches the v0.4 era).
+      2. `### figures/<basename>.png` — path-form used by the
+         extract_figures.py emitter (e.g., on `ibd_phage_targeting`).
+      3. `### report_tbl_NN — Description` — id-form used by some
+         tables inventories.
+
+    We extract level-2 AND level-3 headings and emit candidate
+    labels in the form the inventory uses (the validator does
+    substring matching against the same blob, so the allowlist
+    must mirror inventory format byte-for-byte).
+    """
+    labels: list[str] = []
+    seen: dict[str, None] = {}
+
+    # Pattern 1: canonical short labels.
+    short_pattern = re.compile(
+        r"^#{1,4}\s+("
+        r"Fig(?:ure)?\s+[A-Za-z0-9._\-]+"
+        r"|"
+        r"T(?:bl|able)\s+[A-Za-z0-9._\-]+"
+        r")",
+        re.MULTILINE,
+    )
+    # Pattern 2: figures/PATH.png as a heading (path form).
+    path_pattern = re.compile(
+        r"^#{1,4}\s+`?(figures/[A-Za-z0-9._\-/]+\.(?:png|svg|jpg|jpeg|pdf))`?",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    # Pattern 3: report_tbl_NN id-form (also tbl_NN, table_NN).
+    id_pattern = re.compile(
+        r"^#{1,4}\s+`?(report_tbl_[A-Za-z0-9_]+|tbl_[A-Za-z0-9_]+)`?",
+        re.MULTILINE,
+    )
+
+    for blob in (figures_inventory_text, tables_inventory_text):
+        for pat in (short_pattern, path_pattern, id_pattern):
+            for m in pat.finditer(blob):
+                label = m.group(1).strip()
+                if label not in seen:
+                    seen[label] = None
+                    labels.append(label)
+    return labels
+
+
 def build_demarcator_user_prompt(
     unresolved_candidates: list["ClaimCandidate"],
     *,
     methods_provenance_text: str,
     figures_inventory_text: str,
     tables_inventory_text: str,
+    project_root: Optional[Path] = None,
 ) -> str:
     """Render the user-prompt half of the LLM call: a list of N
     multi-numeric sentences + the methods/figures/tables context.
 
     Public so tests can pin the wire format.
+
+    B1.h (D-040, 2026-05-07): adds explicit "VALID source_notebook
+    values" + "VALID figure_or_table values" allowlists derived from
+    the input contexts and emitted at the TOP of the user prompt
+    (before the inputs). Drives the LLM to copy from a menu rather
+    than paraphrase a notebook by its scientific subject (the
+    pre-B1.h failure mode that surfaced
+    `notebooks/NB07a_H3a_falsifiability.ipynb` when the real filename
+    was `notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb`, and
+    `Fig NB15` when no figure with that label exists).
     """
     n = len(unresolved_candidates)
+    nb_allowlist = _extract_notebook_paths(
+        methods_provenance_text, project_root=project_root,
+    )
+    fig_tbl_allowlist = _extract_figure_or_table_labels(
+        figures_inventory_text, tables_inventory_text,
+    )
+
     lines: list[str] = [
         f"You will demarcate N={n} multi-numeric sentence(s) from REPORT.md.",
         "",
@@ -1105,9 +1324,52 @@ def build_demarcator_user_prompt(
         "conforming to the schema in your system prompt. The first character",
         "of your response must be `[` and the last `]`. No prose, no fences.",
         "",
+        "============================================================",
+        "VALID source_notebook values — copy verbatim, do not paraphrase:",
+        "============================================================",
+    ]
+    if nb_allowlist:
+        for nb in nb_allowlist:
+            lines.append(f"  - {nb}")
+    else:
+        lines.append(
+            "  (no notebooks listed in methods_provenance.md; if you "
+            "cannot identify the source notebook from context, leave "
+            "source_notebook='' and the validator will reject the row "
+            "— this is correct behavior, do not invent.)"
+        )
+    lines.extend([
+        "",
+        "Picking source_notebook: COPY-PASTE one of the strings above.",
+        "Do NOT 'summarize' or 'describe' a notebook by its scientific",
+        "topic from RESEARCH_PLAN.md. Do NOT shorten, expand, or",
+        "rephrase the filename. The validator does a literal substring",
+        "or path-on-disk check — anything else fails exit 4.",
+        "",
+        "============================================================",
+        "VALID figure_or_table values — copy verbatim, OR leave EMPTY:",
+        "============================================================",
+    ])
+    if fig_tbl_allowlist:
+        for label in fig_tbl_allowlist:
+            lines.append(f"  - {label}")
+    else:
+        lines.append(
+            "  (no figure or table labels detected; set "
+            "figure_or_table='' for every row.)"
+        )
+    lines.extend([
+        "",
+        'Picking figure_or_table: COPY-PASTE one of the strings above OR',
+        'set figure_or_table="". Do NOT invent labels like "Fig NB15" or',
+        '"Tbl 7"; the NB-prefixed values are NOTEBOOK identifiers, not',
+        "figure or table identifiers. If you cannot find a fitting cite",
+        'in the allowlist, set figure_or_table="" — empty is correct,',
+        "fabrication is not.",
+        "",
         "INPUTS:",
         "",
-    ]
+    ])
     for i, c in enumerate(unresolved_candidates):
         # Single-line repr keeps the prompt compact + makes the
         # substring rule's expected target unambiguous.
@@ -1236,6 +1498,8 @@ def validate_demarcations(
     methods_provenance_text: str,
     figures_inventory_text: str,
     tables_inventory_text: str,
+    project_root: Optional[Path] = None,
+    allow_missing: Optional[set[int]] = None,
 ) -> None:
     """Reject schema-violating entries with structured ValidationError.
 
@@ -1251,14 +1515,40 @@ def validate_demarcations(
         No gaps allowed.
       - Per-row: claim_text non-empty AND substring of the input
         sentence_text.
-      - Per-row: source_notebook non-empty AND substring of
-        methods_provenance.md.
+      - Per-row: source_notebook non-empty AND grounded — accepted if
+        EITHER (a) substring of methods_provenance.md (legacy contract
+        for synthetic fixtures + tight catalogs) OR (b) when
+        project_root is provided, the path resolves to an existing
+        file under project_root. The disk-fallback was added in B1.e
+        (2026-05-07) after live-LLM smoke on `ibd_phage_targeting`
+        revealed the substring-only check rejected real notebooks
+        whose AST didn't surface a stat-test invocation
+        (extract_methods.py only catalogs ~40% of notebooks on dense
+        projects; the rest produce numerics via pandas/SQL/custom
+        code and end up legitimately cited by the LLM but not in
+        methods_provenance.md). See SPEC §4.6 + DECISIONS D-036.
       - Per-row: source_cell matches `^\\d+$`.
       - Per-row: figure_or_table is empty OR substring of
         figures_inventory.md OR tables_inventory.md.
 
     Pass-through is a no-op return; the caller continues with the
     validated entries.
+
+    `project_root` is optional. Tests using synthetic fixtures pass
+    None (and rely on methods_provenance_text containing the cite as
+    a substring). Production runs pass the real project root and the
+    disk fallback unblocks notebooks not in the AST extractor's view.
+
+    `allow_missing` (B1.g, D-039, 2026-05-07) is the set of input
+    candidate indices that may be absent from the demarcation set
+    without triggering a coverage failure. Used by the bounded-retry
+    path in `demarcate_unresolved_with_llm` after the LLM
+    non-deterministically drops a few indices that even retries
+    couldn't recover. The orchestrator's `expand_with_demarcations`
+    falls back to the original unresolved row for those indices,
+    preserving the M2 holistic prompt's grounding contract (every
+    candidate has at least one row; rare residuals carry the
+    multi-numeric original sentence with notes='unresolved').
     """
     n = len(unresolved_candidates)
 
@@ -1289,15 +1579,22 @@ def validate_demarcations(
             )
         last_idx = e.input_candidate_index
 
-    # Coverage check: every index in [0, N) must appear at least once.
+    # Coverage check: every index in [0, N) must appear at least once,
+    # except for indices in `allow_missing` (B1.g) which the caller
+    # explicitly tolerates after retries exhausted.
     seen_indices = {e.input_candidate_index for e in demarcations}
-    expected = set(range(n))
+    tolerated = allow_missing or set()
+    expected = set(range(n)) - tolerated
     if not expected.issubset(seen_indices):
         missing = sorted(expected - seen_indices)
         raise ValidationError(
             f"validator: demarcations do not cover all input "
             f"candidates; missing indices: {missing}",
-            {"missing": missing, "total": n},
+            {
+                "missing": missing,
+                "total": n,
+                "tolerated_missing": sorted(tolerated),
+            },
         )
     extra = sorted(seen_indices - expected)
     if extra:
@@ -1332,22 +1629,44 @@ def validate_demarcations(
                 },
             )
 
-        # source_notebook non-empty + substring of methods_provenance.md.
+        # source_notebook non-empty + grounded (substring of
+        # methods_provenance.md OR existing file under project_root).
+        # See B1.e change rationale in validate_demarcations docstring.
         if not e.source_notebook:
             raise ValidationError(
                 f"validator: row {pos} has empty source_notebook",
                 {"position": pos, "input_candidate_index": e.input_candidate_index},
             )
-        if e.source_notebook not in methods_provenance_text:
+        substring_ok = e.source_notebook in methods_provenance_text
+        disk_ok = False
+        if project_root is not None:
+            # Tolerate a leading "./" emitted by some LLM responses; the
+            # smoke harness's _resolve_notebook_cell normalizes the same
+            # way, so we mirror it here for consistency.
+            relative = e.source_notebook.lstrip("./")
+            disk_ok = (project_root / e.source_notebook).is_file() or (
+                project_root / relative
+            ).is_file()
+        if not (substring_ok or disk_ok):
+            grounding_hint = (
+                "neither a substring of methods_provenance.md nor an "
+                "existing file under project_root"
+                if project_root is not None
+                else "not a substring of methods_provenance.md and no "
+                     "project_root provided to fall back to disk check"
+            )
             raise ValidationError(
-                f"validator: row {pos}'s source_notebook is not a "
-                f"substring of methods_provenance.md (LLM may have "
-                f"fabricated the path). Got: {e.source_notebook!r}",
+                f"validator: row {pos}'s source_notebook is "
+                f"{grounding_hint} (LLM may have fabricated the path). "
+                f"Got: {e.source_notebook!r}",
                 {
                     "position": pos,
                     "field": "source_notebook",
                     "value": e.source_notebook,
                     "input_candidate_index": e.input_candidate_index,
+                    "project_root": str(project_root) if project_root else None,
+                    "substring_ok": substring_ok,
+                    "disk_ok": disk_ok,
                 },
             )
 
@@ -1396,28 +1715,42 @@ def compute_cache_key(
     tables_inventory_sha: str,
     prompt_sha: str,
     parser_version: str,
+    batch_size: Optional[int] = None,
 ) -> str:
-    """SHA-256 over the six-tuple. parser_version inclusion follows
+    """SHA-256 over the seven-tuple. parser_version inclusion follows
     feedback_cache_key_chunked_only_when_chunked: it's the safety net
     against silently-invisible parser fixes.
 
-    Six components vs A1.d's four because B1.c consumes
+    Per feedback_cache_key_chunked_only_when_chunked, batch_size is mixed
+    in only when explicitly set — passing the default
+    DEFAULT_DEMARCATOR_BATCH_SIZE produces a different cache key than
+    batch_size=None (which preserves the legacy 6-tuple key from B1.b).
+    Tests calling compute_cache_key without batch_size remain
+    byte-identical to legacy.
+
+    Six base components vs A1.d's four because B1.c consumes
     figures_inventory.md and tables_inventory.md as additional grounding
     surfaces — a change in either materially affects which cross-links
     the LLM is allowed to emit, so they must invalidate the cache.
+
+    B1.f adds the optional seventh component: batch_size. Different
+    batch sizes can produce different LLM responses (the LLM's output
+    distribution depends on input prompt length); cache-keying on
+    batch_size enforces "if you change the chunking, rebuild the
+    cache." The default-as-None pattern keeps existing tests stable.
     """
     h = hashlib.sha256()
-    payload = json.dumps(
-        {
-            "report_sha": report_sha,
-            "methods_provenance_sha": methods_provenance_sha,
-            "figures_inventory_sha": figures_inventory_sha,
-            "tables_inventory_sha": tables_inventory_sha,
-            "prompt_sha": prompt_sha,
-            "parser_version": parser_version,
-        },
-        sort_keys=True,
-    )
+    payload_dict: dict = {
+        "report_sha": report_sha,
+        "methods_provenance_sha": methods_provenance_sha,
+        "figures_inventory_sha": figures_inventory_sha,
+        "tables_inventory_sha": tables_inventory_sha,
+        "prompt_sha": prompt_sha,
+        "parser_version": parser_version,
+    }
+    if batch_size is not None:
+        payload_dict["batch_size"] = batch_size
+    payload = json.dumps(payload_dict, sort_keys=True)
     h.update(payload.encode("utf-8"))
     return h.hexdigest()
 
@@ -1465,6 +1798,17 @@ def _cached_payload_to_demarcations(
     ]
 
 
+def _cached_payload_to_tolerated_missing(payload: dict) -> set[int]:
+    """Reconstruct tolerated_missing set from a cached dict.
+
+    Backwards-compat: payloads written before B1.g (D-039) lack the
+    `tolerated_missing` key entirely → returns empty set, which keeps
+    pre-B1.g cache files validating against the strict full-coverage
+    rule (matching their original semantics)."""
+    raw = payload.get("tolerated_missing", [])
+    return {int(i) for i in raw}
+
+
 # ---------------------------------------------------------------------------
 # Top-level LLM seam
 # ---------------------------------------------------------------------------
@@ -1478,9 +1822,12 @@ def demarcate_unresolved_with_llm(
     model: str = DEFAULT_DEMARCATOR_MODEL,
     prompt_path: Optional[Path] = None,
     llm_call: Optional[DemarcatorLLMCall] = None,
-) -> tuple[list[DemarcatorEntry], float]:
+    project_root: Optional[Path] = None,
+    batch_size: int = DEFAULT_DEMARCATOR_BATCH_SIZE,
+    max_retries: int = MAX_DEMARCATOR_RETRIES,
+) -> tuple[list[DemarcatorEntry], float, set[int]]:
     """B1.c entry point. Demarcates multi-numeric sentences via the LLM
-    seam and returns (validated_demarcations, cost_usd).
+    seam and returns (validated_demarcations, cost_usd, tolerated_missing).
 
     The empty-input shortcut returns ([], 0.0) without calling the LLM
     — saves cost on projects whose deterministic pre-pass already
@@ -1488,13 +1835,50 @@ def demarcate_unresolved_with_llm(
 
     Raises:
       LLMCallError on subprocess / JSON-shape failures (exit 3).
-      ValidationError on schema violations (exit 4).
+      ValidationError on schema violations (exit 4). The actual
+        billed cost (summed across all batches that completed) is
+        reattached to the ValidationError as ``e.cost_usd`` so the
+        caller can record it in the audit line (B1.e closes the
+        cost_usd=0.0-on-exit-4 gap).
 
     `llm_call` defaults to the module-level `demarcator_llm_call` seam
     (the subprocess wrapper). Tests pass a fake.
+
+    `project_root` is forwarded to the validator's source_notebook
+    grounding check (B1.e). When provided, the validator accepts cites
+    that resolve to a real file under project_root, even if absent
+    from methods_provenance.md.
+
+    `batch_size` (B1.f, D-038, 2026-05-07): chunks unresolved candidates
+    so a single LLM call doesn't blow past the model's effective
+    output-token budget OR the subprocess wrapper's 180s timeout. The
+    LLM sees per-batch local indices [0..batch_size); we offset back
+    to absolute indices into `unresolved_candidates` before validation.
+    Default 15 was calibrated on `ibd_phage_targeting` after a 133-
+    candidate single call truncated to 91 demarcations. The single-
+    batch path is preserved when len(unresolved) <= batch_size to keep
+    behavior unchanged for small projects.
+
+    Cost-cap reframing (B1.e D-037, 2026-05-07): the per-call ceiling
+    is no longer a stderr-warning trigger. The audit line records
+    cost_usd; a future tightening will set ceilings from observed
+    data. Per Adam's directive, observability over enforcement during
+    M1.
+
+    Bounded retry on missing indices (B1.g, D-039, 2026-05-07): live
+    Haiku 4.5 demarcator non-deterministically drops ~1–3 indices per
+    dense-project run. After the initial batched sweep, missing
+    indices are collected and retried in a fresh LLM call (capped at
+    `max_retries`). Whatever indices remain after retries are returned
+    in the third tuple element (`tolerated_missing`); the caller
+    (`run_inventory` → `expand_with_demarcations`) falls back to the
+    original `notes='unresolved'` candidate for those positions. The
+    M2 holistic prompt's grounding contract (every candidate has at
+    least one row) is preserved by the original sentence carrying
+    forward when the LLM couldn't split it.
     """
     if not unresolved_candidates:
-        return [], 0.0
+        return [], 0.0, set()
 
     prompt_path = prompt_path or _PROMPT_PATH
     if not prompt_path.is_file():
@@ -1502,37 +1886,150 @@ def demarcate_unresolved_with_llm(
             f"claim_demarcate prompt not found at {prompt_path}; "
             f"the skill installation is incomplete"
         )
-
-    system_prompt = prompt_path.read_text(encoding="utf-8")
-    user_prompt = build_demarcator_user_prompt(
-        unresolved_candidates,
-        methods_provenance_text=methods_provenance_text,
-        figures_inventory_text=figures_inventory_text,
-        tables_inventory_text=tables_inventory_text,
-    )
-
-    call = llm_call or demarcator_llm_call
-    response_text, cost_usd = call(system_prompt, user_prompt, model)
-
-    if cost_usd > _DEMARCATOR_COST_CEILING_USD:
-        # Soft warning; don't block. Cost overrun is observability,
-        # not a hard halt — the orchestrator's circuit-breaker handles
-        # cumulative caps.
-        sys.stderr.write(
-            f"  warn: demarcator call cost ${cost_usd:.4f} exceeded "
-            f"ceiling ${_DEMARCATOR_COST_CEILING_USD:.4f}/run\n"
+    if batch_size < 1:
+        raise ValueError(
+            f"batch_size must be >= 1; got {batch_size!r}"
+        )
+    if max_retries < 0:
+        raise ValueError(
+            f"max_retries must be >= 0; got {max_retries!r}"
         )
 
-    demarcations = parse_demarcator_response(response_text)
-    validate_demarcations(
-        demarcations,
-        unresolved_candidates,
-        methods_provenance_text=methods_provenance_text,
-        figures_inventory_text=figures_inventory_text,
-        tables_inventory_text=tables_inventory_text,
-    )
+    system_prompt = prompt_path.read_text(encoding="utf-8")
+    call = llm_call or demarcator_llm_call
 
-    return demarcations, cost_usd
+    n = len(unresolved_candidates)
+    all_demarcations: list[DemarcatorEntry] = []
+    total_cost_usd = 0.0
+
+    # Helper that runs the LLM over a list of (absolute_index, candidate)
+    # pairs, with batching. Returns (demarcations, cost_usd) where
+    # demarcations have absolute input_candidate_index already set.
+    def _run_demarcator_pass(
+        pairs: list[tuple[int, ClaimCandidate]],
+        *,
+        pass_label: str,
+    ) -> tuple[list[DemarcatorEntry], float]:
+        if not pairs:
+            return [], 0.0
+        m = len(pairs)
+        # Single-batch fast-path: no offset arithmetic needed; preserves
+        # exact pre-B1.f behavior on small projects.
+        do_batch_local = m > batch_size
+        out_demarcations: list[DemarcatorEntry] = []
+        out_cost = 0.0
+        for batch_start_local in range(0, m, batch_size):
+            batch_pairs = pairs[batch_start_local : batch_start_local + batch_size]
+            batch_candidates = [c for _abs_idx, c in batch_pairs]
+            user_prompt = build_demarcator_user_prompt(
+                batch_candidates,
+                methods_provenance_text=methods_provenance_text,
+                figures_inventory_text=figures_inventory_text,
+                tables_inventory_text=tables_inventory_text,
+                project_root=project_root,
+            )
+            try:
+                response_text, batch_cost = call(system_prompt, user_prompt, model)
+            except LLMCallError as e:
+                # Annotate so the operator can pin whether one specific
+                # batch timed out vs. a model-level issue, and whether
+                # the failure was on the initial pass or a retry.
+                first_local = batch_pairs[0][0]
+                last_local = batch_pairs[-1][0]
+                if do_batch_local or pass_label != "initial":
+                    raise LLMCallError(
+                        f"{pass_label} batch "
+                        f"{batch_start_local // batch_size + 1} of "
+                        f"{(m + batch_size - 1) // batch_size} "
+                        f"(absolute candidates {first_local}..{last_local}): "
+                        f"{e}"
+                    ) from e
+                raise
+
+            out_cost += batch_cost
+            batch_demarcations = parse_demarcator_response(response_text)
+            # The LLM saw local indices [0..len(batch_pairs)). Map
+            # back to absolute via batch_pairs[k][0].
+            for d in batch_demarcations:
+                local = d.input_candidate_index
+                if not (0 <= local < len(batch_pairs)):
+                    # Out-of-range LLM index. Drop the row defensively;
+                    # the coverage check will catch the resulting gap
+                    # and trigger a retry (or fall through to
+                    # tolerated_missing). Don't raise here — we want
+                    # the rest of the batch to still register.
+                    continue
+                d.input_candidate_index = batch_pairs[local][0]
+                out_demarcations.append(d)
+        return out_demarcations, out_cost
+
+    # ---- Initial pass: all candidates ---------------------------------
+    initial_pairs = list(enumerate(unresolved_candidates))
+    initial_demarcations, initial_cost = _run_demarcator_pass(
+        initial_pairs, pass_label="initial"
+    )
+    all_demarcations.extend(initial_demarcations)
+    total_cost_usd += initial_cost
+
+    # ---- Bounded retry on missing indices -----------------------------
+    expected = set(range(n))
+
+    def _missing_set() -> set[int]:
+        seen = {d.input_candidate_index for d in all_demarcations}
+        return expected - seen
+
+    missing = _missing_set()
+    retry_round = 0
+    while missing and retry_round < max_retries:
+        retry_round += 1
+        sys.stderr.write(
+            f"  note: demarcator retry round {retry_round} of {max_retries} "
+            f"on {len(missing)} missing index(es): "
+            f"{sorted(missing)[:10]}"
+            f"{'...' if len(missing) > 10 else ''}\n"
+        )
+        retry_pairs = [(idx, unresolved_candidates[idx]) for idx in sorted(missing)]
+        retry_demarcations, retry_cost = _run_demarcator_pass(
+            retry_pairs, pass_label=f"retry-{retry_round}"
+        )
+        all_demarcations.extend(retry_demarcations)
+        total_cost_usd += retry_cost
+        missing = _missing_set()
+
+    # If retries exhausted without full coverage, residuals fall
+    # through to `expand_with_demarcations`' empty-rows pass-through.
+    tolerated_missing: set[int] = missing
+    if tolerated_missing:
+        sys.stderr.write(
+            f"  warn: demarcator could not cover {len(tolerated_missing)} "
+            f"input candidate(s) after {max_retries} retries; falling back "
+            f"to original notes='unresolved' rows for indices: "
+            f"{sorted(tolerated_missing)}\n"
+        )
+
+    # Sort by absolute input_candidate_index to keep
+    # validate_demarcations' ascending-order check happy. Within an
+    # index, preserve emission order across the initial + retry passes.
+    all_demarcations.sort(key=lambda d: d.input_candidate_index)
+
+    try:
+        validate_demarcations(
+            all_demarcations,
+            unresolved_candidates,
+            methods_provenance_text=methods_provenance_text,
+            figures_inventory_text=figures_inventory_text,
+            tables_inventory_text=tables_inventory_text,
+            project_root=project_root,
+            allow_missing=tolerated_missing,
+        )
+    except ValidationError as e:
+        # B1.e: reattach the cumulative billed cost so main()'s exit-4
+        # audit line records it. The caller catches this re-raised
+        # error and threads e.cost_usd into emit_audit_line.
+        e.cost_usd = total_cost_usd  # type: ignore[attr-defined]
+        raise
+
+    return all_demarcations, total_cost_usd, tolerated_missing
 
 
 # ---------------------------------------------------------------------------
@@ -1730,6 +2227,11 @@ class RunResult:
     # can introspect them. Empty list when no_llm or no unresolved
     # candidates surfaced.
     demarcations: list[DemarcatorEntry] = field(default_factory=list)
+    # B1.g (D-039): set of input candidate indices that the LLM (after
+    # max_retries) couldn't demarcate. expand_with_demarcations falls
+    # through to the original `notes='unresolved'` row for these. Cached
+    # alongside demarcations so reruns honor the same residual set.
+    tolerated_missing: set[int] = field(default_factory=set)
 
 
 def run_inventory(
@@ -1741,6 +2243,10 @@ def run_inventory(
     no_llm: bool,
     llm_call: Optional[DemarcatorLLMCall] = None,
     cached_demarcations: Optional[list[DemarcatorEntry]] = None,
+    cached_tolerated_missing: Optional[set[int]] = None,
+    project_root: Optional[Path] = None,
+    batch_size: int = DEFAULT_DEMARCATOR_BATCH_SIZE,
+    max_retries: int = MAX_DEMARCATOR_RETRIES,
 ) -> RunResult:
     """Pure-function orchestration: segment + extract + build candidates
     + (LLM if requested and unresolved candidates exist).
@@ -1777,13 +2283,16 @@ def run_inventory(
     cost_usd = 0.0
     cache_hit = False
     demarcations: list[DemarcatorEntry] = []
+    tolerated_missing: set[int] = set()
 
     if not no_llm and unresolved_candidates:
         if cached_demarcations is not None:
-            # Cache-hit path: skip LLM, re-validate cached entries
-            # (defensive — the cache file could have been hand-edited
-            # between runs; if validation fails we rebuild rather
-            # than ship stale rows).
+            # Cache-hit path: skip LLM, re-validate cached entries with
+            # the cached tolerated_missing set so a partial-coverage
+            # cache (B1.g residuals) re-validates byte-stably. Defensive
+            # — the cache file could have been hand-edited between
+            # runs; if validation fails we rebuild rather than ship
+            # stale rows.
             try:
                 validate_demarcations(
                     cached_demarcations,
@@ -1791,8 +2300,11 @@ def run_inventory(
                     methods_provenance_text=methods_provenance_text,
                     figures_inventory_text=figures_inventory_text,
                     tables_inventory_text=tables_inventory_text,
+                    project_root=project_root,
+                    allow_missing=cached_tolerated_missing or set(),
                 )
                 demarcations = cached_demarcations
+                tolerated_missing = cached_tolerated_missing or set()
                 cache_hit = True
                 cost_usd = 0.0
             except ValidationError:
@@ -1800,24 +2312,37 @@ def run_inventory(
                     "  note: claim_inventory_cache.json failed re-validation; "
                     "falling through to a fresh LLM call\n"
                 )
-                demarcations, cost_usd = demarcate_unresolved_with_llm(
+                demarcations, cost_usd, tolerated_missing = (
+                    demarcate_unresolved_with_llm(
+                        unresolved_candidates,
+                        methods_provenance_text=methods_provenance_text,
+                        figures_inventory_text=figures_inventory_text,
+                        tables_inventory_text=tables_inventory_text,
+                        llm_call=llm_call,
+                        project_root=project_root,
+                        batch_size=batch_size,
+                        max_retries=max_retries,
+                    )
+                )
+        else:
+            demarcations, cost_usd, tolerated_missing = (
+                demarcate_unresolved_with_llm(
                     unresolved_candidates,
                     methods_provenance_text=methods_provenance_text,
                     figures_inventory_text=figures_inventory_text,
                     tables_inventory_text=tables_inventory_text,
                     llm_call=llm_call,
+                    project_root=project_root,
+                    batch_size=batch_size,
+                    max_retries=max_retries,
                 )
-        else:
-            demarcations, cost_usd = demarcate_unresolved_with_llm(
-                unresolved_candidates,
-                methods_provenance_text=methods_provenance_text,
-                figures_inventory_text=figures_inventory_text,
-                tables_inventory_text=tables_inventory_text,
-                llm_call=llm_call,
             )
 
         # Expand the candidate list: replace each unresolved row with
         # the LLM's demarcated rows, recompute per-row flags, renumber.
+        # expand_with_demarcations' defensive empty-rows pass-through
+        # handles indices in tolerated_missing — they keep their
+        # original notes='unresolved' identity in the output.
         candidates = expand_with_demarcations(
             candidates, unresolved_candidates, demarcations,
         )
@@ -1828,6 +2353,7 @@ def run_inventory(
         unresolved_count=sum(1 for c in candidates if c.notes == "unresolved"),
         cost_usd=cost_usd,
         cache_hit=cache_hit,
+        tolerated_missing=tolerated_missing,
         demarcations=demarcations,
     )
 
@@ -1902,6 +2428,41 @@ def main(argv: Optional[list[str]] = None) -> int:
             "completeness check + ablation pattern."
         ),
     )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_DEMARCATOR_BATCH_SIZE,
+        help=(
+            "Number of unresolved candidates to demarcate per LLM call. "
+            "Default 15 — calibrated on ibd_phage_targeting where a "
+            "single 133-candidate call truncated the LLM's output and "
+            "later runs hit the 180s subprocess timeout. Total cost on "
+            "dense projects: ceil(N/batch_size) × ~$0.10/batch. Lower "
+            "values increase robustness; higher values reduce wall "
+            "time when projects have few unresolved candidates. Cache "
+            "key includes batch_size, so changing it invalidates the "
+            "idempotency cache."
+        ),
+    )
+    p.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional project root (the directory containing "
+            "RESEARCH_PLAN.md / REPORT.md / notebooks/). When set, the "
+            "B1.d validator additionally accepts source_notebook cites "
+            "that resolve to a real file under <project-root>/, even "
+            "if absent from methods_provenance.md (extract_methods.py "
+            "only catalogs notebooks with AST-detected stat tests; "
+            "real numerical claims often source from notebooks that "
+            "use pandas/SQL/custom code instead). Defaults to "
+            "<methods-provenance>.parent.parent (i.e. "
+            "<project>/papers/draft_N/methods_provenance.md → "
+            "<project>) if that resolves to a directory; otherwise "
+            "remains None and the validator runs substring-only."
+        ),
+    )
     args = p.parse_args(argv)
 
     report_path: Path = args.report
@@ -1909,6 +2470,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     figs_path: Path = args.figures_inventory
     tbls_path: Path = args.tables_inventory
     out_dir: Path = args.output_dir
+    batch_size: int = args.batch_size
+
+    if batch_size < 1:
+        print(
+            f"error: --batch-size must be >= 1; got {batch_size}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Project root resolution (B1.e): prefer explicit --project-root,
+    # else derive from methods_provenance.md's expected layout
+    # (<project>/papers/draft_N/methods_provenance.md → parents[2]).
+    # Leave as None if derivation can't ground (synthetic test
+    # fixtures often write methods_provenance.md at tmp_path root).
+    project_root: Optional[Path] = args.project_root
+    if project_root is None:
+        try:
+            derived = methods_path.resolve().parents[2]
+            if derived.is_dir():
+                project_root = derived
+        except IndexError:
+            project_root = None
 
     out_dir.mkdir(parents=True, exist_ok=True)
     audit_path = out_dir / "audit" / "phase0.jsonl"
@@ -1978,12 +2561,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             tables_inventory_sha=_sha256_of_path(tbls_path),
             prompt_sha=_sha256_of_path(_PROMPT_PATH),
             parser_version=VERSION,
+            batch_size=batch_size,
         )
         cache = _read_cache(cache_path)
         if cache_key in cache:
             cached_demarcations = _cached_payload_to_demarcations(
                 cache[cache_key]
             )
+            cached_tolerated_missing = _cached_payload_to_tolerated_missing(
+                cache[cache_key]
+            )
+        else:
+            cached_tolerated_missing = None
+    else:
+        cached_tolerated_missing = None
 
     try:
         result = run_inventory(
@@ -1993,6 +2584,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             tables_inventory_text=tables_inventory_text,
             no_llm=args.no_llm,
             cached_demarcations=cached_demarcations,
+            cached_tolerated_missing=cached_tolerated_missing,
+            project_root=project_root,
+            batch_size=batch_size,
         )
     except LLMCallError as e:
         print(f"error: LLM call failed: {e}", file=sys.stderr)
@@ -2019,10 +2613,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"  diagnostics: {json.dumps(e.diagnostics, sort_keys=True)}",
                 file=sys.stderr,
             )
-        # The LLM was called and billed before the validator ran; we
-        # don't have direct access to the cost from outside
-        # run_inventory on the exception path. Record 0.0 with a note
-        # rather than guess.
+        # B1.e: record the actual billed cost. demarcate_unresolved_with_llm
+        # reattaches the call's cost_usd to the ValidationError so the
+        # audit line is honest about LLM spend even on rejection. If the
+        # error came from the cache-revalidation path or validator
+        # invocations that don't bill (synthetic tests, --no-llm
+        # poisoning), the attribute will be missing; record 0.0 in that
+        # case rather than fabricate.
+        billed_cost = float(getattr(e, "cost_usd", 0.0) or 0.0)
         emit_audit_line(
             audit_path=audit_path,
             report_path=report_path,
@@ -2032,7 +2630,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             output_path=output_path,
             inventory_size=0,
             unresolved_count=0,
-            cost_usd=0.0,
+            cost_usd=billed_cost,
             exit_status=4,
         )
         return 4
@@ -2043,18 +2641,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Persist the cache only after a fresh LLM call (NOT on a cache hit
     # — we don't need to re-write what we just read; NOT on --no-llm —
-    # there's nothing to cache; NOT when no demarcations were emitted —
-    # no LLM call happened). Mirrors discrepancy_register.main()'s
-    # cache-write conditions.
+    # there's nothing to cache; NOT when no demarcations were emitted
+    # AND no tolerated_missing — no LLM call happened). The B1.g
+    # tolerated_missing set is persisted so reruns honor the same
+    # residuals and don't redo retries that wouldn't recover them.
     if (
         cache_key is not None
         and not result.cache_hit
         and not args.no_llm
-        and result.demarcations
+        and (result.demarcations or result.tolerated_missing)
     ):
         cache = _read_cache(cache_path)
         cache[cache_key] = {
             "demarcations": [d.to_dict() for d in result.demarcations],
+            "tolerated_missing": sorted(result.tolerated_missing),
             "cost_usd": result.cost_usd,
             "timestamp": _utc_now_iso(),
         }

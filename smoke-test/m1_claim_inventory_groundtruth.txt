@@ -1,0 +1,107 @@
+# M1 §C2.b — hand-curated ground-truth numeric patterns from
+# spike/beril-extended/projects/ibd_phage_targeting/REPORT.md.
+#
+# Filed 2026-05-07; rev 2026-05-07 (corrected list-curation errors after
+# the first run revealed format mismatches between hand-list and report).
+#
+# One pattern per line; '#' and blank lines ignored. Patterns are
+# LITERAL SUBSTRINGS checked against the inventory's claim_text column
+# (case-sensitive, byte-level). Each pattern was verified to appear in
+# REPORT.md as written before inclusion (`grep -F` against the file).
+#
+# AC: recall ≥ 0.90 (M1_PUNCH_LIST.md §C2.b).
+#
+# Curation rule: include patterns that a holistic-prompt grounder would
+# legitimately want surfaced as `claim_id`s in the inventory. This is a
+# representative sample, not exhaustive — it covers each B1.b regex
+# class with enough breadth to detect class-level false-negatives, plus
+# four "out-of-catalog" classes (correlations, log₂FC, OR, counts) that
+# we expect to fail recall and that should drive D-036 if confirmed.
+
+# === IN-CATALOG PATTERNS (B1.b regex catalog should surface these) ===
+
+# --- Percentages (B1.b PERCENTAGE_RE = \b\d+(?:\.\d+)?% — no space) ---
+# All forms below have a space between digit and %, which is what
+# REPORT.md uses throughout. Pattern surfaces a regex gap if missed.
+95 %
+88.2 %
+80.4 %
+61 %
+35 %
+91 %
+83 %
+78 %
+70 %
+27 %
+42 %
+73 %
+
+# --- p-values (B1.b P_VALUE_RE permits \s* between tokens) ---
+# REPORT.md uses both no-space ("p=0.008") and with-space ("p = 0.019")
+# forms. Both should match the regex. We list both forms below.
+p=0.008
+p=0.013
+p=0.035
+p=0.050
+p < 0.001
+p = 0.019
+p = 0.016
+
+# --- p-values, scientific notation (B1.b P_VALUE_RE second branch) ---
+p=2.4e-6
+p=6.4e-20
+p=7e-17
+
+# --- n-counts (B1.b N_COUNT_RE = \b[nN]\s*=\s*\d+\b) ---
+n = 8,489
+n = 1,675
+n=130
+n=67
+n=106
+
+# --- Chi-squared (NOT a B1.b class but typically co-occurs with p-values) ---
+# These should appear in claim_texts that ALSO contain a p-value match.
+χ²(3) = 10.0
+χ²(2)=15.6
+χ²(6)=88.3
+
+# --- AUC / metrics (B1.b METRIC_RE requires "AUC = D.DD" or "AUC=D.DD") ---
+# REPORT.md uses bold-markdown around the value (`**0.799**`); literal
+# substring without ** prefix should still match the unbolded value.
+AUC = **0.799**
+AUC = **0.810**
+AUC=0.88
+
+# === OUT-OF-CATALOG PATTERNS (expected to fail; drive D-036) ===
+
+# --- Fold changes (no B1.b class for "10×" without unit suffix; unit
+#     pattern only matches with explicit unit like "fold" or "kb") ---
+# log₂FC NOT in catalog. Spelled with subscript ₂ (U+2082) in REPORT.md.
+log₂FC +2.67
+log₂FC +5.66
+14× expansion
+
+# --- Correlations (Pearson r, Spearman ρ — NOT in B1.b catalog) ---
+# These appear throughout REPORT.md as effect sizes for cross-axis tests.
+r = 0.96
+ρ = 1.000
+r=+0.456
+r=+0.443
+
+# --- Odds ratios (OR — NOT in B1.b catalog) ---
+# Appear in NB07a/b/d Fisher-enrichment results.
+OR=8.1
+OR=44.4
+OR=14.6
+OR=1.38
+
+# --- Counts / "M of N" (NOT in B1.b catalog; require LLM demarcation
+#     OR a count-class regex extension) ---
+# "X of Y" form is canonical for cohort-coverage claims.
+14 of 23
+51 candidates
+3,929 / 17,672
+
+# --- Cliffs / effect deltas (NOT in B1.b catalog) ---
+# Cliff δ form is used for non-parametric effect sizes throughout NB07a/b.
+cliff δ = +0.50

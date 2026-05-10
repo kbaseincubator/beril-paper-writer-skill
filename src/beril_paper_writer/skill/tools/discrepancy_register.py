@@ -142,7 +142,7 @@ from typing import Callable, Iterable, Optional
 # label still read ".cd"). Per claim_inventory.py's convention, the
 # suffix tracks the FULL set shipped, not the latest delta — hence
 # .abcd, not .cd.
-VERSION = "0.8.0-m1-A1.abcd"
+VERSION = "0.8.0-m1-A1.abcd-B1.e"
 
 
 # ---------------------------------------------------------------------------
@@ -1492,19 +1492,22 @@ def classify_overlap_candidates_with_llm(
     call = llm_call or classifier_llm_call
     response_text, cost_usd = call(system_prompt, user_prompt, model)
 
-    if cost_usd > _COST_CEILING_USD:
-        # Soft warning; don't block. Cost overrun is observability,
-        # not a hard halt — the caller's circuit-breaker handles
-        # cumulative caps.
-        sys.stderr.write(
-            f"  warn: classifier call cost ${cost_usd:.4f} exceeded "
-            f"ceiling ${_COST_CEILING_USD:.4f}/run\n"
-        )
+    # B1.e cost-cap reframing (2026-05-07): the per-call ceiling is
+    # tracked in the audit JSONL but no longer triggers a stderr
+    # warning. Per Adam's directive, observability over enforcement
+    # during M1; ceilings will be set from observed data later.
+    # `_COST_CEILING_USD` remains as a documentation-only constant.
 
     classifications = parse_classifier_response(
         response_text, expected_count=len(overlap_candidates),
     )
-    validate_classifications(classifications, overlap_candidates)
+    try:
+        validate_classifications(classifications, overlap_candidates)
+    except ValidationError as e:
+        # B1.e: reattach billed cost so main()'s exit-4 audit line is
+        # honest about LLM spend even on rejection.
+        e.cost_usd = cost_usd  # type: ignore[attr-defined]
+        raise
 
     return classifications, cost_usd
 
@@ -1776,17 +1779,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"  diagnostics: {json.dumps(e.diagnostics, sort_keys=True)}",
                 file=sys.stderr,
             )
-        # The LLM was called and billed before the validator ran; record
-        # the actual cost so the audit reflects the spend. We don't
-        # have direct access to it from outside run_register on
-        # exception path; emit 0.0 with a note rather than guess.
+        # B1.e: the classifier reattached the actual billed cost to
+        # the ValidationError. Record it in the audit so the per-run
+        # spend ledger is honest even when the LLM output was
+        # rejected. Synthetic-fixture tests that don't bill set 0.0.
+        billed_cost = float(getattr(e, "cost_usd", 0.0) or 0.0)
         emit_audit_line(
             audit_path=audit_path,
             methods_provenance_path=methods_path,
             research_plan_path=plan_path,
             output_path=output_path,
             entry_count=0,
-            cost_usd=0.0,
+            cost_usd=billed_cost,
             exit_status=4,
         )
         return 4

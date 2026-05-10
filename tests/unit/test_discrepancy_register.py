@@ -1051,3 +1051,45 @@ class TestA2gRender:
         # is the LLM-classified overlap.
         first_entry_block = md2.split("## D-002")[0]
         assert "Permutation test on the difference of medians" in first_entry_block
+
+
+# ===========================================================================
+# B1.e — exit-4 audit cost recording (parallel to claim_inventory's fix)
+# ===========================================================================
+
+class TestB1eAuditCostOnExit4:
+    """Pre-B1.e the validator-rejection path emitted cost_usd=0.0 in
+    the audit JSONL despite the LLM having been called and billed.
+    classify_overlap_candidates_with_llm now reattaches cost to the
+    ValidationError; main() threads it into emit_audit_line. Filed
+    after the live-LLM smoke for claim_inventory revealed the same
+    gap on the discrepancy_register side (per A1 audit watch-for #4)."""
+
+    def test_validator_rejection_records_billed_cost(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM was called, billed $0.012, then validator rejected the
+        output. Audit line must record the billed cost, not 0.0."""
+        plan_p, prov_p, out_dir = _write_overlap_inputs(tmp_path)
+        # Fake LLM emits an out-of-enum severity → guaranteed validator
+        # rejection. Default cost ($0.012) flows through.
+        fake = _canned_llm(_canned_response(
+            label="discrepancy", severity="catastrophic",
+        ))
+        monkeypatch.setattr(dr, "classifier_llm_call", fake)
+
+        rc = dr.main([
+            "--methods-provenance", str(prov_p),
+            "--research-plan", str(plan_p),
+            "--output-dir", str(out_dir),
+        ])
+        assert rc == 4
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        assert record["exit_status"] == 4
+        # B1.e closes the cost_usd=0.0-on-exit-4 gap.
+        assert record["cost_usd"] == pytest.approx(0.012), (
+            "B1.e: validator-rejection path must record actual billed "
+            "cost, not 0.0"
+        )

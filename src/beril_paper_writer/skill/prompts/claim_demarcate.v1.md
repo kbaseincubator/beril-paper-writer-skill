@@ -110,13 +110,34 @@ first character is `[`; the last is `]`.
 - `source_notebook` (string, required, non-empty): the notebook path
   whose execution produced the number. The validator checks this
   string appears verbatim in methods_provenance.md (case-sensitive
-  substring). If you cannot identify a specific notebook from the
-  provided context, look at the methods_provenance.md content for the
-  best-matching test name / library path — every numeric in REPORT.md
-  has a notebook source by construction. Common notebook path forms:
-  `notebooks/04_classifier.ipynb`, `analysis/04.ipynb`, `nb/04.ipynb`.
-  The exact form depends on the project's layout; mirror what
-  methods_provenance.md uses.
+  substring) OR resolves to a real file under the project root. The
+  user prompt now (B1.h, 2026-05-07) lists every valid notebook path
+  in a "VALID source_notebook values" allowlist near the top; **copy
+  one of those strings character-for-character**. Do not paraphrase
+  the notebook by its scientific subject (RESEARCH_PLAN.md describes
+  what each notebook is *about*; that description is NOT the
+  filename). Do not abbreviate or expand the path.
+
+  **Anti-pattern (DO NOT DO THIS):**
+    - Allowlist contains: `notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb`
+    - Wrong cite (LLM drops `pathway_DA_`):
+      `notebooks/NB07a_H3a_falsifiability.ipynb`
+    - Reason it's wrong: validator does substring of methods_provenance.md
+      AND is_file() under project_root. The truncated path satisfies
+      neither. Validator returns exit 4. Run aborted.
+
+  **Correct pattern:**
+    - Look up `notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb` in the
+      allowlist.
+    - Emit `"source_notebook": "notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb"`.
+    - Done. No reformatting.
+
+  Every numeric in REPORT.md has a notebook source by construction;
+  if you cannot find a fitting allowlist entry, scan
+  methods_provenance.md for the test name / library path that
+  produced the number, then check the allowlist for the matching
+  notebook. The notebook ID prefix (NB04, NB07a, NB10a, …) is your
+  best guide.
 
 - `source_cell` (string, required, non-empty): the cell index inside
   the notebook (0-indexed integer, rendered as a string).
@@ -131,12 +152,32 @@ first character is `[`; the last is `]`.
 
 - `figure_or_table` (string, required but MAY be empty): the figure or
   table the claim is depicted in, e.g., `"Fig 3"`, `"Tbl 2"`, or empty
-  string `""` if the claim is in-text only. If you populate this, the
-  validator checks the string appears in figures_inventory.md OR
-  tables_inventory.md (case-sensitive substring). If you cannot
-  identify a depicting figure/table, leave the field empty rather than
-  guess. Use the same canonical short form the inventory uses (most
-  inventories use `"Fig N"` and `"Tbl N"`; mirror what's there).
+  string `""` if the claim is in-text only. The user prompt now
+  (B1.h, 2026-05-07) lists every valid figure/table label in a "VALID
+  figure_or_table values" allowlist near the top; either copy one of
+  those strings, or set `figure_or_table=""`. **Empty is correct;
+  fabrication is not.**
+
+  **Anti-pattern (DO NOT DO THIS):**
+    - Source sentence mentions notebook `NB15`.
+    - Wrong cite: `"figure_or_table": "Fig NB15"` (treating a NOTEBOOK
+      identifier as a figure label).
+    - Reason it's wrong: `Fig NB15` is not in figures_inventory.md
+      (NB15 is the notebook that *produced* a figure, not the figure
+      itself). Validator returns exit 4.
+
+  **Correct pattern:**
+    - Scan the "VALID figure_or_table values" allowlist for a match
+      to the source sentence's content.
+    - If a match exists (e.g., `"Fig 3"`, `"Tbl 2"`), copy it
+      verbatim.
+    - If NO match exists, set `figure_or_table=""`. The claim is
+      still valid; it's an in-text claim with no figure or table
+      depiction.
+
+  Notebook IDs (NB04, NB07a, NB10a, …) are NEVER figure or table
+  labels. They appear in the source sentence to credit the notebook,
+  not to point at a figure.
 
 - `severity_justification` (string, required, ≤200 chars): one
   sentence explaining whether the claim is load-bearing, cosmetic, or

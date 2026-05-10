@@ -233,9 +233,17 @@ calibrated to actual execution rather than to the plan's intent.
 `cosmetic` (transparent improvement) / `unclear` (needs human review).
 
 **Cost.** Deterministic Python + small LLM pass (~2K tokens) for the
-plan-text classification. ≤$0.05/run. **Decided 2026-05-07 (Q1):**
-LLM-assisted, not pure string-match — synonym/paraphrase robustness
-required for hand-authored RESEARCH_PLAN.md text.
+plan-text classification. **Tracked, not gated** (D-037, 2026-05-07):
+the per-call constant `_COST_CEILING_USD = 0.05` remains as
+informational; audit JSONL records cost per run; no stderr warning
+or smoke gate fires on overrun. **Decided 2026-05-07 (Q1):** LLM-
+assisted, not pure string-match — synonym/paraphrase robustness
+required for hand-authored RESEARCH_PLAN.md text. **Q1 deferred
+2026-05-07 (D-035):** re-evaluation requires fixing two upstream
+defects (plan-side heading regex too narrow; overlap-ratio threshold
+too restrictive on prose-heavy bullets) which are v0.9 architectural
+work; on `ibd_phage_targeting` the LLM never fires because the
+deterministic pre-pass produces zero overlap candidates.
 
 **Why upstream rather than post hoc.** v0.7.x's reframer.v1 runs *after*
 sections are drafted; if the manuscript has already woven a plan-prescribed
@@ -279,7 +287,80 @@ appropriate hedge."* This collapses the M7 validator from a post-hoc regex
 into a constructive constraint at draft time.
 
 **Cost.** Deterministic regex extraction over REPORT.md + small LLM pass for
-ambiguous claim demarcation (~3–5K tokens). ≤$0.10/run.
+ambiguous claim demarcation. **Tracked, not gated** (D-037, 2026-05-07):
+constant `_DEMARCATOR_COST_CEILING_USD = 0.10` remains as informational;
+audit JSONL records cost; no stderr warning or smoke gate fires on
+overrun. The B1.e regex catalog extension (D-036) raised observed
+demarcator workload on dense projects (`ibd_phage_targeting`: ~133
+multi-numeric sentences ≈ ~$1.00/run with Haiku 4.5 in the B1.f batched
+path); cap will be re-tuned from observed data at M2 orchestrator layer
+rather than per-tool.
+
+**Batched demarcation (B1.f, D-038, 2026-05-07).** Demarcator calls are
+chunked at `--batch-size` (default 15). The LLM sees per-batch local
+indices [0..batch_size); the tool offsets back to absolute indices
+into `unresolved_candidates` before validation, sums per-call costs,
+and validates full coverage. Default batch size of 15 was calibrated
+on `ibd_phage_targeting` after a 133-candidate single call truncated
+the LLM output (only 91 indices covered → exit 4) and a follow-up run
+hit the subprocess wrapper's 180s timeout. Batching trades
+"single-LLM-call latency" for "predictable per-call latency × N
+batches"; total per-run cost on dense projects is now `ceil(N /
+batch_size) × ~$0.10`. The cache key includes `batch_size` so changing
+the chunk size invalidates the idempotency cache.
+
+**Cite allowlists in the demarcator user prompt (B1.h, D-040,
+2026-05-07).** `build_demarcator_user_prompt` extracts every notebook
+path from methods_provenance.md and every `Fig N`/`Tbl N`/`Table N`
+label from figures_inventory.md + tables_inventory.md, then emits
+two explicit "VALID values" allowlists ABOVE the INPUTS section of
+the user prompt. The system prompt at `prompts/claim_demarcate.v1.md`
+gains anti-pattern worked examples covering: (1) notebook-name
+truncation (paraphrasing by scientific subject instead of copying the
+literal filename), (2) treating a notebook ID as a figure label.
+Driven by live-LLM smoke after B1.g where the demarcator emitted
+`notebooks/NB07a_H3a_falsifiability.ipynb` (real:
+`notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb`) and
+`figure_or_table="Fig NB15"`. The validator's per-row checks remain
+unchanged; the allowlist is a guide, not a gate.
+
+**Bounded retry + tolerated_missing fallback (B1.g, D-039, 2026-05-07).**
+Even with batching, the live Haiku 4.5 demarcator non-deterministically
+drops 1–3 input candidates per dense-project run (different indices
+each run; ~98% per-batch coverage). After the initial batched pass,
+missing indices are re-batched into a fresh LLM call, up to
+`max_retries=3` rounds. Indices that remain missing after retries fall
+back to the original `notes='unresolved'` row via
+`expand_with_demarcations`' defensive empty-rows pass-through. The
+validator's `allow_missing` kwarg allows residuals through coverage
+without failing exit 4. The cache schema gains a `tolerated_missing`
+field so reruns are byte-stable. M2's holistic prompt sees a mix of
+demarcated rows (notes='') and rare unresolved rows (notes='unresolved')
+and is responsible for hedging the latter.
+
+**Notebook-cite grounding (B1.e, 2026-05-07).** The validator accepts
+`source_notebook` if EITHER (a) substring of `methods_provenance.md`
+OR (b) the path resolves to an existing file under
+`<project-root>/`. The disk-fallback was added after live-LLM smoke
+on `ibd_phage_targeting` revealed `methods_provenance.md` covers only
+~40% of project notebooks (the AST extractor in `extract_methods.py`
+catalogs only notebooks with detected stat-test invocations, missing
+those that produce numerics via pandas/SQL/custom code). Anti-
+fabrication discipline is preserved by the `is_file()` requirement —
+the LLM cannot cite a path that doesn't exist on disk. Tests pass
+synthetic fixtures with `project_root=None` and rely on the substring
+path; production runs derive `project_root` from
+`methods_provenance.md`'s expected layout
+(`<project>/papers/draft_N/methods_provenance.md`) or take an
+explicit `--project-root` flag.
+
+**Regex catalog (B1.e, D-036, 2026-05-07).** 11 pattern classes
+(extended from 6 in B1.b): `percentage` (now whitespace-tolerant),
+`ratio_with_unit`, `p_value` (now accepts ≤/≥ + dot-less mantissa),
+`confidence_interval`, `n_count`, `metric` (AUC/R²/RMSE/MAE),
+`correlation` (r/ρ), `odds_ratio` (OR), `log_fc` (log₂FC), `count_of`
+(M of N / M / N), `cliff_delta` (cliff δ). Recall on the
+ibd_phage_targeting ground-truth check: 0.562 (B1.b) → 1.000 (B1.e).
 
 **Coverage policy.** **Decided 2026-05-07 (Q2):** full coverage — every
 numeric claim in REPORT.md gets a `claim_id`. No salience filter in v0.8.0.

@@ -1115,3 +1115,886 @@ class TestB2eIdempotency:
             dialect="excel-tab",
         ))
         assert any("0.92" in r["claim_text"] for r in rows), rows
+
+
+# ===========================================================================
+# B1.e — Validator project_root fallback + regex catalog extension (D-036)
+# ===========================================================================
+#
+# Two test classes:
+#   TestB1eValidatorProjectRoot  — disk-fallback path (2 tests).
+#   TestB1eRegexCatalogD036      — 7 catalog changes (7 tests, one per
+#                                    pattern/extension).
+#
+# Filed 2026-05-07 after live-LLM smoke on `ibd_phage_targeting`
+# revealed that (a) the validator's substring-only check rejected real
+# notebooks not in methods_provenance.md and (b) the regex catalog
+# missed 21 of 48 ground-truth patterns. See
+# `smoke-test/M1_PUNCH_LIST_claim_groundtruth.md` for the data and
+# `DECISIONS.md` D-036 for the architectural decision.
+
+
+class TestB1eValidatorProjectRoot:
+    """Validator now accepts source_notebook if EITHER (a) substring of
+    methods_provenance.md (legacy path) OR (b) the path resolves to an
+    existing file under project_root. This test class exercises (b)
+    independently of (a)."""
+
+    def test_real_notebook_on_disk_but_not_in_provenance_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The bug fixture from live-LLM smoke: NB10a_kumbhari_strain_
+        adaptation.ipynb exists under <project_root>/notebooks/ but
+        does NOT appear in methods_provenance.md (extract_methods.py
+        only catalogs notebooks with AST-detected stat tests). The
+        B1.e validator accepts via the disk fallback."""
+        # Build a project_root with a real notebook on disk, but a
+        # methods_provenance.md that DOES NOT mention it.
+        project_root = tmp_path / "project"
+        (project_root / "notebooks").mkdir(parents=True)
+        nb_path = project_root / "notebooks" / "NB10a_kumbhari_strain_adaptation.ipynb"
+        nb_path.write_text("not actually nbformat — exists is what matters", encoding="utf-8")
+
+        report_text = "Strain adaptation OR=1.38 with p=2.4e-6 on n=343 strains."
+        report_p = tmp_path / "REPORT.md"
+        # methods_provenance.md INTENTIONALLY does NOT list NB10a.
+        methods_p = tmp_path / "methods_provenance.md"
+        figs_p = tmp_path / "figures_inventory.md"
+        tbls_p = tmp_path / "tables_inventory.md"
+        out_dir = tmp_path / "out"
+        report_p.write_text(report_text, encoding="utf-8")
+        methods_p.write_text(_METHODS_PROVENANCE_FIXTURE, encoding="utf-8")
+        figs_p.write_text(_FIGURES_INVENTORY_FIXTURE, encoding="utf-8")
+        tbls_p.write_text(_TABLES_INVENTORY_FIXTURE, encoding="utf-8")
+
+        canned = json.dumps([
+            {
+                "input_candidate_index": 0,
+                "claim_text": "OR=1.38",
+                # Cite a notebook NOT in methods_provenance.md but
+                # present on disk under project_root/notebooks/.
+                "source_notebook": "notebooks/NB10a_kumbhari_strain_adaptation.ipynb",
+                "source_cell": "5",
+                "figure_or_table": "",
+                "severity_justification": "Effect size for H3b.",
+            },
+            {
+                "input_candidate_index": 0,
+                "claim_text": "p=2.4e-6",
+                "source_notebook": "notebooks/NB10a_kumbhari_strain_adaptation.ipynb",
+                "source_cell": "5",
+                "figure_or_table": "",
+                "severity_justification": "Significance level for H3b.",
+            },
+            {
+                "input_candidate_index": 0,
+                "claim_text": "n=343",
+                "source_notebook": "notebooks/NB10a_kumbhari_strain_adaptation.ipynb",
+                "source_cell": "5",
+                "figure_or_table": "",
+                "severity_justification": "Sample size for H3b.",
+            },
+        ])
+        fake = _canned_llm(canned)
+        monkeypatch.setattr(ci, "demarcator_llm_call", fake)
+
+        rc = ci.main([
+            "--report", str(report_p),
+            "--methods-provenance", str(methods_p),
+            "--figures-inventory", str(figs_p),
+            "--tables-inventory", str(tbls_p),
+            "--output-dir", str(out_dir),
+            "--project-root", str(project_root),
+        ])
+        assert rc == 0, "validator should accept real-on-disk notebook via disk fallback"
+        assert (out_dir / "claim_inventory.tsv").is_file()
+
+    def test_nonexistent_notebook_still_rejected_with_project_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The disk-fallback ONLY accepts files that actually exist.
+        A path under project_root that doesn't resolve to a file is
+        still rejected (anti-fabrication discipline preserved)."""
+        project_root = tmp_path / "project"
+        (project_root / "notebooks").mkdir(parents=True)
+        # Notebook deliberately NOT created on disk.
+
+        report_text = "AUC = 0.78 with 95% CI [0.71, 0.85] across n=343."
+        report_p = tmp_path / "REPORT.md"
+        methods_p = tmp_path / "methods_provenance.md"
+        figs_p = tmp_path / "figures_inventory.md"
+        tbls_p = tmp_path / "tables_inventory.md"
+        out_dir = tmp_path / "out"
+        report_p.write_text(report_text, encoding="utf-8")
+        methods_p.write_text(_METHODS_PROVENANCE_FIXTURE, encoding="utf-8")
+        figs_p.write_text(_FIGURES_INVENTORY_FIXTURE, encoding="utf-8")
+        tbls_p.write_text(_TABLES_INVENTORY_FIXTURE, encoding="utf-8")
+
+        canned = json.dumps([
+            {
+                "input_candidate_index": 0,
+                "claim_text": "AUC = 0.78",
+                # Path doesn't exist on disk AND not in methods_provenance.
+                "source_notebook": "notebooks/99_GHOST_NOTEBOOK.ipynb",
+                "source_cell": "1",
+                "figure_or_table": "",
+                "severity_justification": "Fabricated.",
+            },
+            {
+                "input_candidate_index": 0,
+                "claim_text": "95% CI [0.71, 0.85]",
+                "source_notebook": "notebooks/04_classifier.ipynb",
+                "source_cell": "18",
+                "figure_or_table": "",
+                "severity_justification": "Real (in fixture).",
+            },
+            {
+                "input_candidate_index": 0,
+                "claim_text": "n=343",
+                "source_notebook": "notebooks/04_classifier.ipynb",
+                "source_cell": "18",
+                "figure_or_table": "",
+                "severity_justification": "Real.",
+            },
+        ])
+        fake = _canned_llm(canned)
+        monkeypatch.setattr(ci, "demarcator_llm_call", fake)
+
+        rc = ci.main([
+            "--report", str(report_p),
+            "--methods-provenance", str(methods_p),
+            "--figures-inventory", str(figs_p),
+            "--tables-inventory", str(tbls_p),
+            "--output-dir", str(out_dir),
+            "--project-root", str(project_root),
+        ])
+        # Still rejected (exit 4) — disk fallback doesn't relax the
+        # anti-fabrication contract; it just broadens the ground-truth
+        # source from one file to a directory tree.
+        assert rc == 4
+        # Audit line records billed cost honestly (B1.e closed the
+        # cost_usd=0.0-on-exit-4 gap; the canned LLM billed $0.045).
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        assert record["exit_status"] == 4
+        assert record["cost_usd"] == pytest.approx(0.045), (
+            "B1.e: validator-rejection path must record actual billed "
+            "cost, not 0.0"
+        )
+
+
+class TestB1eRegexCatalogD036:
+    """One test per D-036 catalog change. Each asserts the regex matches
+    the post-patch form AND that match_class is correctly assigned. See
+    SPEC §4.6 + DECISIONS.md D-036."""
+
+    def test_percentage_with_space_now_matched(self):
+        """REPORT.md uses `95 %` (space form) throughout. Pre-B1.e the
+        regex required no-space and missed 9 of 12 percentage patterns
+        on ibd_phage_targeting. Post-B1.e the `\\s{0,2}` allows the
+        space."""
+        text = "Coverage hit 95 % of 188 strains; 88.2% no-space form also fires."
+        matches = ci.extract_numeric_matches(text)
+        pct_matches = [m for m in matches if m.match_class == "percentage"]
+        matched_texts = [m.matched_text for m in pct_matches]
+        assert any("95 %" in t for t in matched_texts), matched_texts
+        # No-space form preserved.
+        assert any("88.2%" in t for t in matched_texts), matched_texts
+
+    def test_p_value_dotless_scientific_notation_now_matched(self):
+        """REPORT.md emits both `p=2.4e-6` (with dot) and `p=7e-17` /
+        `p<1e-31` (no dot in mantissa). Pre-B1.e the second branch
+        required `\\d+\\.\\d+e-?\\d+` (dot mandatory) and missed
+        dot-less forms. Post-B1.e the dot is optional and `<` joins
+        `=` as a valid operator on the sci-notation branch."""
+        text = (
+            "Significance held at p=7e-17 across 4 cohorts. "
+            "Compounded effect: ebf/ecf RPKM CD-up across 4 cohorts at p<1e-31. "
+            "Decimal flavor still works: p=2.4e-6 from NB10a."
+        )
+        matches = ci.extract_numeric_matches(text)
+        p_matches = [m for m in matches if m.match_class == "p_value"]
+        matched_texts = [m.matched_text for m in p_matches]
+        assert any("p=7e-17" in t for t in matched_texts), matched_texts
+        assert any("p<1e-31" in t for t in matched_texts), matched_texts
+        # Pre-existing dotted form still matches.
+        assert any("p=2.4e-6" in t for t in matched_texts), matched_texts
+
+    def test_p_value_unicode_le_operator_now_matched(self):
+        """`≤` (U+2264) and `≥` (U+2265) join the operator class.
+        BERIL Methods sections use them interchangeably with `<=`/`>=`."""
+        text = "Effect size constraint p ≤ 0.05 in the primary arm; p ≥ 0.30 control."
+        matches = ci.extract_numeric_matches(text)
+        p_matches = [m for m in matches if m.match_class == "p_value"]
+        matched_texts = [m.matched_text for m in p_matches]
+        assert any("p ≤ 0.05" in t for t in matched_texts), matched_texts
+        assert any("p ≥ 0.30" in t for t in matched_texts), matched_texts
+
+    def test_correlation_class_pearson_and_spearman(self):
+        """New class `correlation` matches `r = ...`, `ρ = ...` with
+        optional sign + Unicode minus (U+2212)."""
+        text = (
+            "Cross-modality structure: r = 0.96 on CC1. "
+            "Tier-A reseq replicates: ρ = 1.000 on patient 1112. "
+            "Harvard subset r=+0.456 with M. gnavus. "
+            "Franzosa cliff direction r=−0.747 on urobilin."
+        )
+        matches = ci.extract_numeric_matches(text)
+        corr_matches = [m for m in matches if m.match_class == "correlation"]
+        matched_texts = [m.matched_text for m in corr_matches]
+        assert any("r = 0.96" in t for t in matched_texts), matched_texts
+        assert any("ρ = 1.000" in t for t in matched_texts), matched_texts
+        assert any("r=+0.456" in t for t in matched_texts), matched_texts
+        assert any("r=−0.747" in t for t in matched_texts), matched_texts
+        # Class sets the effect_size_present flag (per _CLASS_TO_FLAG).
+        flags = ci._flags_from_classes(["correlation"])
+        assert flags == ("yes", "no", "no")
+
+    def test_odds_ratio_class(self):
+        """New class `odds_ratio` matches `OR=1.38`, `OR = 8.1`. Decimal
+        optional; word boundary blocks mid-token false positives."""
+        text = (
+            "Iron acquisition OR=44.4 (FDR 6e-56). "
+            "Strain adaptation OR=1.38 (housekeeping OR=0.62 depleted). "
+            "Theme-level OR = 8.1 dominant."
+        )
+        matches = ci.extract_numeric_matches(text)
+        or_matches = [m for m in matches if m.match_class == "odds_ratio"]
+        matched_texts = [m.matched_text for m in or_matches]
+        assert any("OR=44.4" in t for t in matched_texts), matched_texts
+        assert any("OR=1.38" in t for t in matched_texts), matched_texts
+        assert any("OR=0.62" in t for t in matched_texts), matched_texts
+        assert any("OR = 8.1" in t for t in matched_texts), matched_texts
+        # Mid-token "factOR=2" must NOT match (word boundary).
+        text_neg = "The factOR=2 baseline."
+        matches_neg = ci.extract_numeric_matches(text_neg)
+        or_neg = [m for m in matches_neg if m.match_class == "odds_ratio"]
+        assert or_neg == [], f"word boundary should block 'factOR=2': {or_neg}"
+
+    def test_log_fc_class(self):
+        """New class `log_fc` matches `log₂FC +2.67` (subscript ₂ =
+        U+2082), `log2FC +5.66` (ASCII), with optional sign."""
+        text = (
+            "C. scindens log₂FC +5.66 in raw analysis. "
+            "Pooled finding log₂FC +2.67 in preliminary report. "
+            "ASCII form: log2FC -1.42 sanity-check."
+        )
+        matches = ci.extract_numeric_matches(text)
+        fc_matches = [m for m in matches if m.match_class == "log_fc"]
+        matched_texts = [m.matched_text for m in fc_matches]
+        assert any("log₂FC +5.66" in t for t in matched_texts), matched_texts
+        assert any("log₂FC +2.67" in t for t in matched_texts), matched_texts
+        assert any("log2FC -1.42" in t for t in matched_texts), matched_texts
+
+    def test_count_of_and_cliff_delta_classes(self):
+        """Two compact classes:
+          - `count_of` matches `M of N` and `M / N` forms with comma
+            separators in M and N.
+          - `cliff_delta` matches `cliff δ = +0.50` and the no-glyph
+            short form `cliff = -0.358`."""
+        text = (
+            "14 of 23 patients receive cocktail drafts. "
+            "3,929 / 17,672 phage-strain pairs susceptible. "
+            "45 / 51 candidates replicate. "
+            "Composite axis: cliff δ = +0.50 (CD vs nonIBD). "
+            "Urobilin: cliff δ=−0.358 across cohorts."
+        )
+        matches = ci.extract_numeric_matches(text)
+        count_matches = [m for m in matches if m.match_class == "count_of"]
+        cliff_matches = [m for m in matches if m.match_class == "cliff_delta"]
+        count_texts = [m.matched_text for m in count_matches]
+        cliff_texts = [m.matched_text for m in cliff_matches]
+        # count_of forms.
+        assert any("14 of 23" in t for t in count_texts), count_texts
+        assert any("3,929 / 17,672" in t for t in count_texts), count_texts
+        assert any("45 / 51" in t for t in count_texts), count_texts
+        # cliff_delta forms.
+        assert any("cliff δ = +0.50" in t for t in cliff_texts), cliff_texts
+        assert any("cliff δ=−0.358" in t for t in cliff_texts), cliff_texts
+
+
+# ===========================================================================
+# B1.f — Demarcator batching (D-038)
+# ===========================================================================
+#
+# Filed 2026-05-07 after live-LLM smoke on `ibd_phage_targeting`
+# revealed that 133 unresolved candidates in a single LLM call hits
+# two failure modes (output truncation; subprocess 180s timeout). The
+# fix chunks unresolved_candidates into batches of `batch_size`
+# (default 15), calls the LLM N times, offsets indices, sums costs,
+# then validates full coverage.
+
+
+class TestB1fDemarcatorBatching:
+    """Two tests:
+      - batching covers all candidates, costs are summed, indices are
+        offset correctly back to absolute positions.
+      - batch_size mixed into cache key means changing it invalidates
+        a hit.
+    """
+
+    def test_batched_demarcation_covers_all_candidates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Synthetic REPORT.md with 6 multi-numeric sentences →
+        deterministic pre-pass surfaces 6 unresolved candidates. With
+        batch_size=2, demarcate_unresolved_with_llm makes 3 LLM calls,
+        each returning local indices [0,1]. Final demarcation list has
+        all 6 absolute indices [0..5], cost is summed (3 × $0.045 =
+        $0.135), and coverage validation passes.
+        """
+        # Six multi-numeric sentences, each with two numerics that
+        # B1.b's regex catalog identifies as multi-class so they land
+        # as `notes='unresolved'`. AUC + CI is the canonical
+        # multi-numeric pattern from the existing test suite.
+        report_text = (
+            "S1: AUC = 0.78 with 95% CI [0.71, 0.85]. "
+            "S2: AUC = 0.82 with 95% CI [0.74, 0.90]. "
+            "S3: AUC = 0.65 with 95% CI [0.58, 0.72]. "
+            "S4: AUC = 0.91 with 95% CI [0.85, 0.97]. "
+            "S5: AUC = 0.55 with 95% CI [0.48, 0.62]. "
+            "S6: AUC = 0.88 with 95% CI [0.82, 0.94]."
+        )
+        report_p, methods_p, figs_p, tbls_p, out_dir = _write_inventory_inputs(
+            tmp_path, report_text=report_text,
+        )
+
+        # Verify the deterministic pre-pass is producing 6 unresolved
+        # candidates (sanity check on the test fixture itself).
+        result_no_llm = ci.run_inventory(
+            report_text=report_text,
+            no_llm=True,
+        )
+        unresolved = [c for c in result_no_llm.candidates if c.notes == "unresolved"]
+        assert len(unresolved) == 6, (
+            f"test fixture should produce 6 unresolved candidates; got {len(unresolved)}"
+        )
+
+        # Build a per-batch-aware fake LLM. Each call returns a JSON
+        # array with local indices [0..N) covering whatever batch was
+        # passed. We track call count to assert batching happened.
+        call_log = []
+
+        def fake_call(sys_p: str, usr_p: str, model: str) -> tuple[str, float]:
+            # Parse N from the user prompt header to size the response.
+            # The build_demarcator_user_prompt's first line reads:
+            #   "You will demarcate N=<num> multi-numeric sentence(s) ..."
+            import re as _re
+            m = _re.search(r"N=(\d+)", usr_p)
+            assert m is not None, f"unexpected prompt shape: {usr_p[:200]!r}"
+            n = int(m.group(1))
+            # For each batch-local index, emit two demarcation rows
+            # (the AUC + the CI) — both citing the synthetic notebook
+            # in the methods_provenance fixture.
+            rows = []
+            for i in range(n):
+                rows.append({
+                    "input_candidate_index": i,
+                    "claim_text": f"AUC = 0.{70 + i}",  # placeholder substring
+                    "source_notebook": "notebooks/04_classifier.ipynb",
+                    "source_cell": "18",
+                    "figure_or_table": "",
+                    "severity_justification": "Primary metric.",
+                })
+                rows.append({
+                    "input_candidate_index": i,
+                    "claim_text": f"95% CI [0.{60 + i}, 0.{80 + i}]",
+                    "source_notebook": "notebooks/04_classifier.ipynb",
+                    "source_cell": "18",
+                    "figure_or_table": "",
+                    "severity_justification": "Bound.",
+                })
+            response = json.dumps(rows)
+            call_log.append({"n": n, "response": response})
+            return response, 0.045
+
+        # Run with batch_size=2 → expect 3 LLM calls.
+        # NOTE: the fake's claim_text values are crafted to be
+        # substrings of each respective input sentence. Since B1.b
+        # validator requires substring of input sentence, we craft per
+        # actual S1..S6 content.
+        # Adjust the fake to read from the prompt's actual sentence_text
+        # entries — easier than per-test brittle substrings.
+        call_log.clear()
+
+        def smarter_fake(sys_p: str, usr_p: str, model: str) -> tuple[str, float]:
+            import re as _re
+            # Extract the sentences the user prompt is asking us about.
+            # Each input is rendered as: [i] sentence_text: '...'
+            sentence_lines = _re.findall(r"\[(\d+)\] sentence_text: '([^']+)'", usr_p)
+            rows = []
+            for idx_str, sentence in sentence_lines:
+                idx = int(idx_str)
+                # Find an AUC substring + a CI substring within this sentence.
+                auc_m = _re.search(r"AUC = 0\.\d+", sentence)
+                ci_m = _re.search(r"95% CI \[0\.\d+, 0\.\d+\]", sentence)
+                if auc_m:
+                    rows.append({
+                        "input_candidate_index": idx,
+                        "claim_text": auc_m.group(0),
+                        "source_notebook": "notebooks/04_classifier.ipynb",
+                        "source_cell": "18",
+                        "figure_or_table": "",
+                        "severity_justification": "Primary metric.",
+                    })
+                if ci_m:
+                    rows.append({
+                        "input_candidate_index": idx,
+                        "claim_text": ci_m.group(0),
+                        "source_notebook": "notebooks/04_classifier.ipynb",
+                        "source_cell": "18",
+                        "figure_or_table": "",
+                        "severity_justification": "Bound.",
+                    })
+            response = json.dumps(rows)
+            call_log.append({"n_inputs": len(sentence_lines)})
+            return response, 0.045
+
+        monkeypatch.setattr(ci, "demarcator_llm_call", smarter_fake)
+
+        rc = ci.main([
+            "--report", str(report_p),
+            "--methods-provenance", str(methods_p),
+            "--figures-inventory", str(figs_p),
+            "--tables-inventory", str(tbls_p),
+            "--output-dir", str(out_dir),
+            "--batch-size", "2",
+        ])
+        assert rc == 0, "batched run should pass full validation"
+        # 6 candidates / batch_size 2 → 3 LLM calls.
+        assert len(call_log) == 3, f"expected 3 batches; got {len(call_log)}"
+        for entry in call_log:
+            assert entry["n_inputs"] == 2, f"each batch should be size 2; {entry}"
+        # Cost is summed: 3 × $0.045 = $0.135.
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        assert record["cost_usd"] == pytest.approx(3 * 0.045)
+        assert record["exit_status"] == 0
+        # Inventory should have 12 rows (6 × 2 demarcations each).
+        rows = list(csv.DictReader(
+            (out_dir / "claim_inventory.tsv").read_text().splitlines(),
+            dialect="excel-tab",
+        ))
+        assert len(rows) == 12, f"expected 12 demarcated rows; got {len(rows)}"
+
+    def test_batch_size_invalidates_cache(self):
+        """Per feedback_cache_key_chunked_only_when_chunked, batch_size
+        is in the cache key only when explicitly set. Same inputs +
+        different batch_size → different cache key → cache miss on
+        rerun. Same inputs + None batch_size → byte-identical to
+        legacy 6-tuple key (backwards compat with B1.b cache files)."""
+        legacy_key = ci.compute_cache_key(
+            report_sha="r" * 64,
+            methods_provenance_sha="m" * 64,
+            figures_inventory_sha="f" * 64,
+            tables_inventory_sha="t" * 64,
+            prompt_sha="p" * 64,
+            parser_version="0.8.0-m1-B1.e",
+        )
+        # Same inputs, batch_size=None → identical to legacy.
+        none_key = ci.compute_cache_key(
+            report_sha="r" * 64,
+            methods_provenance_sha="m" * 64,
+            figures_inventory_sha="f" * 64,
+            tables_inventory_sha="t" * 64,
+            prompt_sha="p" * 64,
+            parser_version="0.8.0-m1-B1.e",
+            batch_size=None,
+        )
+        assert legacy_key == none_key, (
+            "batch_size=None must produce byte-identical keys to legacy 6-tuple"
+        )
+        # Same inputs, batch_size=15 → different key.
+        bs15_key = ci.compute_cache_key(
+            report_sha="r" * 64,
+            methods_provenance_sha="m" * 64,
+            figures_inventory_sha="f" * 64,
+            tables_inventory_sha="t" * 64,
+            prompt_sha="p" * 64,
+            parser_version="0.8.0-m1-B1.e",
+            batch_size=15,
+        )
+        assert bs15_key != legacy_key
+        # Different batch_sizes → different keys.
+        bs10_key = ci.compute_cache_key(
+            report_sha="r" * 64,
+            methods_provenance_sha="m" * 64,
+            figures_inventory_sha="f" * 64,
+            tables_inventory_sha="t" * 64,
+            prompt_sha="p" * 64,
+            parser_version="0.8.0-m1-B1.e",
+            batch_size=10,
+        )
+        assert bs10_key != bs15_key, (
+            "different batch_sizes must produce different cache keys"
+        )
+
+
+# ===========================================================================
+# B1.g — Bounded retry on missing indices + tolerated_missing fallback (D-039)
+# ===========================================================================
+#
+# Filed 2026-05-07 after live-LLM smoke on `ibd_phage_targeting`
+# revealed that even with B1.f batching the demarcator
+# non-deterministically drops 1–3 input candidates per dense-project
+# run (different indices each run). Fix: bounded retry on missing
+# indices, with `tolerated_missing` carried through to the
+# orchestrator's existing pass-through fallback.
+
+
+class TestB1gRetryOnMissingIndices:
+    """Two tests:
+      - retry round recovers an LLM-dropped index → exit 0, full TSV.
+      - residual missing after max_retries falls through to original
+        unresolved row, exit 0, TSV has the unresolved row preserved
+        + tolerated_missing recorded in the result.
+    """
+
+    def test_retry_recovers_dropped_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM drops one of 3 candidates on the initial pass; retry
+        round 1 recovers it; result has all 3 covered, exit 0."""
+        report_text = (
+            "S1: AUC = 0.78 with 95% CI [0.71, 0.85]. "
+            "S2: AUC = 0.82 with 95% CI [0.74, 0.90]. "
+            "S3: AUC = 0.91 with 95% CI [0.85, 0.97]."
+        )
+        report_p, methods_p, figs_p, tbls_p, out_dir = _write_inventory_inputs(
+            tmp_path, report_text=report_text,
+        )
+
+        # Stateful fake: first call drops the LAST input (returns N-1
+        # rows for a batch of N); subsequent calls cover everything
+        # the user prompt asked for.
+        state = {"call": 0}
+
+        def staged_fake(sys_p: str, usr_p: str, model: str) -> tuple[str, float]:
+            import re as _re
+            state["call"] += 1
+            sentence_lines = _re.findall(
+                r"\[(\d+)\] sentence_text: '([^']+)'", usr_p
+            )
+            rows = []
+            # On the FIRST call only, drop the last input. Subsequent
+            # calls cover every input the prompt asked for (including
+            # the retry batch which is just the dropped one).
+            if state["call"] == 1 and len(sentence_lines) > 1:
+                sentence_lines = sentence_lines[:-1]
+            for idx_str, sentence in sentence_lines:
+                idx = int(idx_str)
+                auc_m = _re.search(r"AUC = 0\.\d+", sentence)
+                ci_m = _re.search(r"95% CI \[0\.\d+, 0\.\d+\]", sentence)
+                if auc_m:
+                    rows.append({
+                        "input_candidate_index": idx,
+                        "claim_text": auc_m.group(0),
+                        "source_notebook": "notebooks/04_classifier.ipynb",
+                        "source_cell": "18",
+                        "figure_or_table": "",
+                        "severity_justification": "Primary metric.",
+                    })
+                if ci_m:
+                    rows.append({
+                        "input_candidate_index": idx,
+                        "claim_text": ci_m.group(0),
+                        "source_notebook": "notebooks/04_classifier.ipynb",
+                        "source_cell": "18",
+                        "figure_or_table": "",
+                        "severity_justification": "Bound.",
+                    })
+            return json.dumps(rows), 0.045
+
+        monkeypatch.setattr(ci, "demarcator_llm_call", staged_fake)
+
+        rc = _run_main(
+            tmp_path,
+            report_p=report_p, methods_p=methods_p,
+            figs_p=figs_p, tbls_p=tbls_p, out_dir=out_dir,
+        )
+        assert rc == 0, "retry should recover the dropped index"
+        # Two LLM calls: initial (drops one) + retry round 1 (recovers).
+        assert state["call"] == 2, f"expected 2 LLM calls; got {state['call']}"
+        # TSV has 6 rows (3 candidates × 2 demarcations).
+        rows = list(csv.DictReader(
+            (out_dir / "claim_inventory.tsv").read_text().splitlines(),
+            dialect="excel-tab",
+        ))
+        assert len(rows) == 6, f"expected 6 rows; got {len(rows)}"
+        # All claim_ids present, no `unresolved` notes.
+        assert all(r["notes"] != "unresolved" for r in rows), rows
+        # Cost summed: 2 × $0.045 = $0.09.
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        assert record["cost_usd"] == pytest.approx(2 * 0.045)
+        assert record["exit_status"] == 0
+
+    def test_residual_missing_falls_through_to_unresolved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """LLM persistently drops the same index across initial + 3
+        retries; orchestrator preserves the original notes='unresolved'
+        row for that index and exits 0. The B1.g fallback unblocks
+        live runs from intrinsic LLM variance without abandoning the
+        candidate."""
+        report_text = (
+            "S1: AUC = 0.78 with 95% CI [0.71, 0.85]. "
+            "S2: AUC = 0.82 with 95% CI [0.74, 0.90]."
+        )
+        report_p, methods_p, figs_p, tbls_p, out_dir = _write_inventory_inputs(
+            tmp_path, report_text=report_text,
+        )
+
+        # Always drop the LAST sentence in whatever batch is sent.
+        # On retry, the retry batch contains only the dropped index,
+        # which is still "the last", so it's dropped again — this
+        # exercises the max_retries-exhausted fallback path.
+        # However, on the SECOND retry's batch (size 1), the prompt
+        # has only one input — to ensure persistent drop without
+        # ever covering it, we drop ALL inputs when the batch is
+        # exactly the persistent-miss target.
+        TARGET_INDEX = 1  # absolute index that always gets dropped
+
+        def persistent_drop_fake(sys_p: str, usr_p: str, model: str) -> tuple[str, float]:
+            import re as _re
+            sentence_lines = _re.findall(
+                r"\[(\d+)\] sentence_text: '([^']+)'", usr_p
+            )
+            # The user prompt uses local indices [0..N) where N=len(batch);
+            # the absolute index is hidden from us. We use the sentence
+            # CONTENT to identify the target: "S2:" is sentence #1
+            # (zero-indexed). Drop any local row whose sentence starts
+            # with "S2:".
+            rows = []
+            for idx_str, sentence in sentence_lines:
+                idx = int(idx_str)
+                if sentence.startswith("S2"):
+                    continue  # persistent drop
+                auc_m = _re.search(r"AUC = 0\.\d+", sentence)
+                ci_m = _re.search(r"95% CI \[0\.\d+, 0\.\d+\]", sentence)
+                if auc_m:
+                    rows.append({
+                        "input_candidate_index": idx,
+                        "claim_text": auc_m.group(0),
+                        "source_notebook": "notebooks/04_classifier.ipynb",
+                        "source_cell": "18",
+                        "figure_or_table": "",
+                        "severity_justification": "Primary metric.",
+                    })
+                if ci_m:
+                    rows.append({
+                        "input_candidate_index": idx,
+                        "claim_text": ci_m.group(0),
+                        "source_notebook": "notebooks/04_classifier.ipynb",
+                        "source_cell": "18",
+                        "figure_or_table": "",
+                        "severity_justification": "Bound.",
+                    })
+            return json.dumps(rows), 0.045
+
+        monkeypatch.setattr(ci, "demarcator_llm_call", persistent_drop_fake)
+
+        rc = _run_main(
+            tmp_path,
+            report_p=report_p, methods_p=methods_p,
+            figs_p=figs_p, tbls_p=tbls_p, out_dir=out_dir,
+        )
+        assert rc == 0, (
+            "residual missing should fall through to unresolved row, "
+            f"not exit 4; got {rc}"
+        )
+        # TSV: S1 demarcates to 2 rows (AUC + CI) + S2 stays as 1 unresolved row = 3 rows.
+        rows = list(csv.DictReader(
+            (out_dir / "claim_inventory.tsv").read_text().splitlines(),
+            dialect="excel-tab",
+        ))
+        assert len(rows) == 3, f"expected 3 rows; got {len(rows)}: {rows}"
+        # Exactly one row carries `notes='unresolved'` (the S2 fallback).
+        unresolved = [r for r in rows if r["notes"] == "unresolved"]
+        assert len(unresolved) == 1, f"expected 1 unresolved row; got: {unresolved}"
+        assert "S2" in unresolved[0]["claim_text"]
+        # Audit reports cost across all retry rounds.
+        record = json.loads(
+            (out_dir / "audit" / "phase0.jsonl").read_text().splitlines()[-1]
+        )
+        # 1 initial + 3 retries = 4 LLM calls × $0.045 = $0.18.
+        assert record["cost_usd"] == pytest.approx(4 * 0.045)
+        assert record["exit_status"] == 0
+        # Cache file persists tolerated_missing for byte-stable rerun.
+        cache_path = out_dir / "audit" / "claim_inventory_cache.json"
+        assert cache_path.is_file()
+        cache_data = json.loads(cache_path.read_text())
+        # Single entry; tolerated_missing should record the residual.
+        only_payload = next(iter(cache_data.values()))
+        assert only_payload.get("tolerated_missing") == [TARGET_INDEX], (
+            f"cache should persist tolerated_missing; got {only_payload}"
+        )
+
+
+# ===========================================================================
+# B1.h — Allowlist extraction + user-prompt menu (D-040)
+# ===========================================================================
+#
+# Filed 2026-05-07 after live-LLM smoke on `ibd_phage_targeting`
+# revealed that the demarcator was fabricating cites despite anti-
+# fabrication prompt rules:
+#   - "notebooks/NB07a_H3a_falsifiability.ipynb" instead of the real
+#     "notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb"
+#   - "Fig NB15" (treating a notebook ID as a figure label)
+# The fix puts an explicit allowlist near the top of the user prompt
+# so the LLM has a copy-from menu rather than paraphrasing.
+
+
+class TestB1hAllowlistsInUserPrompt:
+    """Two tests:
+      - extractors pull the right notebook paths and figure/table
+        labels from realistic provenance/inventory text.
+      - build_demarcator_user_prompt emits the allowlist sections in
+        the right order with the right anti-pattern reminders.
+    """
+
+    def test_extractors_pull_notebooks_and_labels(self, tmp_path: Path):
+        """`_extract_notebook_paths` returns sorted unique paths,
+        merging methods_provenance mentions with disk scan when
+        project_root is provided. `_extract_figure_or_table_labels`
+        handles short (`Fig N`), path (`figures/X.png`), and id
+        (`report_tbl_NN`) heading forms."""
+        # methods_provenance lists 2 notebooks; disk has 4 (2 missing
+        # from provenance, modelling the ibd_phage_targeting reality
+        # where the AST extractor catalogs only ~40% of disk notebooks).
+        methods_text = textwrap.dedent("""\
+            # Methods Provenance
+
+            ## Statistical Tests Detected
+
+            ### Mann-Whitney U test
+
+            - `scipy.stats.mannwhitneyu` in **notebooks/NB04_within_ecotype_DA.ipynb** (cell 4, line 27)
+            - duplicate-text-only should dedupe: notebooks/NB04_within_ecotype_DA.ipynb again.
+
+            ### Gradient boosting classifier
+
+            - `sklearn.ensemble.GradientBoostingClassifier` in **notebooks/NB03_clinical_ecotype_classifier.ipynb** (cell 3)
+        """)
+        # Build a real project_root with 4 notebooks on disk.
+        project_root = tmp_path / "project"
+        (project_root / "notebooks").mkdir(parents=True)
+        for name in (
+            "NB03_clinical_ecotype_classifier.ipynb",     # in provenance
+            "NB04_within_ecotype_DA.ipynb",                # in provenance
+            "NB07a_pathway_DA_H3a_falsifiability.ipynb",   # disk-only
+            "NB10a_kumbhari_strain_adaptation.ipynb",      # disk-only
+        ):
+            (project_root / "notebooks" / name).write_text("nb stub", encoding="utf-8")
+
+        # Without project_root: only methods_provenance mentions.
+        nb_allow_no_disk = ci._extract_notebook_paths(methods_text)
+        assert nb_allow_no_disk == [
+            "notebooks/NB03_clinical_ecotype_classifier.ipynb",
+            "notebooks/NB04_within_ecotype_DA.ipynb",
+        ], nb_allow_no_disk
+
+        # With project_root: union with disk scan picks up disk-only
+        # notebooks too — the bug fixture from live-LLM smoke.
+        nb_allow_with_disk = ci._extract_notebook_paths(
+            methods_text, project_root=project_root,
+        )
+        assert nb_allow_with_disk == [
+            "notebooks/NB03_clinical_ecotype_classifier.ipynb",
+            "notebooks/NB04_within_ecotype_DA.ipynb",
+            "notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb",
+            "notebooks/NB10a_kumbhari_strain_adaptation.ipynb",
+        ], nb_allow_with_disk
+
+        # Three label formats — all should be picked up.
+        figures_text = textwrap.dedent("""\
+            # Figures Inventory
+
+            ## Fig 1 — Cohort overview
+
+            ## Figures
+
+            ### `figures/NB00_cohort_summary.png`
+
+            ### figures/NB01_ecotype_by_diagnosis.png
+        """)
+        tables_text = textwrap.dedent("""\
+            # Tables Inventory
+
+            ## Tables
+
+            ### report_tbl_01 — H3 falsifiability framework — verdict summary
+
+            ## Tbl 2 — Per-cohort AUC summary
+
+            ## Table 5 — Strain prioritization
+        """)
+        fig_tbl_allow = ci._extract_figure_or_table_labels(
+            figures_text, tables_text,
+        )
+        # Short form (canonical).
+        assert "Fig 1" in fig_tbl_allow
+        assert "Tbl 2" in fig_tbl_allow
+        assert "Table 5" in fig_tbl_allow
+        # Path form (used by ibd_phage_targeting).
+        assert "figures/NB00_cohort_summary.png" in fig_tbl_allow
+        assert "figures/NB01_ecotype_by_diagnosis.png" in fig_tbl_allow
+        # Id form (used by tables_inventory.md).
+        assert "report_tbl_01" in fig_tbl_allow
+        # No duplicates.
+        assert len(fig_tbl_allow) == len(set(fig_tbl_allow))
+
+    def test_user_prompt_includes_allowlist_sections_and_anti_patterns(self):
+        """build_demarcator_user_prompt emits the VALID-source_notebook
+        and VALID-figure_or_table sections at the top, BEFORE INPUTS,
+        with the anti-pattern reminders the live-LLM smoke surfaced."""
+        methods_text = (
+            "Mann-Whitney in **notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb** "
+            "(cell 6, line 35).\n"
+        )
+        figures_text = "## Fig 3 — Something\n"
+        tables_text = "## Tbl 2 — Something\n"
+        cand = ci.ClaimCandidate(
+            claim_id="C001",
+            claim_text="AUC = 0.78 with 95% CI [0.71, 0.85] across n=343.",
+            source_notebook="",
+            source_cell="",
+            figure_or_table="",
+            effect_size_present="yes",
+            ci_present="yes",
+            pvalue_present="no",
+            notes="unresolved",
+        )
+
+        prompt = ci.build_demarcator_user_prompt(
+            [cand],
+            methods_provenance_text=methods_text,
+            figures_inventory_text=figures_text,
+            tables_inventory_text=tables_text,
+        )
+
+        # Allowlist section headers present.
+        assert "VALID source_notebook values" in prompt
+        assert "VALID figure_or_table values" in prompt
+        # Real notebook path appears in the allowlist.
+        assert (
+            "notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb" in prompt
+        )
+        # Real fig/tbl labels appear in the allowlist.
+        assert "Fig 3" in prompt
+        assert "Tbl 2" in prompt
+        # Anti-pattern reminders the live-LLM smoke calibrated against.
+        assert "do not paraphrase" in prompt
+        assert "NOTEBOOK identifiers, not" in prompt
+        assert "fabrication is not" in prompt
+        # The allowlist sections come BEFORE the INPUTS section.
+        idx_nb_allowlist = prompt.find("VALID source_notebook values")
+        idx_inputs = prompt.find("INPUTS:")
+        assert idx_nb_allowlist != -1 and idx_inputs != -1
+        assert idx_nb_allowlist < idx_inputs, (
+            "allowlist must appear before INPUTS so the LLM sees the "
+            "menu before the per-row work"
+        )

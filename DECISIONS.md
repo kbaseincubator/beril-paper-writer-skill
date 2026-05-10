@@ -1098,3 +1098,394 @@ summary); the prior `archive-v0_8_language_quality_punch_list.md`
 ---
 
 *Append new decisions below this line. Use the next D-NNN ID.*
+
+
+## D-035 — Q1 cost-justification of LLM-assisted overlap classifier deferred
+
+**Filed:** 2026-05-07. **Milestone:** v0.8.0 M1 §C1.b ablation close-out.
+**Authoritative analysis:** `smoke-test/M1_PUNCH_LIST_ablation_notes.md`.
+
+**Decision.** Defer Q1 reconsideration to v0.9 architectural conversation.
+The LLM-assisted overlap classifier remains the shipped path; its cost
+is observed (≤ $0.05/run held trivially) but its *value* is not measurable
+on the current milestone smoke target.
+
+**Why deferred (not closed positively or reopened).** §C1.b's gate
+required `delta = E_llm \ E_strmatch ≠ ∅` AND a hand-found paraphrase
+list to confirm cost-justification. On `ibd_phage_targeting`:
+
+- The deterministic pre-pass produced **0 overlap candidates**, so the
+  LLM was never invoked in either ablation leg. `delta = ∅` by
+  construction, not by LLM inadequacy.
+- The hand-list (5 paraphrase-equivalent pairs HE1–HE5) revealed that
+  HE2–HE5 live in `## Hypothesis Framework` Pillar sections that the
+  plan-side regex (`analys[ei]s|method|test|stat`) does not parse.
+- HE1 (in a parsed section) does not cross the
+  `_OVERLAP_RATIO_THRESHOLD = 0.5` containment-over-min match because
+  the plan bullet is multi-clause prose; normalized-token overlap
+  with the executed phrase ≈ 0.17.
+
+The two upstream defects (plan-parser scope + threshold restrictiveness
+on prose-heavy bullets) make `overlap = ∅` the rule on dense BERIL
+projects, not the exception. Re-evaluating Q1's cost-vs-value tradeoff
+requires fixing the parser/threshold first; doing so is a v0.9
+architectural conversation per watch-fors #1 + #3 in
+`.auto-memory/project_paper_writer_v0_8_m1_a1.md`.
+
+**Migration discipline.** No code change at this commit. The
+`_OVERLAP_RATIO_THRESHOLD` constant remains hardcoded at
+`discrepancy_register.py:501`. The plan-side heading regex remains at
+`discrepancy_register.py:260`. M1 ships with the cost-justification
+question open and a path on file.
+
+**Related:** SPEC §4.5; M1_PUNCH_LIST.md §C1.b; the ablation report at
+`smoke-test/M1_PUNCH_LIST_ablation_notes.md`; auto-memory
+`project_paper_writer_v0_8_m1_a1.md` watch-fors #1 + #3.
+
+
+## D-036 — B1 regex catalog extension for C2.b recall gate
+
+**Filed:** 2026-05-07. **Milestone:** v0.8.0 M1 §C2.b recall-pass +
+B1.e ship.
+**Authoritative analysis:** `smoke-test/M1_PUNCH_LIST_claim_groundtruth.md`.
+
+**Decision.** Extend the `claim_inventory.py` B1.b deterministic regex
+catalog from 6 classes to 11 classes, plus relax two existing classes,
+to clear the §C2.b ≥ 0.90 recall gate against realistic BERIL project
+content. Shipped as the B1.e patch.
+
+**The seven catalog changes.**
+
+1. `PERCENTAGE_RE` — relaxed from `\b\d+(?:\.\d+)?%` to
+   `\b\d+(?:\.\d+)?\s{0,2}%`. REPORT.md authors routinely write `95 %`
+   with a space; the prior regex missed 9 of 12 percentage patterns
+   on `ibd_phage_targeting`.
+2. `P_VALUE_RE` (sci-notation branch) — made the dot+fractional
+   optional in the mantissa and added `<` to the operator class, so
+   `p=7e-17` and `p<1e-31` match.
+3. `P_VALUE_RE` (decimal branch) — added Unicode `≤` (U+2264) and `≥`
+   (U+2265) to the operator class. BERIL Methods sections use them.
+4. New class `correlation` — Pearson `r =` and Spearman `ρ =` with
+   optional sign (incl. Unicode minus U+2212). Sets `effect_size_present`.
+5. New class `odds_ratio` — `OR=1.38`, `OR = 8.1` etc., word-boundary
+   anchored. Sets `effect_size_present`.
+6. New class `log_fc` — `log₂FC +2.67` (subscript ₂ U+2082), `log2FC -1.42`
+   (ASCII), with optional sign. Sets `effect_size_present`.
+7. New class `count_of` — `M of N` and `M / N` forms with comma
+   separators (`14 of 23`, `3,929 / 17,672`). Stays unflagged like
+   `n_count`.
+8. New class `cliff_delta` — `cliff δ = +0.50` (with U+03B4 glyph) and
+   no-glyph `cliff = -0.358`. Sets `effect_size_present`.
+
+(Counting: two existing-class relaxations + five new classes = "seven
+catalog changes" per the punch-list framing; the SPEC §4.6 catalog
+size goes from 6 to 11.)
+
+**Empirical result (sandbox dry-run, 2026-05-07).** Recall on the
+48-pattern ground-truth file rose from **0.562 → 1.000** on
+`ibd_phage_targeting/REPORT.md`. Inventory candidate count rose from
+87 → 401, with unresolved (multi-numeric) count rising from 10 → 133.
+
+**Cost implication.** 133 unresolved demarcations × ~$0.011 each ≈
+$1.50 live-LLM spend per run on `ibd_phage_targeting`. This is ~15×
+the prior `_DEMARCATOR_COST_CEILING_USD = 0.10` constant. Per the
+adjacent cost-cap reframing (Adam directive 2026-05-07), the ceiling
+constant is no longer enforced as a stderr warning or smoke gate;
+cost is recorded in the audit JSONL for later tightening.
+
+**Anti-fabrication discipline preserved.** Every new class requires a
+decimal point in the value (except `count_of`, where integer counts
+are the norm) — matches the existing METRIC_RE convention. Word-
+boundaries on keyword anchors (`\bOR`, `\b[rρ]`, `\bcliff`, `\blog`)
+prevent mid-token false positives.
+
+**Tests.** Six new unit tests in `TestB1eRegexCatalogD036`
+(`test_claim_inventory.py`), one per change-block. Combined with the
+two B1.e validator tests + two carry-over fix tests, this is +9 tests
+on top of B1.b's 18 existing tests = 27 in `test_claim_inventory.py`,
+with the discrepancy_register suite at 33 (also +1 for the cost-on-exit-4
+fix). 60/60 unit tests green.
+
+**Related.** SPEC §4.6; M1_PUNCH_LIST.md §C2.b; the recall report at
+`smoke-test/M1_PUNCH_LIST_claim_groundtruth.md`; B1.e companion fixes
+(validator project_root fallback, exit-4 cost recording, cost-cap
+reframing) shipped in the same commit cycle.
+
+
+## D-037 — Cost caps tracked, not enforced, through M1
+
+**Filed:** 2026-05-07. **Milestone:** v0.8.0 M1 close-out (B1.e ship).
+**Decided by:** Adam, conversational 2026-05-07.
+
+**Decision.** Per-call cost ceilings on Phase-0 tools
+(`_COST_CEILING_USD = 0.05` for `discrepancy_register.py`,
+`_DEMARCATOR_COST_CEILING_USD = 0.10` for `claim_inventory.py`) are
+recorded as informational constants. The stderr warning emission on
+overrun is removed; the smoke harnesses' cost AC gates are removed.
+Audit JSONL continues to record `cost_usd` per call.
+
+**Rationale (Adam, verbatim):** "we shouldn't take cost caps too
+seriously for now. It is more that we should be tracking costs so
+later we can determine what the caps should be."
+
+**Why this is the right framing for M1.** The B1.e regex catalog
+extension (D-036) raised the per-run demarcation workload from ~10
+to ~133 multi-numeric sentences on `ibd_phage_targeting` — a 13×
+load increase that would have triggered the prior $0.10 ceiling on
+nearly every dense-prose project. Holding the gate would have
+either (a) blocked legitimate work or (b) forced premature catalog
+narrowing to fit an arbitrary cap. Tracking-only lets observed data
+drive the cap.
+
+**Carry-forward.** M2's holistic-write phase will reintroduce a
+cost-aware orchestrator-level circuit breaker that aggregates Phase-0
++ Phase-2 spend, with a cap derived from observed M1 distributions.
+At that point individual tool ceilings can be re-tuned from data.
+The constants stay in code as documentation-only and forward hooks.
+
+**Related.** SPEC §4.5 + §4.6; B1.e patch surface in
+`smoke-test/M1_PUNCH_LIST_claim_groundtruth.md` §4.d.iii.
+
+
+## D-038 — Demarcator batching to avoid output truncation + subprocess timeout
+
+**Filed:** 2026-05-07. **Milestone:** v0.8.0 M1 §C2 close-out (B1.f patch).
+**Authoritative analysis:** Live-LLM smoke output captured in
+`smoke-test/M1_PUNCH_LIST_claim_groundtruth.md` §4.f.
+
+**Decision.** `claim_inventory.py`'s LLM demarcator pass batches the
+unresolved-candidate list into chunks of `--batch-size` (default 15)
+and calls the LLM N times rather than once. Per-batch local indices
+[0..batch_size) are offset back to absolute positions; per-batch costs
+are summed; full coverage is validated after all batches return.
+
+**Why.** Live-LLM smoke on `ibd_phage_targeting` post-B1.e produced
+**133 unresolved candidates** in a single demarcator call. Two failure
+modes were observed:
+
+1. **Output truncation.** The first attempted call billed $0.1856 and
+   returned demarcations for only 91 of 133 indices — the validator's
+   coverage check rejected with 42 missing indices. The LLM was hitting
+   an effective per-response output-token cap (or refusal-style
+   abbreviation) on a ~50K-output prompt.
+2. **Subprocess timeout.** Re-running the same call hit the
+   `demarcator_llm_call` 180s timeout. Wall time on a ~65K-input
+   ~50K-output Haiku 4.5 call exceeded the wrapper's budget.
+
+**Calibration of default batch_size = 15.** Per-batch input ≈ 15
+sentences × ~400 chars ≈ 6K characters of candidate text + ~12K of
+context = ~18K input characters ≈ ~5K input tokens. Per-batch output
+≈ 15 × ~3 demarcations × ~300 chars ≈ ~13K output characters ≈ ~3K
+output tokens. Wall time per call ≈ 30s on Haiku 4.5. Cost per call
+≈ $0.10. The 180s subprocess timeout has 6× headroom; the model's
+output budget has order-of-magnitude headroom. On
+`ibd_phage_targeting` (133 unresolved): 9 batches × 30s = ~5 min wall;
+9 × $0.10 ≈ $0.90 total spend.
+
+**Cache discipline.** `compute_cache_key` adds `batch_size` as an
+optional seventh component, mixed into the key only when explicitly
+set. Following `feedback_cache_key_chunked_only_when_chunked.md`: a
+B1.b cache file written before batching existed remains valid (legacy
+6-tuple key when `batch_size=None`), but ANY explicit batch_size
+mixes a new component in. Different batch sizes yield different cache
+keys → switching from default 15 to 10 forces a fresh demarcator
+sweep. This is correct: changing chunking changes the LLM's per-call
+context, which changes the response, which means the cached
+demarcations are no longer canonical for the new chunking.
+
+**Edge cases handled.**
+* `unresolved_candidates ≤ batch_size`: single-batch fast path
+  preserves pre-B1.f behavior; no offset arithmetic; tests using
+  small synthetic fixtures (B1.b's 18 tests, B1.e's 9 tests) all
+  remain byte-identical to legacy.
+* Per-batch LLM failure: the `LLMCallError` is annotated with the
+  batch number ("batch 5 of 9 (candidates 60..74): ...") so a
+  Mac-shell operator can pin which call to re-run. The accumulated
+  cost from successful prior batches is still summed to
+  `total_cost_usd` at exception time, but the partial failure
+  collapses the run (caller exits 3 without writing TSV).
+* Empty `unresolved_candidates`: no LLM call, returns `([], 0.0)`
+  per the original short-circuit.
+* `batch_size < 1`: rejected at CLI parse time + at function entry
+  with a clear `ValueError`.
+
+**Anti-fabrication discipline preserved.** The validator's full
+coverage check still runs on the merged result; B1.e's
+project_root-fallback substring check still gates each row. Batching
+is purely an LLM-throughput concern.
+
+**Tests.** Two new unit tests in `TestB1fDemarcatorBatching`:
+* batched run with batch_size=2 on a 6-candidate fixture confirms 3
+  LLM calls, summed cost, full coverage, 12 demarcated rows in TSV.
+* `compute_cache_key` regression: `batch_size=None` is legacy-key-
+  compatible, distinct from `batch_size=15`, distinct from
+  `batch_size=10`.
+
+Test sweep: 62/62 unit tests green (33 disc + 29 claim). 27 + 32
+B1.b/A2 baseline preserved (no regression).
+
+**Related.** SPEC §4.6; M1_PUNCH_LIST.md §C2; B1.e shipped catalog
+extension (D-036) that drove the candidate-count jump from ~10 to
+~133 on dense projects; D-037 cost reframing makes the ~$0.90/run
+spend acceptable as observability while the M2 orchestrator-level
+circuit breaker is designed.
+
+
+## D-039 — Bounded retry on missing indices + tolerated_missing fallback
+
+**Filed:** 2026-05-07. **Milestone:** v0.8.0 M1 §C2 close-out (B1.g patch).
+**Authoritative analysis:** `smoke-test/M1_PUNCH_LIST_claim_groundtruth.md` §4.g.
+
+**Decision.** `claim_inventory.py`'s LLM demarcator pass now (1)
+re-batches missing input_candidate_indexes into a fresh LLM call, up
+to `max_retries=3` rounds, and (2) tolerates residual misses by
+falling back to the original `notes='unresolved'` row through
+`expand_with_demarcations`' existing defensive empty-rows path. The
+validator's coverage check now accepts an `allow_missing` kwarg that
+the demarcator threads in after retries exhaust.
+
+**Why.** Live-LLM smoke on `ibd_phage_targeting` post-B1.f produced
+**different missing indices on every run** (run-to-run: [69, 72]; [39,
+95]; [39, 72, 95]). Three observations together drove the design:
+
+1. Missing indices are non-deterministic — the LLM is dropping
+   ~1.5–2.5% of inputs per dense-project run as an intrinsic
+   variance, not a systematic gap.
+2. Re-running the missing candidates as a fresh batch typically
+   recovers them (the LLM doesn't drop the same row across all
+   attempts).
+3. After 3 retries, residuals are rare enough (<1% of inputs in
+   observation) that abandoning the candidate to its original
+   `notes='unresolved'` row preserves the M2 holistic prompt's
+   grounding contract: every input gets ≥1 row in the inventory,
+   regardless of whether B1.c actually demarcated it.
+
+**Calibration of `max_retries=3`.** Two retries is too tight if the
+first retry partially succeeds and the second needs a third pass
+(observed in synthetic test stress runs). More than three doubles
+cost without meaningful coverage gain in observation. Per Adam D-037
+cost reframing, retry cost is recorded in audit JSONL but not gated.
+
+**Anti-fabrication discipline preserved.** Every row that IS emitted
+goes through the same per-row checks (claim_text substring,
+source_notebook ground via methods_provenance OR project_root disk
+check, source_cell shape, figure_or_table ground). The fallback path
+preserves the original deterministic-pre-pass row verbatim — no
+fabricated demarcation rows are produced. The TSV's `notes` column
+distinguishes resolved (empty) from residual fallback (`unresolved`).
+
+**Cache schema extended.** Cached payload gains `tolerated_missing:
+[int]` field. Backwards-compat: payloads written before B1.g lack the
+key entirely → `_cached_payload_to_tolerated_missing` returns empty
+set, which keeps pre-B1.g caches validating against full coverage
+(matching their original semantics; if they had partial coverage they
+wouldn't have been written). On B1.g write, `tolerated_missing` is
+sorted-list-serialized for stable hashes.
+
+**Edge cases handled.**
+* `unresolved_candidates ≤ batch_size`: single-batch fast-path still
+  triggers when len(unresolved) is small; retry loop is no-op when
+  initial pass covers everything.
+* All retries succeed: `tolerated_missing = ∅`; behavior identical
+  to B1.f.
+* Initial pass + 3 retries persistently drop the same index: cache
+  records `tolerated_missing=[k]`; rerun reads from cache, skips
+  LLM, produces byte-identical TSV.
+* `max_retries=0`: turns retry loop off; `allow_missing` set to
+  whatever's missing after the initial pass. Useful for
+  deterministic-only smoke tests + sandboxes that can't make many
+  LLM calls.
+* Per-batch `LLMCallError` annotated with pass-label
+  ("initial batch 5 of 9..." vs "retry-2 batch 1 of 1...") for
+  diagnostics.
+* Out-of-range LLM index in a batch response: defensively dropped
+  rather than raised; the coverage check catches the resulting gap
+  and triggers retry.
+
+**Tests.** Two new unit tests in `TestB1gRetryOnMissingIndices`:
+* Stateful fake drops the last input on call #1, recovers on retry
+  → 2 LLM calls, full coverage, exit 0.
+* Stateful fake persistently drops S2 on every call → 1 initial +
+  3 retries = 4 LLM calls, residual `[1]` falls through to original
+  unresolved row, exit 0, cache persists `tolerated_missing=[1]`.
+
+Test sweep: 64/64 unit tests green (32 disc + 32 claim). 18 + 32
+B1.b/A2 baseline preserved (no regression).
+
+**Related.** SPEC §4.6; M1_PUNCH_LIST.md §C2; B1.f shipped batching
+(D-038) that exposed the residual-drop variance issue — small,
+batched calls succeed but ~98% per-batch coverage means ~2% of dense-
+project inputs fail without retry; D-037 cost reframing makes the
+retry round acceptable as observability while M2 designs an
+orchestrator-level cost circuit breaker.
+
+
+## D-040 — Demarcator user prompt gains explicit cite allowlists
+
+**Filed:** 2026-05-07. **Milestone:** v0.8.0 M1 §C2 close-out (B1.h patch).
+**Authoritative analysis:** `smoke-test/M1_PUNCH_LIST_claim_groundtruth.md` §4.h.
+
+**Decision.** `build_demarcator_user_prompt` extracts every notebook
+path from methods_provenance.md and every figure/table label from
+figures_inventory.md + tables_inventory.md, then emits two explicit
+"VALID values" allowlists at the TOP of the user prompt — BEFORE the
+INPUTS section. The system prompt at `prompts/claim_demarcate.v1.md`
+gains anti-pattern worked examples that calibrate against the
+specific fabrications observed live.
+
+**Why.** Live-LLM smoke after B1.g revealed two new defects that
+survive bounded retries (and would survive any number of retries
+because the LLM is consistently making the same kind of error):
+
+1. **Notebook-name truncation.** Real path:
+   `notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb`.
+   LLM emitted: `notebooks/NB07a_H3a_falsifiability.ipynb` — dropped
+   the `pathway_DA_` substring. The model was paraphrasing the
+   notebook by what it does (per RESEARCH_PLAN.md's H3a
+   falsifiability framing) rather than by what it's named.
+2. **Notebook-ID-as-figure-label.** LLM emitted
+   `figure_or_table="Fig NB15"`. NB15 is the *notebook* that
+   produced figures; it is not itself a figure label. The
+   figures_inventory uses `Fig N` form; the LLM mashed two
+   conventions together.
+
+The prompt's prior anti-fabrication paragraph wasn't enough — the
+model needed an explicit menu it could copy from. Reformulating
+"don't fabricate" as "here are your only valid choices, copy
+verbatim" is a more reliable LLM-grounding pattern (cf.
+`feedback_llm_arithmetic_unreliable.md`'s general rule:
+post-correction beats prompt-instruction for any
+mechanically-checkable property).
+
+**Anti-fabrication discipline preserved.** The validator's per-row
+checks (substring of methods_provenance.md OR is_file() under
+project_root for source_notebook; substring of figures/tables
+inventory OR empty for figure_or_table) are unchanged. The
+allowlist is a *guide*, not a *gate* — the validator is the gate.
+A misbehaving LLM that ignores the allowlist still hits exit 4.
+This is the right shape: prompt nudges the LLM toward correct
+behavior, validator enforces it.
+
+**Cache invalidation.** The allowlist content is a function of the
+input files, so it's already part of the cache key via the
+methods/figures/tables SHAs. The system prompt edit changes the
+prompt SHA → cache key changes → previous cache entries don't hit
+on rerun. Both behaviors correct: any change to grounding inputs
+invalidates the cache.
+
+**Tests.** Two new unit tests in `TestB1hAllowlistsInUserPrompt`:
+* `_extract_notebook_paths` returns sorted unique paths;
+  `_extract_figure_or_table_labels` returns ordered unique labels
+  from `## Fig N` / `## Tbl N` / `## Table N` headings.
+* `build_demarcator_user_prompt` emits both allowlist sections
+  with the correct anti-pattern reminders, and the allowlist
+  appears BEFORE the INPUTS section in the prompt order.
+
+Test sweep: 66/66 unit tests green (33 disc + 33 claim). 18 + 32
+B1.b/A2 baseline preserved across e/f/g/h.
+
+**Related.** SPEC §4.6; M1_PUNCH_LIST.md §C2; the `claim_demarcate.v1.md`
+prompt (in-place edit, SHA bumps automatically); B1.g shipped retry
+discipline (D-039) that recovers occasional drops but cannot fix
+systematic fabrication that the LLM repeats across attempts —
+allowlists are the layer that addresses repeating errors.
