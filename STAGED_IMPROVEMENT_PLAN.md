@@ -281,7 +281,71 @@ extract_claims.v1.md output.
 
 ---
 
-### Stage 2 — Make the citation pool work (≤2 days)
+### Stage 2 — Make the citation pool work (CLOSED 2026-05-12)
+
+**Closure result.** draft_8 closed the reviewability chain for
+citations:
+
+| Check | Result |
+|---|---|
+| Pipeline reached `assembled` | ✅ |
+| `manuscript.docx` produced (60,846 bytes) | ✅ |
+| Cost (8.34 USD) | ✅ lower than draft_7's $9.15 |
+| citation_pool ran clean (no filter block) | ✅ 48 entries built, $0.92 |
+| **Pool keys normalized: 48/48** | ✅ Tier M deterministic post-step |
+| Holistic_draft used [key] form (42 unique) | ✅ zero (Author,Year) leakage |
+| Supplementary appended new entries to pool | ✅ 48 → 52 (4 new from WebSearch) |
+| **Orphans (in prose, missing from pool): 0** | ✅ **chain integrity proven** |
+| `citation_reality` findings ≤ 1 | ⚠️ **5** — not the structural fabrication mode draft_3 had; now semantic attribution fidelity, not chain integrity |
+
+**The Stage 2 architectural goal — every manuscript citation
+mechanically resolves to a pool entry — is achieved.** The 5
+remaining `citation_reality` findings are about whether each
+attribution is semantically correct (e.g., "[Arumugam2011] showed X"
+where the paper actually showed Y), not whether the chain exists.
+That's Stage 3's "Tier 1 deterministic cross-walks" territory.
+
+**Stage 2 went through 5 iterations (drafts 4–8).** Each surfaced a
+real bug the previous one masked. The pattern: drafts 4–5 had the
+mechanics of subprocess invocation; draft 6 exposed the content-
+filter recovery problem; draft 7 exposed the schema-mismatch on
+the `key` field; draft 8 closed the chain. Cost across all 5 runs
+≈ $40. That's the price of iterating on a tightly-coupled pipeline
+without strong upfront contract specs.
+
+**Carryover into Stage 3 backlog:**
+
+1. **Compliance Data Availability autofix loop** (Tier N, deferred):
+   compliance gate flags every run; autofix runs but the post-fix
+   state isn't re-checked. Either loosen the detector (also accept
+   "data are available" / "Code Availability" / explicit URL section
+   headers), or re-check post-autofix and surface if the autofix
+   didn't actually fix.
+2. **LLM keeps fabricating ~4 notebook paths in extract_claims**
+   (NB07_v18_class_enrichment.ipynb, NB07a_pathway_DA.ipynb, etc.).
+   Tier C validator catches; never propagates to manuscript. But
+   visible in every run. Fix at extract_claims prompt with a
+   B1.h-style allowlist of project-disk-resident `.ipynb` files.
+3. **citation_reality findings now reflect semantic fidelity.**
+   Need a Tier 1 check verifying each [key] is attributed to a
+   claim the paper actually supports. Hard problem; needs
+   claim_inventory ↔ citation mapping at draft time.
+4. **Supplementary_pool occasional "Stream idle timeout"** (draft_7;
+   non-recurring on draft_8). Add bounded retry if it recurs.
+5. **`audit_discrepancies` writes JSON-in-code-fences to
+   `discrepancy_register.md`** (Stage 1 observation, never closed).
+   Schema is wrong relative to SPEC §4.5's markdown form. Either
+   fix the prompt or accept the JSON form.
+6. **Test files `tests/unit/test_{llm_claim_inventory,
+   llm_discrepancy_register,orchestrator}.py`** remain broken
+   (import errors). Either fix or delete.
+
+---
+
+### Stage 2 (historical, before closure)
+*Kept for reference. Original scope below; outcomes above.*
+
+### Stage 2 — Make the citation pool work (≤2 days) [ORIGINAL SCOPE]
 
 **Trigger:** Stage 1 ships and the artifacts confirm the optimizer
 no longer fabricates. Then citation_reality findings become the
