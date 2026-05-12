@@ -126,74 +126,128 @@ def _locate_paper_writer_sh() -> Path:
 
 
 def run(args: argparse.Namespace) -> int:
-    try:
-        sh_path = _locate_paper_writer_sh()
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 2
+    import asyncio
+    from beril_paper_writer.orchestrator import PaperWriterOrchestrator
+    
+    project_dir = Path(args.project).expanduser().resolve()
+    if not project_dir.is_dir():
+        print(f"error: project directory does not exist: {project_dir}", file=sys.stderr)
+        return 1
 
-    # Build subprocess argv.
-    argv = ["bash", str(sh_path), "draft", args.project]
-    if args.model:
-        argv += ["--model", args.model]
-    if args.depth:
-        argv += ["--depth", args.depth]
-    if args.mode:
-        argv += ["--mode", args.mode]
-    if args.no_stream:
-        argv += ["--no-stream"]
-    if args.no_adversarial:
-        argv += ["--no-adversarial"]
-    if args.max_cost_usd is not None:
-        argv += ["--max-cost-usd", str(args.max_cost_usd)]
-    if args.recaption:
-        argv += ["--recaption"]
-
-    print(f"▸ Running: {' '.join(argv)}", file=sys.stderr)
-    print("", file=sys.stderr)
-
-    # Foreground; stdout/stderr inherit. paper_writer.sh prints the final
-    # draft_dir path on stdout; we capture it for the post-run summary.
-    proc = subprocess.run(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=None,  # inherit so user sees logs in real time
-        text=True,
+    papers_dir = project_dir / "papers"
+    papers_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Find next draft_N
+    existing = [d for d in papers_dir.iterdir() if d.is_dir() and d.name.startswith("draft_")]
+    draft_num = 1
+    if existing:
+        nums = []
+        for d in existing:
+            try:
+                nums.append(int(d.name.split("_")[1]))
+            except ValueError:
+                pass
+        if nums:
+            draft_num = max(nums) + 1
+            
+    draft_dir = papers_dir / f"draft_{draft_num}"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"▸ Initializing new draft at {draft_dir}", file=sys.stderr)
+    
+    # Stage 1 Tier B: 'claude-opus-4-7' is an invalid model identifier
+    # (Opus 4.6 is the real model per SPEC §6.7). Same correction lands
+    # in the orchestrator constructor default; this overrides via getattr
+    # so the fix had to land here too.
+    orch = PaperWriterOrchestrator(
+        draft_dir,
+        max_cost_usd=getattr(args, "max_cost_usd", None),
+        model=getattr(args, "model", "claude-sonnet-4-5-20250929") or "claude-sonnet-4-5-20250929",
+        model_writing=getattr(args, "model_writing", "claude-opus-4-6") or "claude-opus-4-6",
     )
+    
+    try:
+        asyncio.run(orch.run_pipeline())
+        
+        # At this point, the pipeline should raise PipelineHalted or finish.
+        # If it halted at throughline_pick, it should have printed the handoff message.
+        return 0
+    except Exception as e:
+        if type(e).__name__ == "PipelineHalted":
+            # Read .handoff.json to print the summary.
+            # Stage 1 Tier B contract-drift fix (2026-05-11): the plan.v1
+            # prompt emits 'candidates_summary' (dict TLN→description) and
+            # 'next_steps' (free-form prose). The legacy draft.py was
+            # reading 'choices' (array) and 'resume_command' (string) —
+            # neither of which the prompt produces. Result: the handoff
+            # printer surfaced nothing useful and the user had to dig
+            # through the JSON to find the resume command. This block now
+            # reads BOTH schemas defensively.
+            handoff = draft_dir / ".handoff.json"
+            if handoff.is_file():
+                try:
+                    import json
+                    with handoff.open() as f:
+                        data = json.load(f)
+                    print("", file=sys.stderr)
+                    print("─── Draft paused at throughline_pick ───", file=sys.stderr)
+                    print(f"  draft_dir: {draft_dir}", file=sys.stderr)
+                    print(f"  handoff:   {handoff}", file=sys.stderr)
 
-    rc = proc.returncode
-    draft_dir = (proc.stdout or "").strip().splitlines()
-    draft_dir = draft_dir[-1] if draft_dir else ""
+                    # Candidate count + descriptions — accept either
+                    # schema. plan.v1 emits 'candidates_summary' (dict);
+                    # earlier design emitted 'choices' (list).
+                    candidates_summary = data.get("candidates_summary") or {}
+                    choices_list = data.get("choices") or []
+                    n_candidates = (
+                        len(candidates_summary)
+                        if isinstance(candidates_summary, dict) and candidates_summary
+                        else len(choices_list)
+                    )
+                    print(f"  candidates: {n_candidates}", file=sys.stderr)
+                    if isinstance(candidates_summary, dict):
+                        for cid, desc in list(candidates_summary.items())[:6]:
+                            # Truncate long descriptions for readability.
+                            desc_str = str(desc)
+                            if len(desc_str) > 200:
+                                desc_str = desc_str[:197] + "..."
+                            print(f"    {cid}: {desc_str}", file=sys.stderr)
 
-    # On clean pause at throughline_pick, surface the handoff file path
-    # so the slash-command markdown can parse it. paper_writer.sh's exit
-    # 0 + presence of .handoff.json is the success signal.
-    if rc == 0 and draft_dir and (Path(draft_dir) / ".handoff.json").is_file():
-        handoff = Path(draft_dir) / ".handoff.json"
-        try:
-            with handoff.open() as f:
-                data = json.load(f)
-            print("", file=sys.stderr)
-            print("─── Draft paused at throughline_pick ───", file=sys.stderr)
-            print(f"  draft_dir: {draft_dir}", file=sys.stderr)
-            print(f"  handoff:   {handoff}", file=sys.stderr)
-            n_choices = len(data.get("choices", []))
-            print(f"  candidates: {n_choices}", file=sys.stderr)
-            n_warnings = len(data.get("advisory_warnings", []))
-            if n_warnings:
-                print(f"  advisory warnings: {n_warnings}", file=sys.stderr)
-            print(
-                f"  resume:    {data.get('resume_command', '(see handoff JSON)')}",
-                file=sys.stderr,
-            )
-            print("", file=sys.stderr)
-            # Stdout: just the draft_dir, for scripted callers.
-            print(draft_dir)
-        except (OSError, json.JSONDecodeError) as e:
-            print(
-                f"Warning: could not read handoff JSON at {handoff}: {e}",
-                file=sys.stderr,
-            )
-            print(draft_dir)
+                    n_warnings = len(data.get("advisory_warnings", []))
+                    if n_warnings:
+                        print(f"  advisory warnings: {n_warnings}", file=sys.stderr)
 
-    return rc
+                    # Resume command — accept 'resume_command' (explicit),
+                    # else derive from 'next_steps' (prose), else synthesize
+                    # a defensible default for throughline_pick.
+                    resume = data.get("resume_command")
+                    next_steps = data.get("next_steps")
+                    if not resume and next_steps:
+                        # Show the prompt's prose; user reads + extracts.
+                        print(f"  next_steps:", file=sys.stderr)
+                        for line in str(next_steps).splitlines():
+                            print(f"    {line}", file=sys.stderr)
+                    if not resume:
+                        # Synthesize the canonical throughline-pick resume.
+                        # The continue command requires --pick TLN; the
+                        # user has to choose. We surface the canonical form
+                        # so the next step is obvious.
+                        cid_hint = (
+                            next(iter(candidates_summary)) if candidates_summary
+                            else "TL1"
+                        )
+                        resume = (
+                            f"beril-paper-writer continue {draft_dir} "
+                            f"--pick {cid_hint}  "
+                            f"# pick one of: "
+                            f"{', '.join(candidates_summary.keys()) if candidates_summary else 'TL1, TL2, TL3'}"
+                        )
+                    print(f"  resume:    {resume}", file=sys.stderr)
+                    print("", file=sys.stderr)
+                    print(draft_dir)
+                except Exception as ex:
+                    print(f"Warning: could not read handoff JSON at {handoff}: {ex}", file=sys.stderr)
+            return 0
+            
+        print(f"error: pipeline execution failed: {e}", file=sys.stderr)
+        return 2

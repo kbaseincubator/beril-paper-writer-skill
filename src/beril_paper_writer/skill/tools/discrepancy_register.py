@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """discrepancy_register.py — Plan-vs-execution diff scanner (Phase 0, v0.8).
 
+STATUS (Stage 1 Tier E, 2026-05-11): **M1-deferred path; not currently
+called by orchestrator.py.** The active pipeline produces
+`discrepancy_register.md` (and a parallel `audit_discrepancies.json`)
+via `claude -p` with prompts/audit_discrepancies.v1.md (LLM-only).
+This module's regex pre-pass + LLM classifier + validator
+(A1.abcd shipped) is preserved as a fallback CLI path and as test
+coverage. Decision per STAGED_IMPROVEMENT_PLAN.md Stage 1 Tier E:
+keep, don't delete, don't invest further until a consumer surfaces.
+
 Per SPEC_v0_8 §4.5 + DECISIONS.md D-034 Q1:
 
   Surfaces every place where RESEARCH_PLAN.md prescribed an analysis the

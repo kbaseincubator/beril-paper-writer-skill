@@ -75,6 +75,7 @@ classifiers = [
 # on top in tools/assemble_docx.py.
 
 dependencies = [
+    "python-dotenv>=1.0.0",
     # Pure-Python .docx writer. Pulls in `lxml` transitively (precompiled
     # wheels are widely available; pipx handles the install).
     "python-docx>=1.1.0",

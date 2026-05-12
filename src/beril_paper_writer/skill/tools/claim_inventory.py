@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """claim_inventory.py — Index of every numeric assertion in REPORT.md (Phase 0, v0.8).
 
+STATUS (Stage 1 Tier E, 2026-05-11): **M1-deferred path; not currently
+called by orchestrator.py.** The active pipeline produces
+`claim_inventory.tsv` via `claude -p` with prompts/extract_claims.v1.md
+(LLM-only extraction). This module's regex catalog + LLM demarcation
++ retry/batching machinery (B1.b–B1.h) is preserved as: (1) an
+importable validator library — `tools/validate_claim_inventory.py`
+(Stage 1 Tier C) borrows the same source_notebook resolution
+discipline; (2) a fallback CLI path for projects where the LLM
+extraction underperforms; (3) test coverage as a regression net
+for the schema fields. Decision per STAGED_IMPROVEMENT_PLAN.md
+Stage 1 Tier E: keep, don't delete, don't invest further until
+a consumer surfaces.
+
 Per SPEC_v0_8 §4.6 + DECISIONS.md D-034 Q2:
 
   v0.7.x's M7 validator (numerical claims have n + effect size + 95% CI)

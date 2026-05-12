@@ -332,29 +332,18 @@ Apply the user's revision per your system prompt's discipline pass. Write THROUG
 # ----------------------------------------------------------------------------
 
 
-def _resume_via_paper_writer(
-    draft_dir: Path,
-    model: str | None,
-    no_stream: bool,
-    no_adversarial: bool,
-    max_cost_usd: float | None = None,
-    recaption: bool = False,
-) -> int:
-    """Dispatch to paper_writer.sh resume <draft_dir> with forwarded flags."""
-    sh_path = _locate_skill_resource("tools", "paper_writer.sh")
-    argv = ["bash", str(sh_path), "resume", str(draft_dir)]
-    if model:
-        argv += ["--model", model]
-    if no_stream:
-        argv += ["--no-stream"]
-    if no_adversarial:
-        argv += ["--no-adversarial"]
-    if max_cost_usd is not None:
-        argv += ["--max-cost-usd", str(max_cost_usd)]
-    if recaption:
-        argv += ["--recaption"]
-    print(f"▸ Running: {' '.join(argv)}", file=sys.stderr)
-    return subprocess.run(argv).returncode
+
+def _resume_via_orchestrator(draft_dir: Path, max_cost_usd: float | None = None) -> int:
+    import asyncio
+    from beril_paper_writer.orchestrator import PaperWriterOrchestrator
+    
+    orch = PaperWriterOrchestrator(draft_dir, max_cost_usd=max_cost_usd)
+    try:
+        asyncio.run(orch.run_pipeline())
+        return 0
+    except Exception as e:
+        print(f"error: pipeline execution failed: {e}", file=sys.stderr)
+        return 2
 
 
 def run(args: argparse.Namespace) -> int:
@@ -435,19 +424,11 @@ def run(args: argparse.Namespace) -> int:
         print(f"✓ state.json updated: phase=drafting, throughline={args.pick}", file=sys.stderr)
 
         # Now dispatch to paper_writer.sh resume to run the drafting phases.
-        return _resume_via_paper_writer(
-            draft_dir, args.model, args.no_stream, args.no_adversarial,
-            max_cost_usd=getattr(args, "max_cost_usd", None),
-            recaption=getattr(args, "recaption", False),
-        )
+        return _resume_via_orchestrator(draft_dir, max_cost_usd=getattr(args, "max_cost_usd", None))
 
-    elif st.phase in ("init", "drafting", "review"):
+    elif st.phase in ("init", "citation_pool", "drafting", "supplementary_pool", "review", "optimize", "rewrite", "compliance_gate", "compliance"):
         # paper_writer.sh handles each of these idempotently.
-        return _resume_via_paper_writer(
-            draft_dir, args.model, args.no_stream, args.no_adversarial,
-            max_cost_usd=getattr(args, "max_cost_usd", None),
-            recaption=getattr(args, "recaption", False),
-        )
+        return _resume_via_orchestrator(draft_dir, max_cost_usd=getattr(args, "max_cost_usd", None))
 
     elif st.phase == "assembled":
         print("✓ Already complete (phase=assembled).", file=sys.stderr)

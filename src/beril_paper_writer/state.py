@@ -40,12 +40,25 @@ STATE_SCHEMA_VERSION = "0.1"
 VALID_PHASES = frozenset(
     {
         "init",
+        "extract",
         "triage",
+        "plan",
         "throughline_pick",
-        "drafting",
         "citation_pool",
+        "drafting",
+        "supplementary_pool",
         "review",
-        "rewrite",
+        "optimize",
+        "compliance_gate",
+        # Stage 1 Tier B: added "assemble" — explicit Phase 8 docx render
+        # between compliance_gate (markdown OK) and assembled (docx done).
+        # Previously the pipeline never produced a .docx because no
+        # phase_assemble existed in run_pipeline.
+        "assemble",
+        # Removed "rewrite" — it was dead code; nothing called
+        # phase_rewrite (which never existed). If a rewrite is needed,
+        # it routes through Phase 2 (targeted holistic re-pass) or
+        # Phase 4 (selective optimizer).
         "assembled",
     }
 )
