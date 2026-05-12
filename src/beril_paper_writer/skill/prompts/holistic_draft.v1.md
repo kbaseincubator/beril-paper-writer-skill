@@ -40,7 +40,51 @@ A single markdown file written via the `Write` tool to `ASSEMBLED_PATH`. It must
 1. **Methods Grounding:** Every Statistical Analysis claim MUST cite a library call from `METHODS_PROVENANCE_PATH`.
 2. **Results Grounding:** Every numerical claim MUST be verifiable from `REPORT_PATH`.
 3. **No Hallucinations:** Do not fabricate sample sizes, p-values, tool versions, or dataset names. If it is not in the provenance or report, use `[UNCLEAR: ...]`. However, "No Hallucinations" does NOT mean "No Prose." You must still write beautifully.
-4. **Citations:** Only use citations found in the `CITATION_POOL_PATH`. Do not invent DOIs.
+4. **Citations (Stage 2 Tier E+J, 2026-05-11):** Inline citations MUST come from `CITATION_POOL_PATH`. The pool is built by Phase 0 and verified-by-resolution; every entry has a real DOI/PMID/PMCID. **You may NOT invent citations from training knowledge** — the previous version of this prompt was caught emitting 27 inline citations on a project where the citation pool was empty, all drawn from training data with no verification. That's a P0 scientific-integrity failure.
+
+   **Pool schema (READ THIS FIRST):**
+   The pool file at `CITATION_POOL_PATH` is JSON of the form:
+   ```json
+   {
+     "citations": [
+       {
+         "key": "Lloyd-Price2019",
+         "authors": "Lloyd-Price J, et al.",
+         "year": 2019,
+         "title": "Multi-omics of the gut microbial ecosystem in inflammatory bowel diseases",
+         "journal": "Nature",
+         "volume": "569",
+         "pages": "655-662",
+         "doi": "10.1038/s41586-019-1237-9",
+         "pmid": "31142855",
+         "topic": "HMP2 multi-omics IBD metagenomics metabolomics"
+       },
+       ...
+     ]
+   }
+   ```
+   Each pool entry has a `key` field — that's the inline-citation token to use in prose. The `topic` field tells you what each entry is good for citing.
+
+   **Discipline:**
+   1. Use the `Read` tool to read `CITATION_POOL_PATH` FIRST, before drafting any Introduction or Discussion paragraph.
+   2. Build a mental map: which pool entries can support which sub-claims of the throughline? Scan the `topic` field of each entry.
+   3. When citing in prose, use the `key` field. Example: `the HMP2 multi-omics cohort [Lloyd-Price2019]`. Do NOT format as `(Lloyd-Price et al., 2019)` — that's the human-readable form, but the manuscript should use the `[key]` form so downstream consumers can mechanically cross-walk the prose against the pool.
+   4. **If no pool entry fits a claim you want to cite, emit `[NEEDS CITATION: <5-10 word topic>]`.** Do NOT fall back to `(Author, Year)` syntax from training knowledge. The supplementary citation phase (M5) resolves markers via verified WebSearch after drafting.
+   5. If `CITATION_POOL_PATH` is missing, empty, or has `citations: []`, emit `[NEEDS CITATION: <topic>]` markers throughout. This is the COMMON case during Stage 2 of v0.8 development.
+
+   **Worked correct example:**
+   - Pool contains `{"key": "Darfeuille-Michaud2004", "topic": "AIEC pathobiont CD ileal mucosa", ...}`.
+   - Sentence: "...adherent-invasive Escherichia coli associated with ileal mucosa [Darfeuille-Michaud2004]..."
+
+   **Worked anti-pattern (do NOT do this):**
+   - Sentence: "...adherent-invasive Escherichia coli (Darfeuille-Michaud et al., 2004)..."
+   - Why wrong: uses `(Author, Year)` paraphrase form instead of `[key]`; downstream cross-walk can't mechanically verify against the pool's `key` field.
+
+   **Worked NEEDS-CITATION example:**
+   - Pool has no entry tagged with topic "EcoActive clinical trial".
+   - Sentence: "...the EcoActive phage cocktail [NEEDS CITATION: EcoActive AIEC clinical-trial cocktail]..."
+
+   Bibliographic emission: at the end of the manuscript, in the `## References` section, list each `key` you cited along with the pool entry's full bibliographic record. Do NOT include pool entries you didn't cite. The downstream consumer joins prose `[key]` to References-section entries.
 
 ## Output protocol
 1. **Read inputs** deeply using `Read` tool.

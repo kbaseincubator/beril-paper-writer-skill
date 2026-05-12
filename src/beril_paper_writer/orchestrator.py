@@ -67,8 +67,14 @@ class PaperWriterOrchestrator:
         (returncode, stdout, stderr, cost_usd) so callers can do
         their own post-checks.
 
-        Mirrors the pattern established in
-        ``claim_inventory._invoke_demarcator_llm_subprocess``.
+        Stage 2 Tier G (2026-05-11): user_prompt is passed via STDIN,
+        not as a positional argv argument. The previous version passed
+        it positionally and worked for invocations without
+        --allowedTools, but failed for invocations WITH --allowedTools
+        (the citation_pool failure on draft_5: claude -p exited
+        "Input must be provided either through stdin or as a prompt
+        argument when using --print"). Passing via stdin sidesteps
+        whatever argv-parsing quirk was eating the prompt.
         """
         import json
         cmd = [
@@ -81,17 +87,20 @@ class PaperWriterOrchestrator:
             cmd.extend(["--model", model])
         if allowed_tools:
             cmd.extend(["--allowedTools", allowed_tools])
-        cmd.append(user_prompt)
+        # user_prompt goes via stdin (see Tier G docstring above).
 
         env = self._isolate_env()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(self.draft_dir),
             env=env,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_b, stderr_b = await proc.communicate()
+        stdout_b, stderr_b = await proc.communicate(
+            input=user_prompt.encode("utf-8")
+        )
         stdout = stdout_b.decode("utf-8", errors="ignore")
         stderr = stderr_b.decode("utf-8", errors="ignore")
 
@@ -198,12 +207,22 @@ class PaperWriterOrchestrator:
                 await self.phase_citation_pool()
             if self.state.phase == "drafting":
                 await self.phase_drafting_concurrent()
-            if self.state.phase == "supplementary_pool":
-                await self.phase_supplementary_pool()
+            # Stage 2 Tier D (2026-05-11): reordered.
+            # OLD: drafting → supplementary_pool → review → optimize → compliance_gate
+            # NEW: drafting → review → optimize → supplementary_pool → compliance_gate
+            # Rationale: the Tier A subtraction-only optimizer inserts
+            # [NEEDS CITATION] markers when the adversarial reviewer
+            # flags citation_reality. Those markers need supplementary_pool
+            # to resolve them via WebSearch. In the old order
+            # supplementary_pool ran BEFORE the optimizer ever produced
+            # markers, so it always reported "No [NEEDS CITATION] markers
+            # found. Skipping." (observed in draft_4).
             if self.state.phase == "review":
                 await self.phase_review()
             if self.state.phase == "optimize":
                 await self.phase_optimize()
+            if self.state.phase == "supplementary_pool":
+                await self.phase_supplementary_pool()
             # Stage 1 Tier B: previously this branch raised PipelineHalted
             # unconditionally, so phase_compliance_gate (which does the
             # actual ICMJE checks) never ran. Now we run the gate, then
@@ -432,36 +451,257 @@ Also make sure to create the .handoff.json file!
             logger.warning(f"Prompt {prompt_path} not found, skipping citation pool.")
             self.advance_phase("drafting")
             return
-            
+
+        citation_pool_path = self.draft_dir / "citation_pool.json"
+
+        # Stage 2 Tier C: idempotency. If the pool already exists (from
+        # a prior run), don't burn LLM cost rebuilding it. The pool is
+        # expensive ($1-3 per SPEC §4.2) and stable across runs once
+        # built — the inputs (RESEARCH_PLAN + REPORT) rarely change.
+        if citation_pool_path.is_file() and citation_pool_path.stat().st_size > 0:
+            logger.info(
+                f"citation_pool.json already exists at {citation_pool_path} "
+                f"({citation_pool_path.stat().st_size} bytes); skipping rebuild."
+            )
+            self.advance_phase("drafting")
+            return
+
         user_prompt = f"""
-Please generate the citation pool.
+Please build the verified citation pool per the system prompt.
 - PROJECT_ROOT: {self.project_dir}
 - DRAFT_DIR: {self.draft_dir}
-- CITATION_POOL_PATH: {self.draft_dir / 'citation_pool.json'}
+- CITATION_POOL_PATH: {citation_pool_path}
 - RESEARCH_PLAN_PATH: {self.project_dir / 'RESEARCH_PLAN.md'}
+- REPORT_PATH: {self.project_dir / 'REPORT.md'}
+
+Write the pool JSON to CITATION_POOL_PATH using the Write tool.
 """
-        cmd = [
-            "claude", "-p",
-            "--model", self.model,
-            "--system-prompt", prompt_path.read_text(encoding='utf-8'),
-            "--dangerously-skip-permissions",
-            user_prompt
-        ]
-        
-        env = self._isolate_env()
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(self.draft_dir),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        # Stage 2 Tier C: grant filesystem + web search tools. Previously
+        # this had none, so the LLM couldn't actually create the file the
+        # prompt told it to create. citation_pool.v1.md needs Read (for
+        # research_plan + report), WebSearch (for literature lookup),
+        # and Write (for the JSON output).
+        rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
+            phase_label="phase_citation_pool",
+            system_prompt_text=prompt_path.read_text(encoding='utf-8'),
+            user_prompt=user_prompt,
+            model=self.model,
+            allowed_tools="Read,Write,Edit,Bash,Grep,Glob,WebSearch,WebFetch",
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error(f"Citation pool generation failed:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode('utf-8', errors='ignore')}")
-            # Non-fatal, continue to drafting
-            
+        # Stage 2 Tier I (2026-05-11): success detection.
+        # The citation_pool LLM is a 47-turn agent and Anthropic's
+        # content-moderation filter sometimes blocks the closing
+        # message AFTER Write tool calls have succeeded (observed on
+        # draft_6: $1.26 spent; 24 citations on disk; subprocess
+        # exited non-zero with "Output blocked by content filtering
+        # policy"). The actual deliverable — citation_pool.json with
+        # populated citations[] — is what matters. Parse the file
+        # and decide success/failure on its content, not on the
+        # subprocess exit code.
+        pool_status = self._evaluate_citation_pool(
+            citation_pool_path, rc, stdout, stderr,
+        )
+        if pool_status == "ok":
+            logger.info(
+                f"citation_pool.json written ({citation_pool_path.stat().st_size} bytes; "
+                f"pool successfully built)."
+            )
+        elif pool_status == "filter_blocked_but_recovered":
+            logger.warning(
+                f"citation_pool subprocess exited non-zero (likely content-filter "
+                f"blocked closing message) but citation_pool.json has valid "
+                f"entries on disk. Proceeding with the partial pool."
+            )
+        elif pool_status == "empty":
+            logger.warning(
+                f"citation_pool.json exists at {citation_pool_path} but has no "
+                f"citations[] entries. Holistic draft will fall back to "
+                f"[NEEDS CITATION] markers."
+            )
+        else:  # missing
+            logger.warning(
+                f"citation_pool.json was NOT created at {citation_pool_path}. "
+                f"rc={rc}. STDERR head: {stderr[:300]!r}. "
+                f"Holistic draft will fall back to [NEEDS CITATION] markers."
+            )
+
+        # Stage 2 Tier M (2026-05-11): normalize the pool's `key` field.
+        # The citation_pool prompt's schema marks `bib_key` as optional;
+        # in practice the LLM often omits it (observed on draft_7: 46
+        # entries, 0 with a `key` field). The downstream consumers
+        # (holistic_draft, supplementary_pool) cite by [key] form,
+        # which means the chain breaks without a key. Normalize here:
+        # for every entry that lacks `key`, derive
+        # `<FirstAuthorLastName><Year>` and write back. Deterministic
+        # post-processing; LLM-schema-fragility-proof.
+        if pool_status in ("ok", "filter_blocked_but_recovered"):
+            self._normalize_citation_pool_keys(citation_pool_path)
+
         self.advance_phase("drafting")
+
+    def _normalize_citation_pool_keys(self, pool_path: Path) -> None:
+        """Stage 2 Tier M (2026-05-11). Ensure every pool entry has a
+        `key` field. Derive from authors+year when missing or empty.
+
+        Key form: ``<FirstAuthorLastName><Year>``. Examples:
+          ``"authors": "Lloyd-Price J, et al.", "year": 2019``
+            → key = "Lloyd-Price2019"
+          ``"authors": "Devlin AS, Fischbach MA", "year": 2015``
+            → key = "Devlin2015"
+          ``"authors": "Smith, J., Doe, K.", "year": 2024``
+            → key = "Smith2024"
+
+        Disambiguation: if two entries derive the same key, append
+        ``a``, ``b``, ``c`` lowercase letter (Year-suffix convention).
+
+        Side effects:
+          - Rewrites pool_path with normalized entries (citations[] in
+            their original order, all with non-empty `key`).
+          - Logs counts (entries-normalized, total-pool-size).
+          - Idempotent: re-running on a normalized pool is a no-op
+            (every entry already has `key`).
+        """
+        import json
+        import re
+        if not pool_path.is_file():
+            return
+        try:
+            data = json.loads(pool_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                f"_normalize_citation_pool_keys: cannot parse {pool_path}: {e}. "
+                "Skipping normalization."
+            )
+            return
+        if not isinstance(data, dict):
+            return
+        # Accept both schema-key spellings (`citations` from the
+        # citation_pool.v1 prompt; `entries` from earlier SPEC drafts).
+        array_key = (
+            "citations" if isinstance(data.get("citations"), list)
+            else "entries" if isinstance(data.get("entries"), list)
+            else None
+        )
+        if array_key is None:
+            return
+        cites = data[array_key]
+        normalized = 0
+        used_keys: set[str] = set()
+
+        def _derive_key(authors_str: str, year_val) -> str:
+            """First-author last name + year. Handles common author-string
+            shapes observed in real pools:
+
+              "Dahlhamer JM, et al."     → "Dahlhamer"
+              "Lloyd-Price J, et al."    → "Lloyd-Price"  (hyphenated last name)
+              "Vich-Vila A, et al."      → "Vich-Vila"
+              "Devlin AS, Fischbach MA"  → "Devlin"
+              "Smith, J., Doe, K."       → "Smith"
+              "Someone S"                → "Someone"
+              "Single"                   → "Single"
+            """
+            first = authors_str.strip()
+            # Step 1: cut off everything after first author boundary.
+            # Boundaries (whichever comes first):
+            #   "<space>et al" — e.g., "Lloyd-Price J, et al."
+            #   ", <Capital>"  — e.g., "Devlin AS, Fischbach MA" or "Smith, John"
+            #   ";"            — author-list separator
+            first = re.split(
+                r"\s+et\s+al|,\s*[A-Z]|;", first, maxsplit=1,
+            )[0].strip()
+            # At this point `first` is either "LastName" or
+            # "LastName F" or "LastName FM" (last name + initials,
+            # space-separated). Take the chunk before the first space:
+            # that's the last name (preserving hyphens).
+            if " " in first:
+                first = first.split()[0]
+            # Defensive cleanup: keep letters + hyphens; drop anything else.
+            first = re.sub(r"[^A-Za-z\-]", "", first) or "Unknown"
+            year_str = str(year_val) if year_val else "Unknown"
+            return f"{first}{year_str}"
+
+        def _disambiguate(base: str, used: set[str]) -> str:
+            """Append a/b/c... until the key is unique."""
+            if base not in used:
+                return base
+            suffix = "a"
+            while f"{base}{suffix}" in used:
+                suffix = chr(ord(suffix) + 1)
+            return f"{base}{suffix}"
+
+        for entry in cites:
+            if not isinstance(entry, dict):
+                continue
+            existing = (entry.get("key") or entry.get("bib_key") or "").strip()
+            if existing:
+                # Already has a key: keep it; collision unlikely with
+                # explicit keys but disambiguate defensively.
+                final_key = _disambiguate(existing, used_keys)
+                entry["key"] = final_key
+                used_keys.add(final_key)
+                continue
+            # Derive from authors+year.
+            base = _derive_key(
+                str(entry.get("authors", "")), entry.get("year"),
+            )
+            key = _disambiguate(base, used_keys)
+            entry["key"] = key
+            used_keys.add(key)
+            normalized += 1
+
+        pool_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if normalized > 0:
+            logger.info(
+                f"citation_pool key normalization: {normalized}/{len(cites)} "
+                f"entries given derived keys; pool now has {len(used_keys)} unique keys."
+            )
+        else:
+            logger.info(
+                f"citation_pool key normalization: all {len(cites)} entries "
+                f"already had keys; no changes."
+            )
+
+    def _evaluate_citation_pool(
+        self, pool_path: Path, rc: int, stdout: str, stderr: str,
+    ) -> str:
+        """Stage 2 Tier I helper. Decide pool status from disk artifact,
+        not subprocess exit code.
+
+        Returns one of:
+          "ok"                          — file exists, valid JSON, citations[] non-empty
+          "filter_blocked_but_recovered"— same as ok but subprocess rc != 0
+          "empty"                       — file exists, valid JSON, citations[] empty
+          "missing"                     — file missing or unreadable
+
+        We accept either `citations` or `entries` as the array key (the
+        prompt's schema vs. the SPEC schema; both shapes have been
+        observed in the wild).
+        """
+        import json
+        if not pool_path.is_file():
+            return "missing"
+        try:
+            text = pool_path.read_text(encoding="utf-8")
+            if not text.strip():
+                return "missing"
+            data = json.loads(text)
+        except (json.JSONDecodeError, OSError):
+            return "missing"
+        if not isinstance(data, dict):
+            return "empty"
+        # Accept both schema key names.
+        cites = data.get("citations")
+        if cites is None:
+            cites = data.get("entries")
+        if not isinstance(cites, list) or len(cites) == 0:
+            return "empty"
+        # Has entries: success.
+        if rc == 0:
+            return "ok"
+        return "filter_blocked_but_recovered"
 
     async def phase_drafting_concurrent(self):
         # Renamed internally to holistic, but keeping the state name "drafting"
@@ -510,7 +750,10 @@ Please draft the entire manuscript.
         # Post-draft audits (interactive check)
         await self._audit_discrepancies_interactive()
 
-        self.advance_phase("supplementary_pool")
+        # Stage 2 Tier D: drafting → review (was: → supplementary_pool).
+        # supplementary_pool now runs after optimize so it can resolve
+        # the [NEEDS CITATION] markers the optimizer may insert.
+        self.advance_phase("review")
 
 
     async def _audit_discrepancies_interactive(self):
@@ -557,33 +800,57 @@ Use the Write tool to write your JSON directly to AUDIT_OUTPUT_PATH.
         assembled_path = self.draft_dir / "manuscript.md"
         if assembled_path.exists():
             content = assembled_path.read_text(encoding="utf-8")
-            if "[NEEDS CITATION]" in content:
-                logger.info("[NEEDS CITATION] markers found. Invoking supplementary citations.")
+            # Stage 2 Tier H (2026-05-11): detect both marker shapes.
+            # The original check used "[NEEDS CITATION]" (literal closing
+            # bracket immediately after CITATION), but the holistic_draft
+            # Tier E discipline emits "[NEEDS CITATION: <topic>]" where
+            # the closing bracket comes AFTER the topic. The literal
+            # substring "[NEEDS CITATION]" never appears in the latter
+            # shape, so all 29 markers in draft_5 were missed. Now we
+            # match the OPEN-bracket-plus-prefix substring which covers
+            # both shapes.
+            marker_prefix = "[NEEDS CITATION"
+            marker_count = content.count(marker_prefix)
+            if marker_count > 0:
+                logger.info(
+                    f"{marker_count} [NEEDS CITATION] marker(s) found. "
+                    "Invoking supplementary citations."
+                )
                 prompt_path = Path(__file__).parent / "skill" / "prompts" / "supplementary_citations.v1.md"
                 if prompt_path.exists():
                     user_prompt = f"""
-Please resolve the [NEEDS CITATION] markers.
+Please resolve the [NEEDS CITATION: <topic>] markers in the manuscript.
 - ASSEMBLED_PATH: {assembled_path}
 - CITATION_POOL_PATH: {self.draft_dir / 'citation_pool.json'}
+
+There are {marker_count} markers to resolve. Each marker has the form
+[NEEDS CITATION: <topic>] where <topic> is a 5-10 word description of
+what the citation should support. Use WebSearch to find verified
+literature, add entries to CITATION_POOL_PATH, and replace each marker
+with the citation key in the manuscript.
 """
-                    cmd = [
-                        "claude", "-p",
-                        "--system-prompt", prompt_path.read_text(encoding='utf-8'),
-                        "--dangerously-skip-permissions",
-                        user_prompt
-                    ]
-                    env = self._isolate_env()
-                    proc = await asyncio.create_subprocess_exec(
-                        *cmd, cwd=str(self.draft_dir), env=env,
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    # Stage 2 Tier H: use the cost-tracking helper +
+                    # grant tools (previously this call had no
+                    # --allowedTools, mirroring the citation_pool bug).
+                    rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
+                        phase_label="phase_supplementary_pool",
+                        system_prompt_text=prompt_path.read_text(encoding='utf-8'),
+                        user_prompt=user_prompt,
+                        model=self.model,
+                        allowed_tools="Read,Write,Edit,Bash,Grep,Glob,WebSearch,WebFetch",
                     )
-                    stdout, stderr = await proc.communicate()
-                    if proc.returncode != 0:
-                        logger.error(f"Supplementary citation failed:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode('utf-8', errors='ignore')}")
+                    if rc != 0:
+                        logger.error(
+                            f"Supplementary citation failed:\n"
+                            f"STDOUT: {stdout}\nSTDERR: {stderr}"
+                        )
             else:
                 logger.info("No [NEEDS CITATION] markers found. Skipping.")
-                
-        self.advance_phase("review")
+
+        # Stage 2 Tier D: supplementary_pool → compliance_gate
+        # (was: → review). In the new order, supplementary_pool runs
+        # AFTER review/optimize, so the next step is compliance.
+        self.advance_phase("compliance_gate")
 
     async def phase_review(self):
         logger.info("Running tiered review cascade (M3)...")
@@ -643,7 +910,10 @@ Please resolve the [NEEDS CITATION] markers.
                 "skipping Phase 4 optimizer (subtraction-only mode requires "
                 "the structured findings file)."
             )
-            self.advance_phase("compliance_gate")
+            # Stage 2 Tier D: even when optimizer is skipped, run
+            # supplementary_pool — the holistic_draft may have emitted
+            # [NEEDS CITATION] markers directly (Tier E discipline).
+            self.advance_phase("supplementary_pool")
             return
 
         if prompt_path.exists():
@@ -688,7 +958,10 @@ system prompt's "Inviolable forbidden actions" section.
             # log it so a human can audit.
             self._post_check_optimizer_subtraction(pre_text)
 
-        self.advance_phase("compliance_gate")
+        # Stage 2 Tier D: optimize → supplementary_pool (was: → compliance_gate).
+        # The optimizer's citation_reality dispatch inserts
+        # [NEEDS CITATION] markers; supplementary_pool resolves them.
+        self.advance_phase("supplementary_pool")
 
     def _post_check_optimizer_subtraction(self, pre_text: str) -> None:
         """Stage 1 Tier A self-defense.

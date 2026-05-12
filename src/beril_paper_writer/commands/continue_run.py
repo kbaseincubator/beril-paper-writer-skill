@@ -415,13 +415,22 @@ def run(args: argparse.Namespace) -> int:
             .isoformat()
             .replace("+00:00", "Z")
         )
-        st.phase = "drafting"
+        # Stage 2 Tier B (2026-05-11): advance to citation_pool, not
+        # drafting. Previously this skipped phase_citation_pool entirely,
+        # which is why draft_4's citation_pool.json was never produced
+        # and the holistic_draft prompt had no verified pool to draw
+        # from — it fabricated 27 inline citations from training
+        # knowledge. The run_pipeline state machine flows
+        # throughline_pick → citation_pool → drafting; setting "drafting"
+        # here bypassed the citation phase. Setting "citation_pool" now
+        # makes the natural flow happen.
+        st.phase = "citation_pool"
         st.throughline.candidate_id = args.pick
         st.throughline.chosen_at = now_iso
         if revision:
             st.throughline.revision += 1
         state.save_state(draft_dir, st)
-        print(f"✓ state.json updated: phase=drafting, throughline={args.pick}", file=sys.stderr)
+        print(f"✓ state.json updated: phase=citation_pool, throughline={args.pick}", file=sys.stderr)
 
         # Now dispatch to paper_writer.sh resume to run the drafting phases.
         return _resume_via_orchestrator(draft_dir, max_cost_usd=getattr(args, "max_cost_usd", None))
