@@ -34,7 +34,34 @@ A single markdown file written via the `Write` tool to `ASSEMBLED_PATH`. It must
 3. **No "Agentic" Formatting:** Do NOT use markdown bolding (except for required section headers and figure/table labels). Do NOT use horizontal separation lines (`---`) anywhere in the document. Do not use conversational language. 
 4. **Deep Literature Contextualization:** Do not just list results in isolation. You must deeply contextualize the results within the broader literature. Use the `CITATION_POOL_PATH` to weave a rich discussion of how these findings confirm, contradict, or extend existing paradigms in the field.
 5. **Context and Flow:** Build deep contextual transitions between paragraphs and sections. The paper must tell a cohesive story driven by the `THROUGHLINE_PATH`.
-6. **Embed Figures and Tables:** You MUST integrate visual evidence directly into the text. Read the `FIGURES_INVENTORY_PATH` and `TABLES_INVENTORY_PATH` to see what is available. When discussing a result, insert the corresponding figure inline using standard markdown image syntax (e.g., `> **Figure 1.** Caption text...`) or insert the markdown table directly. Do not just say "(Figure 1)"; show it.
+6. **Embed Figures and Tables:** You MUST integrate visual evidence directly into the text. Read the `FIGURES_INVENTORY_PATH` and `TABLES_INVENTORY_PATH` to see what is available. When discussing a result, insert the corresponding figure inline using the exact pattern below (Stage 3 Tier B, 2026-05-12).
+
+   **Figure-block form (REQUIRED — the renderer enforces this contract):**
+
+   Emit a figure as TWO consecutive blocks, each on its own line, with NO blockquote prefix and NO indentation:
+
+   ```
+   ![alt-text describing the figure](figures/<filename>.png)
+
+   **Figure N.** Caption sentence describing what the panel shows, including the statistic or comparison the figure makes. End with a period.
+   ```
+
+   The image block MUST be a line whose entire content is a bare `![alt](path)` — no `> ` blockquote prefix, no surrounding paragraph text, no list marker, nothing else. The renderer (`assemble_docx.py`) parses block-level images by literal line match; any wrapping (blockquote, list, paragraph) silently demotes the line to prose and the figure is NOT embedded in the docx.
+
+   The path MUST be of the form `figures/<filename>.png` exactly as it appears in `FIGURES_INVENTORY_PATH`. The orchestrator stages the canonical figures directory next to your manuscript before assembly, so this relative path resolves. Absolute paths (`/Users/...`) and parent-relative paths (`../../figures/...`) are REJECTED by the renderer.
+
+   The caption paragraph (`**Figure N.** ...`) must immediately follow the image block on the next line — the renderer detects this pattern to apply Caption style. Use ICMJE-style numbering (`Figure 1`, `Figure 2`, ...) in order of first reference in the body. Do not just say "(Figure 1)" — show the image block at the point of first discussion.
+
+   **Anti-pattern (do NOT do this; silently drops the figure):**
+
+   ```
+   > ![alt](figures/X.png)
+   > **Figure 1.** Caption.
+   ```
+
+   The leading `> ` makes the parser see a blockquote with image-syntax text inside; the figure never reaches the docx renderer's image path. This was the v0.7.0–v0.7.1 latent bug that surfaced on draft_9.
+
+   Tables: insert markdown tables directly (pipe-separated rows, header underline). The renderer converts them to docx tables with grid borders.
 
 ## Grounding Discipline
 1. **Methods Grounding:** Every Statistical Analysis claim MUST cite a library call from `METHODS_PROVENANCE_PATH`.
@@ -46,31 +73,43 @@ A single markdown file written via the `Write` tool to `ASSEMBLED_PATH`. It must
    The pool file at `CITATION_POOL_PATH` is JSON of the form:
    ```json
    {
-     "citations": [
+     "entries": [
        {
          "key": "Lloyd-Price2019",
          "authors": "Lloyd-Price J, et al.",
          "year": 2019,
          "title": "Multi-omics of the gut microbial ecosystem in inflammatory bowel diseases",
-         "journal": "Nature",
-         "volume": "569",
-         "pages": "655-662",
+         "venue": "Nature",
          "doi": "10.1038/s41586-019-1237-9",
          "pmid": "31142855",
-         "topic": "HMP2 multi-omics IBD metagenomics metabolomics"
+         "pmcid": "PMC6650278",
+         "studied": "multi-omics cohort of 132 IBD/non-IBD participants",
+         "finding": "Microbiome variation in dysbiotic windows tracks disease activity",
+         "scope_alignment": "direct",
+         "assessment": "supports",
+         "is_review_article": false,
+         "is_preprint": false,
+         "notes": "HMP2 multi-omics IBD metagenomics metabolomics"
        },
        ...
-     ]
+     ],
+     "citation_map": { ... },
+     "first_cited_at": { ... },
+     "summary": { ... }
    }
    ```
-   Each pool entry has a `key` field — that's the inline-citation token to use in prose. The `topic` field tells you what each entry is good for citing.
+   The canonical array key is `entries` (set by `citation_pool.v1`).
+   Each pool entry has a `key` field — that is the inline-citation token
+   you use in prose. The `notes` field is the 5–10 word topic tag — use
+   it to find which entries can support which sub-claims of the
+   throughline.
 
    **Discipline:**
    1. Use the `Read` tool to read `CITATION_POOL_PATH` FIRST, before drafting any Introduction or Discussion paragraph.
-   2. Build a mental map: which pool entries can support which sub-claims of the throughline? Scan the `topic` field of each entry.
+   2. Build a mental map: which pool entries can support which sub-claims of the throughline? Scan the `notes` field of each entry (and `studied` / `finding` when present).
    3. When citing in prose, use the `key` field. Example: `the HMP2 multi-omics cohort [Lloyd-Price2019]`. Do NOT format as `(Lloyd-Price et al., 2019)` — that's the human-readable form, but the manuscript should use the `[key]` form so downstream consumers can mechanically cross-walk the prose against the pool.
    4. **If no pool entry fits a claim you want to cite, emit `[NEEDS CITATION: <5-10 word topic>]`.** Do NOT fall back to `(Author, Year)` syntax from training knowledge. The supplementary citation phase (M5) resolves markers via verified WebSearch after drafting.
-   5. If `CITATION_POOL_PATH` is missing, empty, or has `citations: []`, emit `[NEEDS CITATION: <topic>]` markers throughout. This is the COMMON case during Stage 2 of v0.8 development.
+   5. If `CITATION_POOL_PATH` is missing, empty, or has `entries: []`, emit `[NEEDS CITATION: <topic>]` markers throughout. This is the COMMON case during Stage 2 of v0.8 development.
 
    **Worked correct example:**
    - Pool contains `{"key": "Darfeuille-Michaud2004", "topic": "AIEC pathobiont CD ileal mucosa", ...}`.

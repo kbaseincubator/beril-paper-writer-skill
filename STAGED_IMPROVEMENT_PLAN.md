@@ -363,9 +363,95 @@ Deliverables:
 - Tier 3 adversarial `citation_reality` findings on the next run
   should drop ≥80%.
 
-### Stage 3 — Real Tier 1 deterministic review (≤2 days)
+### Stage 3 — draft_9 BERIL in-situ regression cluster (CLOSED 2026-05-12)
 
-**Trigger:** Stages 1 + 2 ship. Most P0 fabrications are gone.
+**Trigger.** draft_9 was the first run via the BERIL
+`/beril-paper-writer` slash command (production path) rather than the
+developer CLI. It surfaced a cluster of regressions — some genuinely
+new, some latent since v0.7.0 and only now made visible. This stage
+**preempted the originally-planned Stage 3** (Tier 1 deterministic
+review, now renumbered Stage 4 below): the regression cluster had to
+clear before deterministic cross-walks could be built on a
+trustworthy pipeline.
+
+**Closure result.** Nine tiers shipped; 953 unit tests pass (40 new
+this stage: 13 in `test_orchestrator_stage3.py`, 27 in
+`test_validate_claim_inventory.py`); end-to-end figure-embed verified
+on a re-render of draft_9.
+
+| Tier | Fix | Verification |
+|---|---|---|
+| A | Figure staging in `phase_assemble` — symlink `<project>/figures/` → `<draft_dir>/figures/` so the renderer's relative-path contract resolves (copy fallback when symlink fails) | draft_9 re-render: 19/19 figures embedded, 0 `FIGURE MISSING` |
+| B | `holistic_draft.v1.md` — pinned the bare `![alt](figures/X.png)` image-block form; anti-pattern callout for the blockquote form that silently dropped every figure since v0.7.0 | prompt review |
+| C | `supplementary_citations.v1.md` + `holistic_draft.v1.md` — reversed a schema-directionality bug (pool array key is `entries`, not `citations`) | verified vs `citation_pool.v1.md` + on-disk draft_8/9 pools |
+| D | `state.tier` population — `phase_plan` calls the canonical extract-tier regex against `throughline_candidates.md`; was `None` every run, defaulting the adversarial reviewer to EXPLORATORY | extract-tier returns STRONG for draft_8/9 |
+| E | end-to-end figure-embed re-render verification | draft_9 → `manuscript_staged.docx`, 19 PNGs in `word/media/` |
+| F | slash-command markdown audit — `beril-paper-writer.md` brought into v0.7.x alignment (phase sequence, handoff-schema tolerance, removed dead "v0.2 rewrite loop" framing) | full-file review |
+| G | **source_notebook regression trigger** — `phase_triage`'s claim-extraction + discrepancy-audit `claude -p` calls had no `--model` flag and bypassed `_run_claude_p_with_cost`; an unpinned model resolves differently CLI vs nested-Claude-Code. Routed both through the cost helper with `model=self.model` | both calls now pinned + cost-tracked |
+| H | `extract_claims.v1.md` — explicit `source_notebook` exact-filename rule + worked counter-example (the amplifier fix) | prompt review |
+| I | `validate_claim_inventory.py` — conservative repair pass (notebook-ID match + missing-extension); rewrites `source_notebook` to the full real filename on unambiguous match | reconstructed draft_9: 183/191 repaired, 8 correctly stay cleared |
+
+**Root cause of the headline regression (source_notebook).** The
+presentation-maker team flagged draft_9's claim_inventory validator
+clear-rate at 76% (191/250) vs the ~10% steady-state band of
+draft_4–8. The trigger was Tier G: an unpinned `claude -p` model call.
+`extract_claims.v1.md` was untouched between draft_8 and draft_9 (mtime
+2026-05-10); `methods_provenance.md` was byte-identical across both
+drafts. The only variable was execution context — draft_8 from a plain
+shell, draft_9 from the nested Claude Code slash-command session — and
+an unpinned model resolves differently between the two. Tier G fixes
+the trigger; H is the prompt-side amplifier fix; I is the deterministic
+backstop. Side effect of Tier G: the two phase_triage calls now also
+report cost, closing a hole where draft_9's $7.42 undercounted.
+
+**The "figure insertion" regression was latent, not new.** Tier A's
+investigation found draft_8 also shipped zero embedded figures — its
+holistic-draft LLM happened to wrap image markdown in blockquotes
+(`> ![...]`), which the renderer silently treats as prose. draft_9's
+LLM emitted the bare form, which the renderer *does* recognize — and
+then failed to resolve the path, making the latent bug visible. The
+figure-embed loop had never actually worked in v0.7.x.
+
+**Closes from the Stage 2 carryover backlog:**
+- Item 2 (LLM fabricates ~4 notebook paths in extract_claims) — closed
+  by Tiers H+I. Note the failure *mode* widened in draft_9 (bare stems,
+  em-dash placeholders, 35 unique) before being fixed.
+
+**Carryover into Stage 4 backlog:**
+- `.handoff.json` schema is not pinned anywhere — `plan.v1.md` has the
+  LLM improvise the shape every run; three consumers (plan.v1,
+  draft.py, the slash-command) each expect a different schema. Filed.
+- `beril-paper-writer-continue.md` not yet audited for v0.7.x drift
+  (Tier F covered only the main slash-command). Filed.
+- `state.json.source_artifacts` ships `[]` despite being declared in
+  the LAYOUT schema and referenced by the AI-disclosure template;
+  populating it would give a cross-skill drift-detection surface
+  (presentation-maker team request). Filed, lower priority.
+- Stage 2 carryover items 1, 3, 4, 5, 6 remain open.
+
+**Cross-skill note.** presentation-maker v0.4 M1 vendored
+`extract_claims.v1.md` + `validate_claim_inventory.py` byte-portable
+for its no-paper originate path. Tiers H+I change both; the
+`validate_claim_inventory.py` diagnostic JSON gained two additive
+fields (`rows_repaired_this_run`, `repaired_notebooks`) and the
+validator now *rewrites* `source_notebook` on an unambiguous repair
+rather than only clearing. presentation-maker to re-vendor from our
+tree post-tag. The Tier G model-pin is paper-writer-internal — not in
+the vendored files — but the same unpinned-`claude -p` trap exists on
+their originate path; flagged to them.
+
+---
+
+> **Stage renumber note (2026-05-12).** The original plan numbered the
+> next four stages 3–6. The draft_9 regression cluster above took the
+> Stage 3 slot in execution order, so the originally-planned Stage 3
+> and beyond are renumbered +1 (now Stages 4–7). Scope and triggers
+> are unchanged; only the labels shifted.
+
+### Stage 4 — Real Tier 1 deterministic review (≤2 days)
+*(originally Stage 3)*
+
+**Trigger:** Stages 1 + 2 + 3 ship. Most P0 fabrications are gone.
 Then Tier 1's missing layer becomes the load-bearing gap.
 
 **Goal:** the cross-walks from M1_M2_CONTRACT_DRAFT.md §4.1, but
@@ -378,14 +464,15 @@ narrowed to what's needed:
 - Discrepancy acknowledgment (load-bearing discrepancies surface in
   Methods or Limitations).
 - Source_notebook resolution (claim_inventory side, already done in
-  Stage 1 Tier C).
+  Stage 1 Tier C; repair pass added in Stage 3 Tier I).
 
 Each is regex + file-check; total cost ≤$0.02 per pass.
 Fail-fast: any P0 deterministic finding halts before Tier 2 fires.
 
-### Stage 4 — Fail-fast Phase 4 dispatch (≤2 days)
+### Stage 5 — Fail-fast Phase 4 dispatch (≤2 days)
+*(originally Stage 4)*
 
-**Trigger:** Stage 3 produces structured deterministic findings.
+**Trigger:** Stage 4 produces structured deterministic findings.
 Phase 4 needs to consume them.
 
 **Goal:** SPEC §8.2 class → optimizer routing actually works.
@@ -395,9 +482,10 @@ Deliverables:
 - Per-class optimizer prompts (small, narrow scope each).
 - Bounded passes; halt on second-pass failure.
 
-### Stage 5 — Reviewability scaffolding (~1 week, deferrable)
+### Stage 6 — Reviewability scaffolding (~1 week, deferrable)
+*(originally Stage 5)*
 
-**Trigger:** Stages 1–4 ship. The pipeline runs reliably; the
+**Trigger:** Stages 1–5 ship. The pipeline runs reliably; the
 remaining quality gap is auditability.
 
 **Goal:** the chain Adam articulated. `[Cxxx]` markers in prose;
@@ -405,9 +493,10 @@ claim_inventory → methods_provenance bridge; `source_test` column;
 bidirectional consistency check. Per M1_M2_CONTRACT_DRAFT.md
 sections 2–5.
 
-### Stage 6 — Multi-project validation (~1 week)
+### Stage 7 — Multi-project validation (~1 week)
+*(originally Stage 6)*
 
-**Trigger:** Stages 1–5 ship.
+**Trigger:** Stages 1–6 ship.
 
 **Goal:** validate that the pipeline holds across the 60+ BERDL
 projects, not just `ibd_phage_targeting`. Per

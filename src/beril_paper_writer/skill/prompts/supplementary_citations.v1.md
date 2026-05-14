@@ -22,30 +22,53 @@ verification chain stays intact.
 
 ```json
 {
-  "citations": [
+  "entries": [
     {
       "key": "FirstAuthor2024",
       "authors": "FirstAuthor X, et al.",
       "year": 2024,
       "title": "Full paper title",
-      "journal": "Journal Name",
-      "volume": "12",
-      "pages": "123-145",
+      "venue": "Journal Name",
       "doi": "10.xxxx/yyyy",
       "pmid": "12345678",
-      "topic": "5-10 word topic tag for downstream lookup"
+      "pmcid": "PMC1234567",
+      "studied": "what the paper actually measured",
+      "finding": "one-sentence summary of the result",
+      "scope_alignment": "direct | adjacent | tangential",
+      "assessment": "supports | contradicts | extends | qualifies",
+      "is_review_article": false,
+      "is_preprint": false,
+      "notes": "5-10 word topic tag for downstream lookup; free text"
     },
     ...
-  ]
+  ],
+  "citation_map": { ... },
+  "first_cited_at": { ... },
+  "summary": { ... }
 }
 ```
 
-**The array key is `citations`, NOT `entries`.** Append new entries to the
-existing `citations` array, preserving every existing entry verbatim.
+**The array key is `entries`** (the canonical key written by
+`citation_pool.v1`). Append new entries to the existing `entries` array,
+preserving every existing entry verbatim. Leave `citation_map`,
+`first_cited_at`, and `summary` untouched — those are pool-builder
+bookkeeping and downstream consumers do not depend on the supplementary
+phase updating them.
 
-If the file doesn't exist, create it with `{"citations": [...]}` structure.
-If it exists but lacks a `citations` key, fix it: add `citations: []` and
+If the file doesn't exist, create it with `{"entries": [...]}` (omit the
+bookkeeping keys; they are optional).
+If it exists but lacks an `entries` key, fix it: add `entries: []` and
 proceed.
+
+**Required-vs-optional fields for new entries you append:**
+- Required: `key`, `authors`, `year`, `title`, and at least one of `doi`
+  or `pmid` (the field you actually verified resolves), plus `notes`
+  (use it for the topic tag you searched on).
+- Optional but recommended: `venue`, `pmcid`, `studied`, `finding`,
+  `scope_alignment`, `assessment`, `is_review_article`, `is_preprint`.
+- Do NOT invent values for the assessment fields if you cannot infer them
+  from the abstract — omit them, or use a free-text string honest about
+  the uncertainty (e.g., `"finding": "unverified from abstract"`).
 
 ## Output protocol — execute in this order
 
@@ -62,8 +85,9 @@ proceed.
    form; disambiguate with letter suffix if a year collision exists).
 
 4. **Update `CITATION_POOL_PATH`:** read existing JSON, append new entries
-   to `citations[]`, write the full updated JSON back. Use `Write` to
-   replace the entire file (NOT Edit — JSON is structural).
+   to `entries[]`, write the full updated JSON back. Use `Write` to
+   replace the entire file (NOT Edit — JSON is structural). Leave
+   `citation_map` / `first_cited_at` / `summary` untouched if present.
 
 5. **Update `ASSEMBLED_PATH`:** replace each `[NEEDS CITATION: <topic>]`
    marker with `[<key>]` using the `key` field of the entry you just
@@ -85,7 +109,7 @@ proceed.
    that was already in `CITATION_POOL_PATH`.
 3. **No `(Author, Year)` prose form.** Always use `[key]` form in inline
    manuscript prose. The downstream consumer cross-walks `[key]` against
-   `citations[].key`; the `(Author, Year)` form breaks this.
+   `entries[].key`; the `(Author, Year)` form breaks this.
 4. **No invented topics.** A marker's `<topic>` tells you what the
    manuscript needs — search for papers matching that topic, not what
    you remember from training. Plausibility is not evidence.
@@ -98,27 +122,27 @@ proceed.
 Input manuscript fragment:
 > "...the EcoActive cocktail [NEEDS CITATION: EcoActive AIEC clinical-trial cocktail] demonstrates..."
 
-Existing pool: `{"citations": [{"key": "Dahlhamer2016", ...}, ...]}` (24 entries).
+Existing pool: `{"entries": [{"key": "Dahlhamer2016", ...}, ...], "citation_map": {...}, "first_cited_at": {...}, "summary": {...}}` (24 entries).
 
 Procedure:
 1. WebSearch: `"EcoActive" "AIEC" Crohn's clinical trial bacteriophage`
 2. Find paper: Galtier et al. 2017, J Crohns Colitis, DOI 10.1093/ecco-jcc/jjw169.
 3. Verify DOI returns valid record. Pick key `Galtier2017`.
-4. Read existing `citation_pool.json` (24 entries). Append new entry:
+4. Read existing `citation_pool.json` (24 entries). Append new entry to
+   `entries[]`:
    ```json
    {
      "key": "Galtier2017",
      "authors": "Galtier M, et al.",
      "year": 2017,
      "title": "Bacteriophages Targeting Adherent Invasive Escherichia coli...",
-     "journal": "J Crohns Colitis",
-     "volume": "11",
-     "pages": "840-847",
+     "venue": "J Crohns Colitis",
      "doi": "10.1093/ecco-jcc/jjw169",
      "pmid": "28158534",
-     "topic": "AIEC phage clinical trial Crohn EcoActive"
+     "notes": "AIEC phage clinical trial Crohn EcoActive"
    }
    ```
+   Leave `citation_map`, `first_cited_at`, `summary` untouched.
 5. Write updated pool (25 entries) back to `CITATION_POOL_PATH`.
 6. Edit manuscript: `[NEEDS CITATION: EcoActive AIEC clinical-trial cocktail]` → `[Galtier2017]`.
 7. Add Galtier 2017 bibliographic record to the `## References` section.

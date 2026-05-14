@@ -322,21 +322,28 @@ Please execute the extract claims task.
 
 Write the resulting TSV strictly to OUTPUT_PATH using the Write tool.
 """
-            cmd = [
-                "claude", "-p",
-                
-                "--system-prompt", claims_prompt_path.read_text(encoding="utf-8"),
-                "--allowedTools", "Read,Write,Edit,Bash,Grep,Glob",
-                "--dangerously-skip-permissions",
-                user_prompt
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, env=self._isolate_env(),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            # Stage 3 Tier G (2026-05-12): route through
+            # _run_claude_p_with_cost. Previously this was a raw
+            # `claude -p` with NO --model flag and NO cost tracking —
+            # the only major LLM call in the pipeline that bypassed the
+            # Stage 1 Tier D helper. Two consequences observed on
+            # draft_9: (1) an unpinned model resolves differently in a
+            # nested Claude Code session (BERIL slash-command) than from
+            # a plain shell (CLI) — draft_9's claim-extraction model
+            # emitted bare-stem / em-dash source_notebook values,
+            # blowing the validator clear-rate from ~10% to 76%;
+            # (2) the triage LLM spend was missing from
+            # state.cost_so_far_usd entirely (draft_9's $7.42 was an
+            # undercount). Pinning model=self.model fixes both.
+            rc, stdout, stderr, _cost = await self._run_claude_p_with_cost(
+                phase_label="phase_triage.extract_claims",
+                system_prompt_text=claims_prompt_path.read_text(encoding="utf-8"),
+                user_prompt=user_prompt,
+                model=self.model,
+                allowed_tools="Read,Write,Edit,Bash,Grep,Glob",
             )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                logger.warning(f"Claim extraction failed:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}")
+            if rc != 0:
+                logger.warning(f"Claim extraction failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}")
             else:
                 logger.info(f"Wrote {claims_out}")
 
@@ -389,25 +396,90 @@ Please execute the audit discrepancies task.
 
 Write the resulting markdown strictly to OUTPUT_PATH using the Write tool.
 """
-            cmd = [
-                "claude", "-p",
-                
-                "--system-prompt", disc_prompt_path.read_text(encoding="utf-8"),
-                "--allowedTools", "Read,Write,Edit,Bash,Grep,Glob",
-                "--dangerously-skip-permissions",
-                user_prompt
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, env=self._isolate_env(),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            # Stage 3 Tier G (2026-05-12): route through
+            # _run_claude_p_with_cost — same rationale as the
+            # claim-extraction call above (pin model, capture cost).
+            rc, stdout, stderr, _cost = await self._run_claude_p_with_cost(
+                phase_label="phase_triage.audit_discrepancies",
+                system_prompt_text=disc_prompt_path.read_text(encoding="utf-8"),
+                user_prompt=user_prompt,
+                model=self.model,
+                allowed_tools="Read,Write,Edit,Bash,Grep,Glob",
             )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                logger.warning(f"Discrepancy audit failed:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}")
+            if rc != 0:
+                logger.warning(f"Discrepancy audit failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}")
             else:
                 logger.info(f"Wrote {disc_out}")
-                
+
         self.advance_phase("plan")
+
+    def _classify_tier_from_candidates(self) -> None:
+        """Stage 3 Tier D (2026-05-12): populate state.tier from the plan
+        phase's throughline_candidates.md.
+
+        Delegates to `paper_writer_helpers._extract_tier_from_text`,
+        which is the canonical regex the bash flow uses (matches
+        `**Tier:** {STRONG|THIN|EXPLORATORY}` and the plan.v1 closing-
+        message `tier: ...` form). The Python orchestrator was
+        previously missing this step, leaving state.tier=None — causing
+        downstream consumers (adversarial reviewer; section word-budget
+        prompts) to silently default to EXPLORATORY regardless of
+        actual project rigor.
+
+        Honors explicit user-set tier (e.g., via state.json edit) so
+        manual overrides survive re-runs. Defaults to EXPLORATORY
+        (conservative) when the candidates file is missing or the
+        regex finds no verdict.
+        """
+        if self.state.tier in ("STRONG", "THIN", "EXPLORATORY"):
+            logger.info(
+                f"_classify_tier_from_candidates: tier already set to "
+                f"{self.state.tier}; preserving."
+            )
+            return
+
+        candidates_path = self.draft_dir / "throughline_candidates.md"
+        if not candidates_path.is_file():
+            self.state.tier = "EXPLORATORY"
+            save_state(self.draft_dir, self.state)
+            logger.warning(
+                f"_classify_tier_from_candidates: {candidates_path} missing; "
+                "defaulting tier=EXPLORATORY."
+            )
+            return
+
+        # Import the canonical extractor — same regex as
+        # `paper_writer_helpers.py extract-tier` so Python and bash
+        # flows agree.
+        sys.path.insert(
+            0,
+            str(Path(__file__).parent / "skill" / "tools"),
+        )
+        try:
+            from paper_writer_helpers import _extract_tier_from_text  # type: ignore[import-not-found]
+        finally:
+            # Remove the path we added to keep import space tidy.
+            tools_path = str(Path(__file__).parent / "skill" / "tools")
+            if sys.path and sys.path[0] == tools_path:
+                sys.path.pop(0)
+
+        text = candidates_path.read_text(encoding="utf-8")
+        tier = _extract_tier_from_text(text)
+
+        if tier is None:
+            logger.warning(
+                "_classify_tier_from_candidates: no tier verdict in "
+                f"{candidates_path}; defaulting tier=EXPLORATORY."
+            )
+            tier = "EXPLORATORY"
+        else:
+            logger.info(
+                f"_classify_tier_from_candidates: tier={tier} extracted "
+                f"from {candidates_path.name}."
+            )
+
+        self.state.tier = tier
+        save_state(self.draft_dir, self.state)
 
     async def phase_plan(self):
         logger.info("Running plan phase... Generating throughline candidates.")
@@ -441,6 +513,13 @@ Also make sure to create the .handoff.json file!
                 f"STDERR: {stderr}"
             )
             raise RuntimeError("Plan phase failed")
+
+        # Stage 3 Tier D (2026-05-12): tier verdict from plan's
+        # throughline_candidates.md. Bash flow already runs
+        # paper_writer_helpers.py extract-tier here; the Python
+        # orchestrator was missing the equivalent call, leaving
+        # state.tier=None for the rest of the pipeline.
+        self._classify_tier_from_candidates()
 
         self.advance_phase("throughline_pick")
 
@@ -1073,6 +1152,88 @@ Fix these compliance errors.
         # straight to "assembled" without ever rendering the docx.
         self.advance_phase("assemble")
 
+    def _stage_figures_for_assemble(self) -> None:
+        """Stage 3 Tier A (2026-05-12): make `<project>/figures/`
+        reachable as `<draft_dir>/figures/` so assemble_docx.py's
+        relative-path resolution finds the canonical figures.
+
+        Context: `assemble_docx.py` resolves image paths against
+        `manuscript.md.parent` and REJECTS any path containing `..`
+        (defensive against path traversal). The figures inventory
+        contract has the LLM emit `figures/X.png` (relative). Without
+        staging, those paths resolve to `<draft_dir>/figures/X.png`
+        which doesn't exist — every figure renders as
+        `[FIGURE MISSING: ...]`.
+
+        Latent failure mode: pre-v0.7.x, the LLM happened to wrap
+        image markdown in blockquotes (`> ![...]`) which the parser
+        silently treats as blockquote text, not an image block —
+        zero warnings, zero embeds. Surfaced on draft_9 when LLM
+        emitted bare image-block form.
+
+        Strategy: symlink the directory (cheap, in-tree). Fall back
+        to copy when symlink fails (Windows; cross-volume mounts).
+        Idempotent: re-runs leave a correct staged link alone.
+        """
+        project_figures = (self.project_dir / "figures").resolve()
+        staged = self.draft_dir / "figures"
+
+        if not project_figures.is_dir():
+            logger.warning(
+                f"stage_figures: {project_figures} does not exist; "
+                "skipping (renderer will warn per missing figure)."
+            )
+            return
+
+        # Idempotency: leave a correct existing symlink alone.
+        if staged.is_symlink():
+            try:
+                if staged.resolve() == project_figures:
+                    logger.info(
+                        f"stage_figures: {staged} already symlinked to "
+                        f"{project_figures}; reusing."
+                    )
+                    return
+            except OSError:
+                pass
+            # Broken or wrong-target symlink: replace it.
+            staged.unlink()
+        elif staged.is_dir():
+            # A real directory already exists (prior copy-fallback or
+            # manual stage). Trust it; do not clobber user content.
+            logger.info(
+                f"stage_figures: {staged} is a real directory; "
+                "leaving in place (assumed user-managed)."
+            )
+            return
+        elif staged.exists():
+            # Some other file at that path — refuse to clobber.
+            raise RuntimeError(
+                f"stage_figures: {staged} exists but is neither symlink "
+                "nor directory; cannot stage figures."
+            )
+
+        # Symlink first; fall back to copy on failure.
+        try:
+            staged.symlink_to(project_figures, target_is_directory=True)
+            logger.info(
+                f"stage_figures: symlinked {staged} -> {project_figures}"
+            )
+            return
+        except (OSError, NotImplementedError) as exc:
+            logger.warning(
+                f"stage_figures: symlink failed ({exc!r}); "
+                "falling back to copy."
+            )
+
+        # Copy fallback.
+        import shutil
+        shutil.copytree(project_figures, staged)
+        count = sum(1 for _ in staged.iterdir())
+        logger.info(
+            f"stage_figures: copied {count} entries to {staged}"
+        )
+
     async def phase_assemble(self):
         """Stage 1 Tier B: Phase 8 — markdown → docx via assemble_docx.py.
 
@@ -1081,6 +1242,15 @@ Fix these compliance errors.
         a .docx file. This method invokes the existing
         skill/tools/assemble_docx.py to render manuscript.md to
         manuscript.docx.
+
+        Stage 3 Tier A (2026-05-12): the renderer resolves image paths
+        relative to `manuscript.md.parent` and rejects any path
+        containing `..`. The LLM emits `figures/X.png` (per inventory
+        contract), so the figures directory must be reachable as a
+        sibling of manuscript.md. We stage the canonical figures dir
+        (<project>/figures) into <draft_dir>/figures via symlink
+        (falling back to copy when symlink fails — e.g., cross-volume,
+        Windows). Idempotent: re-runs leave the staged link alone.
         """
         logger.info("Running assemble phase (markdown → docx)...")
         manuscript_md = self.draft_dir / "manuscript.md"
@@ -1094,6 +1264,10 @@ Fix these compliance errors.
             raise RuntimeError(
                 f"manuscript.md missing at {manuscript_md}"
             )
+
+        # Stage 3 Tier A: stage <project>/figures/ as a sibling of
+        # manuscript.md so `figures/X.png` resolves against draft_dir.
+        self._stage_figures_for_assemble()
 
         tools_dir = Path(__file__).parent / "skill" / "tools"
         cmd = [

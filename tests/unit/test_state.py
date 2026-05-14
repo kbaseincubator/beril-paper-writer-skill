@@ -284,9 +284,24 @@ def test_hash_artifact_set_changes_when_path_added() -> None:
 # --------------------------------------------------------------------------
 
 def test_valid_phases_complete() -> None:
+    # Stage 1 Tier B (2026-05-11): removed "rewrite" (dead code; phase_rewrite
+    # never existed); added "extract" / "plan" / "supplementary_pool" /
+    # "optimize" / "compliance_gate" / "assemble" — each backed by a
+    # method on PaperWriterOrchestrator.
     expected = {
-        "init", "triage", "throughline_pick", "drafting",
-        "citation_pool", "review", "rewrite", "assembled",
+        "init",
+        "extract",
+        "triage",
+        "plan",
+        "throughline_pick",
+        "citation_pool",
+        "drafting",
+        "supplementary_pool",
+        "review",
+        "optimize",
+        "compliance_gate",
+        "assemble",
+        "assembled",
     }
     assert state.VALID_PHASES == expected
 
