@@ -374,10 +374,11 @@ review, now renumbered Stage 4 below): the regression cluster had to
 clear before deterministic cross-walks could be built on a
 trustworthy pipeline.
 
-**Closure result.** Nine tiers shipped; 953 unit tests pass (40 new
-this stage: 13 in `test_orchestrator_stage3.py`, 27 in
+**Closure result.** Ten tiers shipped; 957 unit tests pass (44 new
+this stage: 17 in `test_orchestrator_stage3.py`, 27 in
 `test_validate_claim_inventory.py`); end-to-end figure-embed verified
-on a re-render of draft_9.
+on a re-render of draft_9; pipeline reached the throughline-pick gate
+on a live foreground run (draft_13, plan+triage clean, tier STRONG).
 
 | Tier | Fix | Verification |
 |---|---|---|
@@ -390,6 +391,7 @@ on a re-render of draft_9.
 | G | **source_notebook regression trigger** — `phase_triage`'s claim-extraction + discrepancy-audit `claude -p` calls had no `--model` flag and bypassed `_run_claude_p_with_cost`; an unpinned model resolves differently CLI vs nested-Claude-Code. Routed both through the cost helper with `model=self.model` | both calls now pinned + cost-tracked |
 | H | `extract_claims.v1.md` — explicit `source_notebook` exact-filename rule + worked counter-example (the amplifier fix) | prompt review |
 | I | `validate_claim_inventory.py` — conservative repair pass (notebook-ID match + missing-extension); rewrites `source_notebook` to the full real filename on unambiguous match | reconstructed draft_9: 183/191 repaired, 8 correctly stay cleared |
+| J | **`claude` CLI resolution** — `resolve_claude_bin()` resolves `claude` to an absolute path at orchestrator init (`BERIL_CLAUDE_BIN` override → PATH → well-known locations incl. nvm), fails loud at init; all 4 `claude` call sites use `self.claude_bin`. Plus `draft.py`: the documented `projects/<id>/` path fallback (never implemented) + a stillborn-dir hint on a pre-flight `RuntimeError`; `configure.py` reports the same resolution the orchestrator uses | live test (draft_10–13): backgrounded `beril-paper-writer` raised `FileNotFoundError: 'claude'`, foreground worked — bare-name PATH lookup is launch-context-dependent; absolute path is immune |
 
 **Root cause of the headline regression (source_notebook).** The
 presentation-maker team flagged draft_9's claim_inventory validator
@@ -411,6 +413,23 @@ holistic-draft LLM happened to wrap image markdown in blockquotes
 LLM emitted the bare form, which the renderer *does* recognize — and
 then failed to resolve the path, making the latent bug visible. The
 figure-embed loop had never actually worked in v0.7.x.
+
+**Tier J was surfaced by the live in-situ test (draft_10–13).** The
+first attempts to run the pipeline via the BERIL slash command failed
+before the first LLM phase with `FileNotFoundError: 'claude'`. The
+orchestrator spawned `claude` by bare name, relying on a PATH lookup
+at spawn time; backgrounded under Claude Code's Bash tool that lookup
+failed, while the identical foreground command succeeded. The fix
+resolves `claude` to an absolute path at orchestrator init so the
+spawn is launch-context-independent, and fails loud at init rather
+than as a bare exception several phases deep. The same investigation
+caught two adjacent defects: `draft.py` never implemented the
+`projects/<id>/` project-id fallback its own help text documents, and
+failed pre-flight runs were silently burning draft numbers
+(draft_10/11/12 were stillborn). Both fold into Tier J. The live
+foreground run then reached the throughline-pick gate cleanly
+(draft_13) — but on pre-Stage-3 installed code; a genuine Stage-3
+verification run requires `pipx install --force` of this commit.
 
 **Closes from the Stage 2 carryover backlog:**
 - Item 2 (LLM fabricates ~4 notebook paths in extract_claims) — closed

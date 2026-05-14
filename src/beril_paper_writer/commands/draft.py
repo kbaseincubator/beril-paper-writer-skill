@@ -131,8 +131,21 @@ def run(args: argparse.Namespace) -> int:
     
     project_dir = Path(args.project).expanduser().resolve()
     if not project_dir.is_dir():
-        print(f"error: project directory does not exist: {project_dir}", file=sys.stderr)
-        return 1
+        # Stage 3 Tier J: the `project` arg may be a bare project_id
+        # rather than a path. The documented behavior (and the
+        # slash-command's expectation) is to interpret it as
+        # <cwd>/projects/<id>/. The code never implemented that
+        # fallback — `beril-paper-writer draft ibd_phage_targeting`
+        # from the BERIL root looked for <root>/ibd_phage_targeting/
+        # and failed. Implement the documented fallback.
+        fallback = (Path.cwd() / "projects" / args.project).resolve()
+        if fallback.is_dir():
+            project_dir = fallback
+        else:
+            print("error: project not found.", file=sys.stderr)
+            print(f"  tried as path:       {project_dir}", file=sys.stderr)
+            print(f"  tried as project_id: {fallback}", file=sys.stderr)
+            return 1
 
     papers_dir = project_dir / "papers"
     papers_dir.mkdir(parents=True, exist_ok=True)
@@ -155,17 +168,27 @@ def run(args: argparse.Namespace) -> int:
     
     print(f"▸ Initializing new draft at {draft_dir}", file=sys.stderr)
     
-    # Stage 1 Tier B: 'claude-opus-4-7' is an invalid model identifier
-    # (Opus 4.6 is the real model per SPEC §6.7). Same correction lands
-    # in the orchestrator constructor default; this overrides via getattr
-    # so the fix had to land here too.
-    orch = PaperWriterOrchestrator(
-        draft_dir,
-        max_cost_usd=getattr(args, "max_cost_usd", None),
-        model=getattr(args, "model", "claude-sonnet-4-5-20250929") or "claude-sonnet-4-5-20250929",
-        model_writing=getattr(args, "model_writing", "claude-opus-4-6") or "claude-opus-4-6",
-    )
-    
+    # Stage 3 Tier J: the orchestrator constructor resolves the `claude`
+    # CLI to an absolute path (resolve_claude_bin) and raises RuntimeError
+    # if it cannot. Catch that here for a clean exit with a stillborn-dir
+    # hint instead of an uncaught traceback — the draft dir was just
+    # created above but nothing has been written into it yet.
+    try:
+        orch = PaperWriterOrchestrator(
+            draft_dir,
+            max_cost_usd=getattr(args, "max_cost_usd", None),
+            model=getattr(args, "model", "claude-sonnet-4-5-20250929") or "claude-sonnet-4-5-20250929",
+            model_writing=getattr(args, "model_writing", "claude-opus-4-6") or "claude-opus-4-6",
+        )
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        print(
+            f"\nThe draft directory {draft_dir} was created but the run "
+            f"never started; it is safe to remove:\n  rm -rf {draft_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         asyncio.run(orch.run_pipeline())
         

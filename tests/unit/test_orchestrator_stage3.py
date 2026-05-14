@@ -7,8 +7,11 @@ Covers:
   - `_classify_tier_from_candidates`: tier extraction from
     throughline_candidates.md, with EXPLORATORY default and respect
     for explicit user-set tier.
+  - `resolve_claude_bin`: absolute-path resolution of the `claude` CLI
+    (Tier J) — BERIL_CLAUDE_BIN override, PATH lookup, well-known
+    locations, loud failure listing what was searched.
 
-Background. Both methods address bugs surfaced by draft_9 of the
+Background. These address bugs surfaced by draft_9–draft_13 of the
 ibd_phage_targeting smoke run:
   * Figures rendered as `[FIGURE MISSING: ...]` placeholders because
     `figures/X.png` resolves against `<draft_dir>/` (which has no
@@ -20,6 +23,11 @@ ibd_phage_targeting smoke run:
     the v0.6.4 extract-tier helper. Adversarial reviewer + word-budget
     prompts then defaulted to EXPLORATORY regardless of plan-phase
     rigor verdict.
+  * Backgrounded `beril-paper-writer` raised `FileNotFoundError:
+    'claude'` while the identical foreground command succeeded — the
+    orchestrator spawned `claude` by bare name, relying on a PATH
+    lookup that the launch context did not satisfy. resolve_claude_bin
+    pins it to an absolute path so the spawn is context-independent.
 """
 
 from __future__ import annotations
@@ -33,7 +41,10 @@ import pytest
 
 # Import the orchestrator. Tests do not invoke the network/LLM path —
 # they exercise the deterministic helpers only.
-from beril_paper_writer.orchestrator import PaperWriterOrchestrator
+from beril_paper_writer.orchestrator import (
+    PaperWriterOrchestrator,
+    resolve_claude_bin,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +260,70 @@ def test_classify_tier_no_verdict_in_file_defaults_exploratory(
     )
     orch._classify_tier_from_candidates()
     assert orch.state.tier == "EXPLORATORY"
+
+
+# ---------------------------------------------------------------------------
+# resolve_claude_bin — Tier J
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_claude_bin_honors_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BERIL_CLAUDE_BIN pointing at a real file wins over everything else."""
+    fake_claude = tmp_path / "my-claude"
+    fake_claude.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("BERIL_CLAUDE_BIN", str(fake_claude))
+    # Even if PATH has a different claude, the override wins.
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.shutil.which",
+        lambda name: "/somewhere/else/claude",
+    )
+    assert resolve_claude_bin() == str(fake_claude.resolve())
+
+
+def test_resolve_claude_bin_env_override_not_a_file_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BERIL_CLAUDE_BIN set to a non-file is a loud error, not a silent fallthrough."""
+    monkeypatch.setenv("BERIL_CLAUDE_BIN", str(tmp_path / "does-not-exist"))
+    with pytest.raises(RuntimeError, match="BERIL_CLAUDE_BIN"):
+        resolve_claude_bin()
+
+
+def test_resolve_claude_bin_falls_back_to_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no override, shutil.which result is used."""
+    monkeypatch.delenv("BERIL_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.shutil.which",
+        lambda name: "/usr/local/bin/claude" if name == "claude" else None,
+    )
+    assert resolve_claude_bin() == "/usr/local/bin/claude"
+
+
+def test_resolve_claude_bin_unresolvable_raises_with_searched_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No override, not on PATH, not in well-known locations → loud RuntimeError
+    that names what was searched (so the operator can act on it)."""
+    monkeypatch.delenv("BERIL_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.shutil.which", lambda name: None,
+    )
+    # Point Path.home() at an empty dir, and make every candidate path
+    # report "not a file" — the well-known list has hard-coded absolute
+    # paths (e.g. /usr/local/bin/claude) that may genuinely exist in the
+    # test environment, so isolating via Path.home() alone is not enough.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    with pytest.raises(RuntimeError) as exc:
+        resolve_claude_bin()
+    msg = str(exc.value)
+    assert "Cannot locate the `claude` CLI" in msg
+    assert "Searched:" in msg
+    assert "BERIL_CLAUDE_BIN" in msg
 
 
 def test_classify_tier_preserves_explicit_user_set_tier(

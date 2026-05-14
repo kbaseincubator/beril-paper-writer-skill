@@ -108,13 +108,26 @@ def run(args: argparse.Namespace) -> int:
     _info("=== Hard requirements ===")
 
     # ---- 1. claude CLI ----
-    claude_path = shutil.which("claude")
-    if claude_path is None:
-        _err("  [MISSING] claude CLI not found on PATH.")
-        _err("            Install Claude Code (https://docs.claude.com) and retry.")
+    # Stage 3 Tier J: report what the ORCHESTRATOR will actually resolve,
+    # not just a bare `shutil.which`. The orchestrator uses
+    # resolve_claude_bin() (BERIL_CLAUDE_BIN override → PATH → well-known
+    # locations) and pins the result to an absolute path. A plain
+    # `shutil.which` here gave a false green when the orchestrator's
+    # spawn context resolved `claude` differently from configure's.
+    from beril_paper_writer.orchestrator import resolve_claude_bin
+
+    try:
+        claude_path = resolve_claude_bin()
+    except RuntimeError as e:
+        claude_path = None
+        _err("  [MISSING] claude CLI could not be resolved.")
+        for line in str(e).splitlines():
+            _err(f"            {line}")
         hard_failures.append("claude CLI")
-    else:
-        version_str = _safe_version(["claude", "--version"], default="(version unknown)")
+    if claude_path is not None:
+        version_str = _safe_version(
+            [claude_path, "--version"], default="(version unknown)"
+        )
         _info(f"  [OK]      claude            — {claude_path}  {version_str}")
 
     # ---- 2. Python interpreter the orchestrator resolves ----

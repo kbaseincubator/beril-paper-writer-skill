@@ -9,6 +9,7 @@ import os
 import sys
 import asyncio
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Optional
@@ -39,6 +40,79 @@ class PipelineHalted(Exception):
 class DiscrepancyInteractiveHalt(Exception):
     """Raised when severe discrepancies require user interaction."""
     pass
+
+
+def resolve_claude_bin() -> str:
+    """Resolve the `claude` CLI to an absolute path (Stage 3 Tier J).
+
+    The orchestrator spawns `claude -p` via asyncio.create_subprocess_exec.
+    Passing the bare name "claude" relies on a PATH lookup at spawn time,
+    which is fragile: observed 2026-05-12, a backgrounded run under Claude
+    Code's Bash tool raised `FileNotFoundError: 'claude'` while the
+    identical command in the foreground succeeded — the launch context's
+    environment did not carry the directory where `claude` lives.
+    Resolving to an absolute path once, here, removes the PATH dependency
+    entirely: create_subprocess_exec performs no lookup when given an
+    absolute path, so the result is identical foreground, background,
+    nested-Claude-Code, or cron.
+
+    Resolution order:
+      1. BERIL_CLAUDE_BIN env var (explicit operator override).
+      2. shutil.which("claude") against the current PATH.
+      3. A fixed list of well-known install locations, including the
+         newest ~/.nvm/versions/node/*/bin (Claude Code's npm target).
+
+    Raises RuntimeError listing every location searched if none resolve —
+    a loud failure at orchestrator init beats a bare FileNotFoundError
+    surfacing several phases into the pipeline.
+    """
+    # 1. Explicit operator override.
+    override = os.environ.get("BERIL_CLAUDE_BIN", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file():
+            return str(p.resolve())
+        raise RuntimeError(
+            f"BERIL_CLAUDE_BIN is set to {override!r} but that path is not "
+            "a file. Unset it or point it at the real `claude` binary."
+        )
+
+    # 2. PATH lookup.
+    found = shutil.which("claude")
+    if found:
+        return str(Path(found).resolve())
+
+    # 3. Well-known install locations.
+    home = Path.home()
+    candidates: list[Path] = [
+        home / ".local" / "bin" / "claude",
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+        home / ".npm-global" / "bin" / "claude",
+    ]
+    # nvm installs node (and its global bin) under a versioned dir;
+    # search newest-first.
+    nvm_root = home / ".nvm" / "versions" / "node"
+    if nvm_root.is_dir():
+        for node_dir in sorted(nvm_root.iterdir(), reverse=True):
+            candidates.append(node_dir / "bin" / "claude")
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+
+    searched = [
+        "$BERIL_CLAUDE_BIN (unset)",
+        "shutil.which('claude') -> not found",
+    ]
+    searched += [str(c) for c in candidates]
+    raise RuntimeError(
+        "Cannot locate the `claude` CLI — the orchestrator needs it for "
+        "every LLM phase. Fix one of:\n"
+        "  - set BERIL_CLAUDE_BIN to the absolute path of `claude`, or\n"
+        "  - put `claude` on PATH (verify with `which claude`), or\n"
+        "  - install Claude Code (https://docs.claude.com).\n"
+        "Searched:\n  " + "\n  ".join(searched)
+    )
 
 
 class PaperWriterOrchestrator:
@@ -78,7 +152,7 @@ class PaperWriterOrchestrator:
         """
         import json
         cmd = [
-            "claude", "-p",
+            self.claude_bin, "-p",
             "--system-prompt", system_prompt_text,
             "--output-format", "json",
             "--dangerously-skip-permissions",
@@ -160,6 +234,12 @@ class PaperWriterOrchestrator:
         self.max_cost_usd = max_cost_usd
         self.model = model
         self.model_writing = model_writing
+        # Stage 3 Tier J: resolve `claude` to an absolute path up front,
+        # before any state I/O, so a missing CLI fails loud at init
+        # rather than as a bare FileNotFoundError mid-pipeline. Also
+        # makes the spawn immune to the launch context's PATH.
+        self.claude_bin = resolve_claude_bin()
+        logger.info(f"Resolved claude CLI: {self.claude_bin}")
         self.state: DraftState = self._initialize_state()
 
     def _initialize_state(self) -> DraftState:
@@ -850,13 +930,13 @@ Please generate the discrepancy audit JSON.
 Use the Write tool to write your JSON directly to AUDIT_OUTPUT_PATH.
 """
         cmd = [
-            "claude", "-p",
+            self.claude_bin, "-p",
             "--model", self.model,
             "--system-prompt", prompt_path.read_text(encoding='utf-8'),
             "--dangerously-skip-permissions",
             user_prompt
         ]
-        
+
         env = self._isolate_env()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -942,7 +1022,7 @@ with the citation key in the manuscript.
         if prompt_path.exists():
             user_prompt = f"Review ASSEMBLED_PATH: {self.draft_dir / 'manuscript.md'}"
             cmd = [
-                "claude", "-p",
+                self.claude_bin, "-p",
                 "--model", config.haiku_model,
                 "--system-prompt", prompt_path.read_text(encoding='utf-8'),
                 "--dangerously-skip-permissions",
@@ -1130,7 +1210,7 @@ Fix these compliance errors.
 - COMPLIANCE_ERRORS_PATH: {errors_path}
 """
                 cmd = [
-                    "claude", "-p",
+                    self.claude_bin, "-p",
                     "--system-prompt", prompt_path.read_text(encoding='utf-8'),
                     "--dangerously-skip-permissions",
                     user_prompt
