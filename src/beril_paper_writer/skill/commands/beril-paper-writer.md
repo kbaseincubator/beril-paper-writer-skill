@@ -96,9 +96,12 @@ From BERIL_ROOT:
 - Omit `--depth` if `standard` (default; ~15-25 min total wall clock
   for the full pipeline). Pass `quick` (~5-10 min) for fast iteration.
   Pass `deep` (~30-50 min) for thorough pre-submission drafting.
-- Omit `--model` to use Sonnet (default; ~3× cheaper than Opus on
-  this pipeline). Note the holistic drafter runs Opus regardless —
-  `--model` controls the non-drafting phases.
+- Omit `--model` to use the default, **Opus 4.6**, for the
+  reasoning-heavy phases (plan, triage, optimizer) — these are the
+  most load-bearing decisions in the pipeline. The holistic drafter
+  also runs Opus; the Tier-2 light review always runs on Haiku.
+  Pass `--model` to override the reasoning/draft model (e.g. to
+  Sonnet for a cheaper, faster iteration pass).
 - `--no-adversarial` skips the canonical `beril-adversarial` reviewer
   and falls back to the inline `fallback_reviewer.v1` prompt. The
   canonical reviewer is the default; the inline fallback is legacy and

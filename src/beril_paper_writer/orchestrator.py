@@ -226,8 +226,16 @@ class PaperWriterOrchestrator:
         self,
         draft_dir: Path,
         max_cost_usd: Optional[float] = None,
-        model: str = "claude-sonnet-4-5-20250929",
-        model_writing: str = "claude-opus-4-6",  # Stage 1 Tier B: was 'claude-opus-4-7' (invalid; Opus 4.6 is the real model per SPEC §6.7)
+        # Stage 3 (2026-05-12): `model` defaults to Opus, not Sonnet.
+        # `model` drives the reasoning-heavy phases — plan (throughline
+        # generation), triage (claim extraction + discrepancy audit),
+        # the optimizer — which are the most load-bearing decisions in
+        # the pipeline and where draft_9's source_notebook regression
+        # occurred. The holistic draft was already Opus; the scaffolding
+        # phases should not silently fall to Sonnet. The Tier-2 light
+        # review stays on Haiku (config.haiku_model) by design.
+        model: str = "claude-opus-4-6",
+        model_writing: str = "claude-opus-4-6",
     ):
         self.draft_dir = draft_dir
         self.project_dir = draft_dir.parent.parent
@@ -1279,13 +1287,28 @@ Fix these compliance errors.
             # Broken or wrong-target symlink: replace it.
             staged.unlink()
         elif staged.is_dir():
-            # A real directory already exists (prior copy-fallback or
-            # manual stage). Trust it; do not clobber user content.
+            # Stage 3 Tier J.1 (2026-05-15): defer to a real directory
+            # only when it actually contains content. An empty directory
+            # is almost always a side effect of an earlier phase
+            # (`extract_figures.py` runs with `--output-dir <draft_dir>`
+            # and creates an empty `figures/` as part of its scaffolding);
+            # deferring to it makes Tier A a no-op and the renderer
+            # then warns `image file not found` for every figure.
+            # Observed on draft_1 (2026-05-15 ibd_phage_targeting run):
+            # 14 figures, all WARN, docx shipped with no embedded media.
+            if any(staged.iterdir()):
+                logger.info(
+                    f"stage_figures: {staged} is a real non-empty "
+                    "directory; leaving in place (assumed user-managed)."
+                )
+                return
             logger.info(
-                f"stage_figures: {staged} is a real directory; "
-                "leaving in place (assumed user-managed)."
+                f"stage_figures: {staged} exists but is empty "
+                "(likely an extract-phase side effect); removing and "
+                "staging the project's figures dir."
             )
-            return
+            staged.rmdir()
+            # fall through to symlink/copy creation below
         elif staged.exists():
             # Some other file at that path — refuse to clobber.
             raise RuntimeError(

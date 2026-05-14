@@ -138,7 +138,7 @@ def test_stage_figures_replaces_wrong_target_symlink(
 def test_stage_figures_preserves_real_directory(
     orch: PaperWriterOrchestrator,
 ) -> None:
-    """A pre-existing real directory is left alone (user-managed)."""
+    """A pre-existing real directory with content is left alone (user-managed)."""
     staged = orch.draft_dir / "figures"
     staged.mkdir()
     user_file = staged / "user_edit.png"
@@ -150,6 +150,29 @@ def test_stage_figures_preserves_real_directory(
     assert staged.is_dir()
     assert not staged.is_symlink()
     assert user_file.read_bytes() == b"do_not_touch"
+
+
+def test_stage_figures_replaces_empty_real_directory(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """Tier J.1: an empty pre-existing real directory is replaced with the
+    project-figures symlink. Empty dirs are almost always side effects of
+    earlier pipeline phases (e.g. extract_figures --output-dir <draft_dir>),
+    not user content. Deferring to them makes Tier A a no-op and the
+    renderer warns `image file not found` for every figure (observed on
+    draft_1 of ibd_phage_targeting, 2026-05-15)."""
+    staged = orch.draft_dir / "figures"
+    staged.mkdir()
+    assert staged.is_dir() and not staged.is_symlink()
+    # Sanity: an empty dir.
+    assert not any(staged.iterdir())
+
+    orch._stage_figures_for_assemble()
+
+    # Now a symlink to the project's figures, and a sample file is reachable.
+    assert staged.is_symlink()
+    assert staged.resolve() == (orch.project_dir / "figures").resolve()
+    assert (staged / "fig1.png").is_file()
 
 
 def test_stage_figures_refuses_to_clobber_non_dir_non_link(

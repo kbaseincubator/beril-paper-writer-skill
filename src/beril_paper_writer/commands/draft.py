@@ -174,11 +174,16 @@ def run(args: argparse.Namespace) -> int:
     # hint instead of an uncaught traceback — the draft dir was just
     # created above but nothing has been written into it yet.
     try:
+        # Stage 3 (2026-05-12): default `model` is Opus 4.6, not Sonnet.
+        # `model` drives the reasoning-heavy phases (plan, triage,
+        # optimizer); a bare `beril-paper-writer draft` should not
+        # silently scaffold the manuscript on Sonnet. `--model` still
+        # overrides. See the orchestrator constructor for rationale.
         orch = PaperWriterOrchestrator(
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),
-            model=getattr(args, "model", "claude-sonnet-4-5-20250929") or "claude-sonnet-4-5-20250929",
-            model_writing=getattr(args, "model_writing", "claude-opus-4-6") or "claude-opus-4-6",
+            model=getattr(args, "model", None) or "claude-opus-4-6",
+            model_writing=getattr(args, "model_writing", None) or "claude-opus-4-6",
         )
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)

@@ -431,6 +431,18 @@ foreground run then reached the throughline-pick gate cleanly
 (draft_13) — but on pre-Stage-3 installed code; a genuine Stage-3
 verification run requires `pipx install --force` of this commit.
 
+**Model-tier default flipped to Opus (2026-05-12).** Alongside the
+tiers above: `self.model` — which drives the reasoning-heavy phases
+(plan/throughline generation, triage/claim-extraction + discrepancy
+audit, the optimizer) — now defaults to `claude-opus-4-6` instead of
+Sonnet 4.5. The holistic draft was already Opus; the scaffolding
+phases were silently defaulting to Sonnet, which is backwards: plan
+and triage are the most load-bearing decisions in the pipeline and
+where draft_9's source_notebook regression occurred. The Tier-2 light
+review stays on Haiku by design. `--model` still overrides (e.g. to
+Sonnet for a cheap iteration pass). Cost is being measured this
+cycle, not optimized — revisit per-phase tiering once there's data.
+
 **Closes from the Stage 2 carryover backlog:**
 - Item 2 (LLM fabricates ~4 notebook paths in extract_claims) — closed
   by Tiers H+I. Note the failure *mode* widened in draft_9 (bare stems,
