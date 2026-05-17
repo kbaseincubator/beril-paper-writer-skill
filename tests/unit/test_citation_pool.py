@@ -525,3 +525,355 @@ class TestCLI:
         loaded = json.loads(proc.stdout)
         assert "entries" in loaded
         assert len(loaded["entries"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 Tier R-1 + R-2: holistic-flow finalize
+#
+# These tests cover the v0.8 holistic-draft path where there are no
+# per-section files (0?_*.md). The finalize walker dispatches to
+# manuscript.md, the pool path auto-detect prefers citation_pool.json,
+# and serialize_to_disk preserves the input pool's filename.
+# ---------------------------------------------------------------------------
+
+
+def _holistic_manuscript(*citations: str) -> str:
+    """Build a synthetic v0.8 manuscript.md body for tests.
+
+    Each ``citation`` arg becomes a sentence with that single
+    ``[BibKey]`` in the Results section. The first citation also
+    appears in Methods (so the first-citation order test can see
+    cross-section ordering when desired). The manuscript carries the
+    expected v0.8 IMRAD section headings.
+    """
+    if not citations:
+        return "# Title\n\n## Abstract\n\nNo citations here.\n"
+    first = citations[0]
+    results_paragraphs = "\n\n".join(
+        f"Result {i+1} is supported by [{key}]."
+        for i, key in enumerate(citations)
+    )
+    return (
+        "# Manuscript Title\n\n"
+        "## Abstract\n\n"
+        "Some preamble with no citations.\n\n"
+        "## Methods\n\n"
+        f"We applied published methods [{first}] throughout.\n\n"
+        "## Results\n\n"
+        f"{results_paragraphs}\n\n"
+        "## Discussion\n\n"
+        "Broader implications are noted.\n\n"
+        "## References\n\n"
+        "1. ...\n"
+    )
+
+
+class TestStage4HolisticWalker:
+    """Stage 4 Tier R-1: extract_citekeys_from_manuscript +
+    extract_citekeys_in_first_citation_order dispatch."""
+
+    def test_canonicalize_heading_strips_punctuation(self):
+        assert cp._canonicalize_heading("Methods") == "methods"
+        assert cp._canonicalize_heading("Data Availability:") == "data availability"
+        assert cp._canonicalize_heading("  Discussion. ") == "discussion"
+
+    def test_walker_finds_citations_in_first_citation_order(self, tmp_path: Path):
+        ms = tmp_path / "manuscript.md"
+        ms.write_text(_holistic_manuscript("Smith2023", "Jones2024", "Lee2022"))
+        ordered, locations = cp.extract_citekeys_from_manuscript(ms)
+        # Smith2023 appears first in Methods (per _holistic_manuscript).
+        assert ordered == ["Smith2023", "Jones2024", "Lee2022"]
+        # Smith2023 has TWO occurrences (Methods + Results).
+        smith_locs = [l for l in locations if l[0] == "Smith2023"]
+        assert len(smith_locs) == 2
+        # All other keys have exactly one occurrence.
+        assert len([l for l in locations if l[0] == "Jones2024"]) == 1
+        assert len([l for l in locations if l[0] == "Lee2022"]) == 1
+
+    def test_walker_attributes_section_labels_from_headings(self, tmp_path: Path):
+        ms = tmp_path / "manuscript.md"
+        ms.write_text(_holistic_manuscript("Smith2023", "Jones2024"))
+        _, locations = cp.extract_citekeys_from_manuscript(ms)
+        # The first Smith2023 occurrence is in Methods.
+        first_smith = next(l for l in locations if l[0] == "Smith2023")
+        assert first_smith[1] == "methods"
+        # Jones2024 (second result paragraph) is in Results.
+        jones_loc = next(l for l in locations if l[0] == "Jones2024")
+        assert jones_loc[1] == "results"
+
+    def test_walker_handles_compound_citations(self, tmp_path: Path):
+        ms = tmp_path / "manuscript.md"
+        ms.write_text(
+            "## Results\n\n"
+            "Several priors agree [Smith2023, Jones2024]. We extend.\n"
+        )
+        ordered, locations = cp.extract_citekeys_from_manuscript(ms)
+        assert ordered == ["Smith2023", "Jones2024"]
+        # Both keys attributed to the same section.
+        assert {l[1] for l in locations} == {"results"}
+
+    def test_walker_handles_no_citations(self, tmp_path: Path):
+        ms = tmp_path / "manuscript.md"
+        ms.write_text(_holistic_manuscript())  # empty citations
+        ordered, locations = cp.extract_citekeys_from_manuscript(ms)
+        assert ordered == []
+        assert locations == []
+
+    def test_walker_front_matter_label_for_pre_heading_citation(
+        self, tmp_path: Path,
+    ):
+        ms = tmp_path / "manuscript.md"
+        ms.write_text(
+            "# Title\n\n"
+            "Some context [Smith2023] before the first heading.\n\n"
+            "## Methods\n\n"
+            "More material.\n"
+        )
+        _, locations = cp.extract_citekeys_from_manuscript(ms)
+        assert locations[0] == ("Smith2023", "front-matter", 2)
+
+    def test_dispatcher_prefers_sectional_when_section_files_present(
+        self, tmp_path: Path,
+    ):
+        # Both manuscript.md AND a sectional file: sectional wins.
+        (tmp_path / "01_methods.md").write_text(
+            "Methods text [SectionalKey2020]\n"
+        )
+        (tmp_path / "manuscript.md").write_text(
+            _holistic_manuscript("ManuscriptKey2020")
+        )
+        ordered, locations = cp.extract_citekeys_in_first_citation_order(tmp_path)
+        assert ordered == ["SectionalKey2020"]
+        assert all(l[1] == "01_methods.md" for l in locations)
+
+    def test_dispatcher_uses_manuscript_when_no_section_files(
+        self, tmp_path: Path,
+    ):
+        (tmp_path / "manuscript.md").write_text(
+            _holistic_manuscript("ManuscriptKey2020")
+        )
+        ordered, _ = cp.extract_citekeys_in_first_citation_order(tmp_path)
+        assert ordered == ["ManuscriptKey2020"]
+
+    def test_dispatcher_returns_empty_when_neither_present(
+        self, tmp_path: Path,
+    ):
+        ordered, locations = cp.extract_citekeys_in_first_citation_order(tmp_path)
+        assert ordered == []
+        assert locations == []
+
+
+class TestStage4SerializePoolFilename:
+    """Stage 4 Tier R-2: serialize_to_disk pool_filename kwarg."""
+
+    def test_default_pool_filename_is_pool_json(self, tmp_path: Path):
+        pool = cp.CitationPool()
+        cp.add_entry(pool, _good_entry())
+        cp.assign_bib_keys(pool)
+        paths = cp.serialize_to_disk(pool, tmp_path)
+        assert "pool.json" in paths
+        assert (tmp_path / "pool.json").is_file()
+        # citation_pool.json should NOT be created when not requested.
+        assert not (tmp_path / "citation_pool.json").is_file()
+
+    def test_pool_filename_kwarg_preserves_caller_name(self, tmp_path: Path):
+        pool = cp.CitationPool()
+        cp.add_entry(pool, _good_entry())
+        cp.assign_bib_keys(pool)
+        paths = cp.serialize_to_disk(
+            pool, tmp_path, pool_filename="citation_pool.json",
+        )
+        assert "citation_pool.json" in paths
+        assert (tmp_path / "citation_pool.json").is_file()
+        # Legacy pool.json should NOT be created when a different name is requested.
+        assert not (tmp_path / "pool.json").is_file()
+
+
+class TestStage4FinalizeCLI:
+    """Stage 4 Tier R-2: CLI behavior for the new --pool-path flag and
+    the citation_pool.json/pool.json auto-detection."""
+
+    SCRIPT = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "beril_paper_writer"
+        / "skill"
+        / "tools"
+        / "citation_pool.py"
+    )
+
+    def _seed_pool(self, draft_dir: Path, *, filename: str = "pool.json") -> Path:
+        """Write a 2-entry pool to <draft_dir>/<filename>; return that path."""
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        pool = cp.CitationPool()
+        cp.add_entry(pool, _good_entry(doi="10.X/A", title="Paper A"))
+        cp.add_entry(pool, _good_entry(doi="10.X/B", title="Paper B"))
+        cp.assign_bib_keys(pool)
+        pool_path = draft_dir / filename
+        pool_path.write_text(
+            json.dumps(pool.to_dict(), indent=2), encoding="utf-8"
+        )
+        return pool_path
+
+    def test_finalize_holistic_flow_renders_references(self, tmp_path: Path):
+        """Holistic flow: manuscript.md only, citation_pool.json present.
+
+        This is the v0.8.0 production case — the bug we are fixing.
+        After finalize the rendered references.md must be non-empty
+        and reference the cited keys.
+        """
+        draft_dir = tmp_path / "draft"
+        self._seed_pool(draft_dir, filename="citation_pool.json")
+        # Derive the actual bib_keys the pool assigned so the test
+        # citations match.
+        pool = cp.load_from_disk(draft_dir)  # legacy reads pool.json — empty
+        # Reload from the v0.8-named file.
+        raw = json.loads((draft_dir / "citation_pool.json").read_text())
+        pool = cp.CitationPool.from_dict(raw)
+        keys = [e.bib_key for e in pool.entries]
+        assert len(keys) == 2 and all(keys)
+        (draft_dir / "manuscript.md").write_text(
+            _holistic_manuscript(*keys)
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "finalize", str(draft_dir)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        # references.md must be non-empty.
+        refs = (draft_dir / "references.md").read_text()
+        assert refs.strip(), "references.md should be non-empty post-finalize"
+        # citation_map.md must be non-empty.
+        cmap = (draft_dir / "citation_map.md").read_text()
+        assert cmap.strip(), "citation_map.md should be non-empty post-finalize"
+        # Pool was overwritten with renumbered citation_map.
+        raw_after = json.loads((draft_dir / "citation_pool.json").read_text())
+        assert raw_after.get("citation_map"), \
+            "citation_map should be populated after finalize"
+        # No parallel pool.json should be created.
+        assert not (draft_dir / "pool.json").is_file()
+
+    def test_finalize_sectional_flow_backwards_compat(self, tmp_path: Path):
+        """Legacy sectional flow: 0?_*.md files present, no manuscript.md."""
+        draft_dir = tmp_path / "draft"
+        self._seed_pool(draft_dir, filename="pool.json")
+        raw = json.loads((draft_dir / "pool.json").read_text())
+        pool = cp.CitationPool.from_dict(raw)
+        keys = [e.bib_key for e in pool.entries]
+        (draft_dir / "01_methods.md").write_text(
+            f"Methods text [{keys[0]}].\n"
+        )
+        (draft_dir / "02_results.md").write_text(
+            f"Results show [{keys[1]}] effects.\n"
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "finalize", str(draft_dir)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        refs = (draft_dir / "references.md").read_text()
+        assert refs.strip()
+
+    def test_finalize_explicit_pool_path_wins(self, tmp_path: Path):
+        """An explicit --pool-path overrides the auto-detect search."""
+        draft_dir = tmp_path / "draft"
+        # Put a pool at a non-standard name.
+        custom_pool = self._seed_pool(draft_dir, filename="custom_pool.json")
+        raw = json.loads(custom_pool.read_text())
+        pool = cp.CitationPool.from_dict(raw)
+        keys = [e.bib_key for e in pool.entries]
+        (draft_dir / "manuscript.md").write_text(
+            _holistic_manuscript(*keys)
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "finalize",
+             str(draft_dir), "--pool-path", str(custom_pool)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        # The custom-named pool was overwritten with citation_map.
+        raw_after = json.loads(custom_pool.read_text())
+        assert raw_after.get("citation_map")
+        # No parallel files were created.
+        assert not (draft_dir / "pool.json").is_file()
+        assert not (draft_dir / "citation_pool.json").is_file()
+
+    def test_finalize_autodetect_prefers_citation_pool_json(
+        self, tmp_path: Path,
+    ):
+        """When both pool.json AND citation_pool.json are present, the
+        autodetect picks citation_pool.json (v0.8 convention) first."""
+        draft_dir = tmp_path / "draft"
+        # Seed BOTH files with DIFFERENT contents so we can tell which
+        # one finalize used to drive the render.
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        legacy_pool = cp.CitationPool()
+        cp.add_entry(legacy_pool, _good_entry(doi="10.X/legacy", title="Legacy"))
+        cp.assign_bib_keys(legacy_pool)
+        (draft_dir / "pool.json").write_text(
+            json.dumps(legacy_pool.to_dict(), indent=2)
+        )
+
+        v08_pool = cp.CitationPool()
+        cp.add_entry(v08_pool, _good_entry(doi="10.X/v08", title="V08"))
+        cp.assign_bib_keys(v08_pool)
+        (draft_dir / "citation_pool.json").write_text(
+            json.dumps(v08_pool.to_dict(), indent=2)
+        )
+
+        # manuscript.md only cites the v0.8 pool's key.
+        v08_key = v08_pool.entries[0].bib_key
+        (draft_dir / "manuscript.md").write_text(
+            _holistic_manuscript(v08_key)
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "finalize", str(draft_dir)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        # citation_pool.json should now have citation_map populated.
+        raw_v08 = json.loads(
+            (draft_dir / "citation_pool.json").read_text()
+        )
+        assert raw_v08.get("citation_map"), \
+            "v0.8 pool should have been chosen and renumbered"
+        # The legacy pool.json should be untouched (no citation_map).
+        raw_legacy = json.loads((draft_dir / "pool.json").read_text())
+        assert not raw_legacy.get("citation_map")
+
+    def test_finalize_errors_when_no_pool_present(self, tmp_path: Path):
+        """Without any pool file, finalize exits non-zero with a clear error."""
+        draft_dir = tmp_path / "draft"
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        # Section file present but no pool.
+        (draft_dir / "manuscript.md").write_text(
+            _holistic_manuscript("Smith2023")
+        )
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "finalize", str(draft_dir)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode != 0
+        assert "pool file not found" in proc.stderr
+
+    def test_finalize_writes_orphan_warnings(self, tmp_path: Path):
+        """If the manuscript cites a bib_key not in the pool, finalize
+        writes an orphan-warning file but still exits 0 (advisory)."""
+        draft_dir = tmp_path / "draft"
+        self._seed_pool(draft_dir, filename="citation_pool.json")
+        (draft_dir / "manuscript.md").write_text(
+            "## Results\n\nWe cite [UnknownAuthor2099] which is missing.\n"
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "finalize", str(draft_dir)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0
+        warnings = (draft_dir / "finalize_warnings.md").read_text()
+        assert "UnknownAuthor2099" in warnings
+        assert "orphan" in warnings.lower()

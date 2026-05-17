@@ -755,9 +755,22 @@ def format_citation_map_md(pool: CitationPool) -> str:
 # Disk I/O
 # ---------------------------------------------------------------------------
 
-def serialize_to_disk(pool: CitationPool, draft_dir: Path) -> dict[str, Path]:
-    """Write references.md, bibliography.bib, citation_map.md, and
-    pool.json (machine-readable internal artifact for resume) to draft_dir.
+def serialize_to_disk(
+    pool: CitationPool,
+    draft_dir: Path,
+    *,
+    pool_filename: str = "pool.json",
+) -> dict[str, Path]:
+    """Write references.md, bibliography.bib, citation_map.md, and the
+    pool JSON (machine-readable internal artifact for resume) to draft_dir.
+
+    Stage 4 Tier R-2 (2026-05-17): added ``pool_filename`` kwarg so the
+    v0.8 orchestrator can keep its LLM-emitted ``citation_pool.json``
+    as the single authoritative pool path — avoiding the dual-file
+    drift between ``citation_pool.json`` (LLM output) and ``pool.json``
+    (internal render). Callers from the legacy bash flow get the
+    historical default and behavior; callers from the v0.8 orchestrator
+    pass ``pool_filename="citation_pool.json"``.
 
     Returns a dict of {filename: path-written}.
     """
@@ -778,12 +791,16 @@ def serialize_to_disk(pool: CitationPool, draft_dir: Path) -> dict[str, Path]:
     map_path.write_text(format_citation_map_md(pool), encoding="utf-8")
     paths["citation_map.md"] = map_path
 
-    # Internal artifact for resume — full pool JSON.
-    pool_path = draft_dir / "pool.json"
+    # Renumbered pool — overwrites the input pool with the post-finalize
+    # state (citation_map + first_cited_at populated). For the v0.8
+    # orchestrator the caller passes citation_pool.json so the
+    # downstream consumers (adversarial reviewer, supplementary_pool)
+    # see the renumbered state at the path they already read from.
+    pool_path = draft_dir / pool_filename
     pool_path.write_text(
         json.dumps(pool.to_dict(), indent=2) + "\n", encoding="utf-8"
     )
-    paths["pool.json"] = pool_path
+    paths[pool_filename] = pool_path
 
     return paths
 
@@ -847,11 +864,21 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_format(args: argparse.Namespace) -> int:
-    """Read a pool.json + write references.md / bibliography.bib /
-    citation_map.md / pool.json into a draft directory."""
+    """Read a pool JSON + write references.md / bibliography.bib /
+    citation_map.md / <pool>.json into a draft directory.
+
+    Stage 4 Tier R-2 (2026-05-17): preserves the input pool's filename
+    in the rewrite so the v0.8 orchestrator's ``citation_pool.json``
+    convention is honored when finalize-or-format is invoked against
+    that file directly.
+    """
     raw = json.loads(args.pool_json.read_text(encoding="utf-8"))
     pool = CitationPool.from_dict(raw)
-    paths = serialize_to_disk(pool, args.draft_dir)
+    # If the input pool was named other than pool.json, keep that name
+    # on the rewrite so we don't introduce a parallel artifact.
+    paths = serialize_to_disk(
+        pool, args.draft_dir, pool_filename=args.pool_json.name,
+    )
     for name, p in paths.items():
         print(f"  wrote {name} → {p}", file=sys.stderr)
     return 0
@@ -910,83 +937,194 @@ _FINALIZE_SECTION_ORDER = (
     "07_data_availability.md",
 )
 
+# Stage 4 Tier R-1 (2026-05-17): in the v0.8 holistic-draft flow there
+# are no per-section files — the entire manuscript is produced in one
+# Opus pass as `manuscript.md`. This regex matches its ``## <Heading>``
+# section dividers so the finalize walker can attribute each bib_key
+# occurrence to a logical section (rather than the whole file). The
+# heading is stripped to a canonical lowercase form for the
+# locations tuple (e.g. ``## Methods`` → ``methods``).
+_MANUSCRIPT_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
 
-def extract_citekeys_in_first_citation_order(
-    draft_dir: Path,
-    section_order: tuple[str, ...] = _FINALIZE_SECTION_ORDER,
+
+def _canonicalize_heading(raw: str) -> str:
+    """Lowercase + collapse whitespace + drop trailing punctuation.
+
+    Used to derive a stable section label from a manuscript.md ``##``
+    heading. E.g. ``"## Methods"`` → ``"methods"`` and
+    ``"## Data Availability Statement"`` → ``"data availability statement"``.
+    """
+    s = raw.strip().lower()
+    # Drop common trailing colon/period (varies by author).
+    while s and s[-1] in ".:;,":
+        s = s[:-1].rstrip()
+    return s
+
+
+def extract_citekeys_from_manuscript(
+    manuscript_path: Path,
 ) -> tuple[list[str], list[tuple[str, str, int]]]:
-    """Walk section files in IMRAD order; return (ordered_keys, locations).
+    """Stage 4 Tier R-1: walk a single holistic-flow ``manuscript.md`` and
+    extract bib_keys with per-section attribution.
 
-    `ordered_keys` is the list of unique bib_keys in first-citation order
-    across the IMRAD sections (each key appears once, at its first
-    citation site).
+    Section labels come from the file's ``## <Heading>`` markers
+    (canonicalized via :func:`_canonicalize_heading`). Citations
+    appearing before any ``##`` heading are attributed to the synthetic
+    section ``"front-matter"`` (rare; usually a title block or YAML
+    front-matter region).
 
-    `locations` is a list of `(bib_key, section_filename, paragraph_n)`
-    tuples for every citekey occurrence (including duplicates) — used
-    to populate `pool.first_cited_at` for citation_map.md.
-
-    Section files that don't exist are skipped silently (the orchestrator
-    handles section presence; finalize tolerates partial drafts during
-    development).
+    The same paragraph counter discipline as the sectional walker is
+    used: blank-line separators advance the paragraph index, which
+    resets at every section boundary.
     """
     ordered: list[str] = []
     seen: set[str] = set()
     locations: list[tuple[str, str, int]] = []
 
-    for section_name in section_order:
-        section_path = draft_dir / section_name
-        if not section_path.is_file():
+    text = manuscript_path.read_text(encoding="utf-8")
+    text = _split_compound_citations(text)
+
+    current_section = "front-matter"
+    paragraph_n = 1
+    for line in text.split("\n"):
+        heading_match = _MANUSCRIPT_HEADING_RE.match(line)
+        if heading_match:
+            current_section = _canonicalize_heading(heading_match.group(1))
+            paragraph_n = 1
             continue
-        text = section_path.read_text(encoding="utf-8")
-        # Normalize compound citations [Key1, Key2] → [Key1][Key2] so
-        # the per-key regex catches each one individually.
-        text = _split_compound_citations(text)
-        # Track paragraph number (1-based) by counting blank-line separators.
-        paragraph_n = 1
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if not stripped:
-                # Paragraph break (collapse runs of blank lines into one boundary).
-                paragraph_n += 1
-                continue
-            for match in _CITEKEY_PATTERN.finditer(line):
-                key = match.group(1)
-                locations.append((key, section_name, paragraph_n))
-                if key not in seen:
-                    ordered.append(key)
-                    seen.add(key)
+        stripped = line.strip()
+        if not stripped:
+            paragraph_n += 1
+            continue
+        for match in _CITEKEY_PATTERN.finditer(line):
+            key = match.group(1)
+            locations.append((key, current_section, paragraph_n))
+            if key not in seen:
+                ordered.append(key)
+                seen.add(key)
     return ordered, locations
+
+
+def extract_citekeys_in_first_citation_order(
+    draft_dir: Path,
+    section_order: tuple[str, ...] = _FINALIZE_SECTION_ORDER,
+) -> tuple[list[str], list[tuple[str, str, int]]]:
+    """Walk a draft directory for `[bib_key]` marks; return (ordered_keys, locations).
+
+    `ordered_keys` is the list of unique bib_keys in first-citation order
+    (each key appears once, at its first citation site).
+
+    `locations` is a list of `(bib_key, section_label, paragraph_n)`
+    tuples for every citekey occurrence (including duplicates) — used
+    to populate `pool.first_cited_at` for citation_map.md.
+
+    **Stage 4 Tier R-1 (2026-05-17): flow-aware dispatch.**
+
+    1. Per-section files (``0?_*.md``) in IMRAD order — the original
+       sectional flow from v0.7.x. Section label = filename.
+    2. Single ``manuscript.md`` (the v0.8 holistic flow). Section label
+       = canonicalized ``## <Heading>``.
+    3. Both missing — return empty (no error; finalize tolerates
+       partial drafts).
+
+    Section files that don't exist are skipped silently. If at least
+    one section file in ``section_order`` exists, the sectional walker
+    runs (backwards compat); otherwise the manuscript walker takes
+    over. This ordering matters because a stale ``manuscript.md`` from
+    a prior `assemble` run could be present alongside fresh section
+    files during a partial re-run; we prefer the authoritative
+    section-file source when it exists.
+    """
+    sectional_present = any(
+        (draft_dir / name).is_file() for name in section_order
+    )
+    if sectional_present:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        locations: list[tuple[str, str, int]] = []
+        for section_name in section_order:
+            section_path = draft_dir / section_name
+            if not section_path.is_file():
+                continue
+            text = section_path.read_text(encoding="utf-8")
+            text = _split_compound_citations(text)
+            paragraph_n = 1
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if not stripped:
+                    paragraph_n += 1
+                    continue
+                for match in _CITEKEY_PATTERN.finditer(line):
+                    key = match.group(1)
+                    locations.append((key, section_name, paragraph_n))
+                    if key not in seen:
+                        ordered.append(key)
+                        seen.add(key)
+        return ordered, locations
+
+    manuscript_path = draft_dir / "manuscript.md"
+    if manuscript_path.is_file():
+        return extract_citekeys_from_manuscript(manuscript_path)
+
+    return [], []
 
 
 def _cmd_finalize(args: argparse.Namespace) -> int:
     """Renumber a draft's citations based on first-citation order.
 
-    Reads `<draft_dir>/pool.json`, walks `<draft_dir>/0?_*.md` section
-    files for `[bib_key]` marks, populates `pool.citation_map` and
-    `pool.first_cited_at` from the prose, then re-runs serialize_to_disk
-    to rewrite references.md / citation_map.md / pool.json with
-    numbered citations.
+    **Pool source** (Stage 4 Tier R-2, 2026-05-17): if ``--pool-path`` is
+    given, the named file is read; otherwise the helper falls back
+    through ``citation_pool.json`` (v0.8 orchestrator convention) and
+    ``pool.json`` (legacy bash-flow / internal-render convention) in
+    that order. This lets the v0.8 Python orchestrator call finalize
+    against the LLM-emitted pool without renaming files first.
 
-    Section files are NOT modified — they preserve `[bib_key]` form
-    (non-destructive; finalize is re-runnable). The numeric `[N]` form
-    is applied at manuscript-assembly time by `paper_writer.sh
-    phase_assemble`, which substitutes `[bib_key]` → `[N]` from the
-    finalized citation_map when concatenating to manuscript.md.
+    **Section walker** (Stage 4 Tier R-1, 2026-05-17): the walker
+    auto-dispatches between the sectional flow (``0?_*.md`` files) and
+    the v0.8 holistic flow (``manuscript.md``). See
+    :func:`extract_citekeys_in_first_citation_order`.
 
-    Emits a finalize_warnings.md file if any `[bib_key]` in the prose
-    doesn't resolve to a pool entry — these are orphaned citations the
-    user should fix before submission. Exit 0 always (advisory); the
-    warnings file (if non-empty) signals the orchestrator to surface in
-    the next-actions handoff.
+    Walks the draft for ``[bib_key]`` marks, populates
+    ``pool.citation_map`` and ``pool.first_cited_at`` from the prose,
+    then re-runs :func:`serialize_to_disk` to rewrite ``references.md``
+    / ``citation_map.md`` / ``bibliography.bib`` plus the internal
+    ``pool.json`` (post-finalize, renumbered) with citation numbering.
+
+    Source files (``0?_*.md`` OR ``manuscript.md``) are NOT modified —
+    they preserve ``[bib_key]`` form (non-destructive; finalize is
+    re-runnable). The numeric ``[N]`` form is applied at
+    manuscript-assembly time when relevant.
+
+    Emits a ``finalize_warnings.md`` file if any ``[bib_key]`` in the
+    prose doesn't resolve to a pool entry — these are orphaned
+    citations the user should fix before submission. Exit 0 always
+    (advisory); the warnings file (if non-empty) signals the
+    orchestrator to surface in the next-actions handoff.
     """
     draft_dir: Path = args.draft_dir
     if not draft_dir.is_dir():
         print(f"error: draft_dir not found: {draft_dir}", file=sys.stderr)
         return 1
 
-    pool_path = draft_dir / "pool.json"
-    if not pool_path.is_file():
-        print(f"error: pool.json not found at {pool_path}", file=sys.stderr)
+    # Stage 4 Tier R-2: resolve pool path. Explicit --pool-path wins;
+    # otherwise auto-detect by trying citation_pool.json (v0.8
+    # orchestrator convention) then pool.json (legacy bash-flow
+    # convention). Since serialize_to_disk now overwrites the same
+    # filename it read from, there is no longer dual-file drift —
+    # whichever name is chosen on first finalize sticks.
+    pool_path: Path | None = getattr(args, "pool_path", None)
+    if pool_path is None:
+        for candidate_name in ("citation_pool.json", "pool.json"):
+            candidate = draft_dir / candidate_name
+            if candidate.is_file():
+                pool_path = candidate
+                break
+    if pool_path is None or not pool_path.is_file():
+        searched = (
+            str(pool_path) if pool_path is not None
+            else f"{draft_dir}/citation_pool.json or {draft_dir}/pool.json"
+        )
+        print(f"error: pool file not found at {searched}", file=sys.stderr)
         return 1
 
     raw = json.loads(pool_path.read_text(encoding="utf-8"))
@@ -1012,7 +1150,8 @@ def _cmd_finalize(args: argparse.Namespace) -> int:
             continue  # earliest occurrence wins
         pool.first_cited_at[n] = {"section": section, "paragraph": str(para)}
 
-    paths = serialize_to_disk(pool, draft_dir)
+    # Preserve the input pool's filename in the rewrite (Stage 4 Tier R-2).
+    paths = serialize_to_disk(pool, draft_dir, pool_filename=pool_path.name)
     for name, p in paths.items():
         print(f"  rewrote {name} → {p}", file=sys.stderr)
 
@@ -1139,14 +1278,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_fin = sub.add_parser(
         "finalize",
         help=(
-            "Walk drafted section files for [bib_key] marks; renumber "
-            "references.md / citation_map.md / pool.json based on "
-            "first-citation order. Idempotent."
+            "Walk drafted section files OR manuscript.md for [bib_key] "
+            "marks; renumber references.md / citation_map.md / <pool>.json "
+            "based on first-citation order. Idempotent."
         ),
     )
     p_fin.add_argument(
         "draft_dir", type=Path,
-        help="Draft directory (papers/draft_N/) with section files + pool.json.",
+        help=(
+            "Draft directory (papers/draft_N/) containing the pool JSON "
+            "and either per-section 0?_*.md files (legacy sectional "
+            "flow) OR manuscript.md (v0.8 holistic flow)."
+        ),
+    )
+    p_fin.add_argument(
+        "--pool-path", type=Path, default=None,
+        help=(
+            "Explicit path to the pool JSON. If omitted, finalize "
+            "searches <draft_dir> for pool.json then citation_pool.json. "
+            "v0.8 orchestrator: pass <draft_dir>/citation_pool.json."
+        ),
     )
     p_fin.set_defaults(func=_cmd_finalize)
 

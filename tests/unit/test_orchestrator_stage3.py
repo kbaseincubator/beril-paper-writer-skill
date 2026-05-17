@@ -503,3 +503,178 @@ def test_classify_tier_preserves_explicit_user_set_tier(
     orch._classify_tier_from_candidates()
     # User's THIN wins over the file's STRONG.
     assert orch.state.tier == "THIN"
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 Tier R-2: _finalize_citation_render
+#
+# This is the load-bearing fix for the references.md / citation_map.md
+# 0-byte regression first surfaced by ibd_phage_targeting draft_1 in
+# the v0.8.0 live test. The unit tests below cover the contract-end
+# of the fix; the citation_pool unit tests in test_citation_pool.py
+# (TestStage4HolisticWalker, TestStage4FinalizeCLI) cover the walker
+# and CLI-side.
+# ---------------------------------------------------------------------------
+
+
+def _write_citation_pool(draft_dir: Path, bib_keys: list[str]) -> None:
+    """Seed <draft_dir>/citation_pool.json with one entry per bib_key."""
+    entries = []
+    for i, key in enumerate(bib_keys):
+        # Match the synthetic-test convention from test_citation_pool.py.
+        # Each entry has a unique DOI so the dedup doesn't collapse them.
+        entries.append({
+            "authors": [f"Author{i} A"],
+            "year": 2020 + i,
+            "title": f"Paper {key}",
+            "venue": "Journal X 1(1):1-10",
+            "doi": f"10.X/{key}",
+            "pmid": None,
+            "studied": "stub",
+            "finding": "stub",
+            "scope_alignment": "direct",
+            "assessment": "supports",
+            "bib_key": key,
+        })
+    (draft_dir / "citation_pool.json").write_text(
+        json.dumps({"entries": entries}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def test_finalize_render_populates_references_md_for_holistic_flow(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """The headline fix: a fresh holistic-flow draft with
+    citation_pool.json + manuscript.md (no per-section files) must
+    end up with non-empty references.md and citation_map.md after
+    _finalize_citation_render. This is exactly the v0.8.0 draft_1
+    failure case that drove Stage 4."""
+    _write_citation_pool(orch.draft_dir, ["Smith2020", "Jones2021"])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "# Title\n\n## Methods\n\nMethods cite [Smith2020].\n\n"
+        "## Results\n\nResults cite [Jones2021].\n\n## References\n\n",
+        encoding="utf-8",
+    )
+    # Sanity: both rendered files don't yet exist.
+    assert not (orch.draft_dir / "references.md").is_file()
+    assert not (orch.draft_dir / "citation_map.md").is_file()
+
+    orch._finalize_citation_render()
+
+    refs = (orch.draft_dir / "references.md").read_text()
+    assert refs.strip(), "references.md must be non-empty post-finalize"
+    cmap = (orch.draft_dir / "citation_map.md").read_text()
+    assert cmap.strip(), "citation_map.md must be non-empty post-finalize"
+
+    # Pool was overwritten with citation_map populated.
+    pool_after = json.loads(
+        (orch.draft_dir / "citation_pool.json").read_text()
+    )
+    assert pool_after.get("citation_map"), \
+        "citation_pool.json should have citation_map populated"
+    assert set(pool_after["citation_map"].keys()) == {"Smith2020", "Jones2021"}
+
+
+def test_finalize_render_writes_orphan_warnings_when_present(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """A bib_key cited in manuscript.md but absent from the pool is
+    surfaced via finalize_warnings.md. Pipeline continues regardless
+    (advisory)."""
+    _write_citation_pool(orch.draft_dir, ["Known2020"])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Results\n\nCite [Known2020] and [Unknown9999].\n",
+        encoding="utf-8",
+    )
+    orch._finalize_citation_render()
+
+    warnings = (orch.draft_dir / "finalize_warnings.md").read_text()
+    assert "Unknown9999" in warnings
+    assert "orphan" in warnings.lower()
+
+
+def test_finalize_render_no_orphan_warnings_file_when_clean(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """No warnings file should be written when every cited key resolves.
+
+    (The legacy CLI _cmd_finalize always writes the file with an
+    'all clean' body. The orchestrator helper writes ONLY when there
+    are orphans, to keep the draft_dir less noisy.)"""
+    _write_citation_pool(orch.draft_dir, ["Smith2020"])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nCite [Smith2020].\n",
+        encoding="utf-8",
+    )
+    orch._finalize_citation_render()
+
+    assert not (orch.draft_dir / "finalize_warnings.md").is_file()
+
+
+def test_finalize_render_handles_missing_pool_gracefully(
+    orch: PaperWriterOrchestrator,
+    caplog,
+) -> None:
+    """Missing citation_pool.json triggers a WARNING + early return,
+    not an exception. Pipeline must continue; the references files
+    will simply remain unwritten (same end-state as today's bug, but
+    now LOUD)."""
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nCite [Smith2020].\n",
+        encoding="utf-8",
+    )
+    # No citation_pool.json present.
+    import logging
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        orch._finalize_citation_render()
+
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "citation_pool.json" in msgs
+    assert not (orch.draft_dir / "references.md").is_file()
+    assert not (orch.draft_dir / "citation_map.md").is_file()
+
+
+def test_finalize_render_handles_missing_manuscript_gracefully(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """Missing manuscript.md returns an empty bib_key list — finalize
+    still rewrites the pool (with no citation_map) and writes empty
+    rendered files. The walker dispatch returns ([], []) when neither
+    section files nor manuscript.md exist; this is the partial-state
+    branch."""
+    _write_citation_pool(orch.draft_dir, ["Smith2020"])
+    # No manuscript.md, no per-section files.
+
+    orch._finalize_citation_render()
+
+    # references.md is created but is the "uncited entries only" form.
+    assert (orch.draft_dir / "references.md").is_file()
+    # citation_map.md is created but contains no entries (empty mapping).
+    assert (orch.draft_dir / "citation_map.md").is_file()
+    # Pool gets rewritten with empty citation_map.
+    pool_after = json.loads(
+        (orch.draft_dir / "citation_pool.json").read_text()
+    )
+    assert pool_after.get("citation_map", {}) == {}
+
+
+def test_finalize_render_handles_malformed_pool_gracefully(
+    orch: PaperWriterOrchestrator,
+    caplog,
+) -> None:
+    """A malformed pool JSON triggers a WARNING + early return.
+    Same fail-loud-then-continue discipline as the missing-pool case."""
+    (orch.draft_dir / "citation_pool.json").write_text(
+        "this is not valid JSON", encoding="utf-8",
+    )
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nCite [Smith2020].\n", encoding="utf-8",
+    )
+    import logging
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        orch._finalize_citation_render()
+
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "failed to load pool" in msgs
+    assert not (orch.draft_dir / "references.md").is_file()

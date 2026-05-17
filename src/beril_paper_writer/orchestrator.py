@@ -1115,10 +1115,143 @@ with the citation key in the manuscript.
             else:
                 logger.info("No [NEEDS CITATION] markers found. Skipping.")
 
+        # Stage 4 Tier R-2 (2026-05-17): render references.md /
+        # citation_map.md from the final post-supplementary pool. The
+        # citation_pool.v1.md prompt explicitly tells the LLM NOT to
+        # write those two files because the renderer is the
+        # post-processor; the bash flow (paper_writer.sh phase_assemble)
+        # invoked `citation_pool.py finalize` for exactly this purpose,
+        # but the Python orchestrator port dropped the call, so the
+        # files have been 0 bytes since v0.8.0. This call wires the
+        # contract back together against the v0.8 holistic flow.
+        self._finalize_citation_render()
+
         # Stage 2 Tier D: supplementary_pool → compliance_gate
         # (was: → review). In the new order, supplementary_pool runs
         # AFTER review/optimize, so the next step is compliance.
         self.advance_phase("compliance_gate")
+
+    def _finalize_citation_render(self) -> None:
+        """Stage 4 Tier R-2: render references.md / citation_map.md /
+        bibliography.bib from the final post-supplementary citation pool.
+
+        Walks manuscript.md (v0.8 holistic flow) — or per-section files
+        when present (legacy sectional flow) — for ``[bib_key]`` marks,
+        populates the pool's ``citation_map`` and ``first_cited_at`` in
+        first-citation order, then writes the four rendered artifacts to
+        the draft directory.
+
+        Failure mode: advisory. A non-existent pool, malformed pool
+        JSON, or missing manuscript.md logs a WARNING and returns —
+        the pipeline continues toward compliance_gate and assemble.
+        The empty files would just regress to today's behavior (the
+        bug we are fixing), so degrading silently is acceptable.
+
+        Side effects on disk:
+          - <draft_dir>/references.md      (rendered bibliography)
+          - <draft_dir>/citation_map.md    (claim/section → ref# index)
+          - <draft_dir>/bibliography.bib   (standard BibTeX)
+          - <draft_dir>/citation_pool.json (overwritten with citation_map populated)
+          - <draft_dir>/finalize_warnings.md (orphan-citation warnings)
+        """
+        # Late import — citation_pool depends on the dataclasses package
+        # and a clean import of skill.tools, both heavier than this
+        # orchestrator's critical-path startup cost. Loading here keeps
+        # the orchestrator's import graph thin.
+        from beril_paper_writer.skill.tools import citation_pool as cp
+
+        pool_path = self.draft_dir / "citation_pool.json"
+        if not pool_path.is_file():
+            logger.warning(
+                f"Stage 4 Tier R-2: pool file {pool_path} not present; "
+                "skipping citation render. references.md / citation_map.md "
+                "will be empty — this regresses to the pre-fix state."
+            )
+            return
+
+        try:
+            raw = pool_path.read_text(encoding="utf-8")
+            import json as _json
+            pool = cp.CitationPool.from_dict(_json.loads(raw))
+        except (OSError, ValueError) as e:
+            logger.warning(
+                f"Stage 4 Tier R-2: failed to load pool from {pool_path}: "
+                f"{e!r}. Skipping citation render."
+            )
+            return
+
+        cp.assign_bib_keys(pool)  # idempotent
+
+        try:
+            ordered_keys, locations = cp.extract_citekeys_in_first_citation_order(
+                self.draft_dir,
+            )
+        except OSError as e:
+            logger.warning(
+                f"Stage 4 Tier R-2: failed walking draft for [bib_key] marks: "
+                f"{e!r}. Skipping citation render."
+            )
+            return
+
+        pool_keys = {e.bib_key for e in pool.entries if e.bib_key}
+        resolved_keys = [k for k in ordered_keys if k in pool_keys]
+        orphan_keys = [k for k in ordered_keys if k not in pool_keys]
+
+        pool.citation_map = {}
+        pool.first_cited_at = {}
+        cp.assign_citation_numbers(pool, resolved_keys)
+        for key, section, para in locations:
+            if key not in pool.citation_map:
+                continue
+            n = pool.citation_map[key]
+            if n in pool.first_cited_at:
+                continue
+            pool.first_cited_at[n] = {"section": section, "paragraph": str(para)}
+
+        try:
+            paths = cp.serialize_to_disk(
+                pool, self.draft_dir, pool_filename=pool_path.name,
+            )
+        except (OSError, ValueError) as e:
+            logger.warning(
+                f"Stage 4 Tier R-2: serialize_to_disk failed: {e!r}. "
+                "Some rendered files may be partial."
+            )
+            return
+
+        # Orphan warnings (mirror _cmd_finalize's behavior, but written
+        # only when there's something to say).
+        if orphan_keys:
+            warnings_path = self.draft_dir / "finalize_warnings.md"
+            lines = ["# Citation Finalize Warnings", ""]
+            lines.append(
+                f"**{len(orphan_keys)} orphaned citation(s)** — bib_keys "
+                f"cited in prose but not present in the pool. The user "
+                f"must add these to the pool (or remove the citation "
+                f"from prose) before submission."
+            )
+            lines.append("")
+            for key in orphan_keys:
+                occurrences = [(s, p) for (k, s, p) in locations if k == key]
+                lines.append(f"- `[{key}]` — orphaned (not in pool):")
+                for s, p in occurrences[:5]:
+                    lines.append(f"    - {s}, paragraph {p}")
+                if len(occurrences) > 5:
+                    lines.append(
+                        f"    - ...and {len(occurrences) - 5} more occurrence(s)"
+                    )
+            warnings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            logger.warning(
+                f"Stage 4 Tier R-2: {len(orphan_keys)} orphan citation(s) "
+                f"written to {warnings_path}."
+            )
+
+        logger.info(
+            f"Stage 4 Tier R-2: citation render complete. "
+            f"{len(resolved_keys)} cited, {len(orphan_keys)} orphaned, "
+            f"{len(pool.entries) - len(resolved_keys)} pool entries uncited. "
+            f"Files rewritten: {sorted(paths.keys())}."
+        )
 
     async def phase_review(self):
         logger.info("Running tiered review cascade (M3)...")
@@ -1158,8 +1291,17 @@ with the citation key in the manuscript.
         #      via absolute path (Tier J discipline: no bare-name PATH
         #      lookup). On non-zero exit, log ERROR but advance — the
         #      optimizer's missing-findings check will skip cleanly.
-        (self.draft_dir / "references.md").touch(exist_ok=True)
-        (self.draft_dir / "citation_map.md").touch(exist_ok=True)
+        #
+        # Stage 4 Tier R-3 (2026-05-17): the defensive `.touch()` of
+        # references.md / citation_map.md that lived here has been
+        # removed. It was a workaround for the missing
+        # citation_pool.finalize call (now wired in
+        # phase_supplementary_pool via _finalize_citation_render), and
+        # actively masked the contract break — review consumers saw
+        # empty files instead of MissingFile and so never flagged the
+        # bug until draft_1 of the v0.8.0 live test. Adversarial
+        # reviewer tolerates missing files; if it ever doesn't, the
+        # fix belongs there, not in a paper-writer-side stub.
 
         if self.no_adversarial:
             logger.info(
