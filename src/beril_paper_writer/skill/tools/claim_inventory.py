@@ -14,7 +14,7 @@ for the schema fields. Decision per STAGED_IMPROVEMENT_PLAN.md
 Stage 1 Tier E: keep, don't delete, don't invest further until
 a consumer surfaces.
 
-Per SPEC_v0_8 §4.6 + DECISIONS.md D-034 Q2:
+Per SPEC §4.6 + DECISIONS.md D-034 Q2:
 
   v0.7.x's M7 validator (numerical claims have n + effect size + 95% CI)
   checks the manuscript AFTER drafting. v0.8 inverts: produce the
@@ -2383,7 +2383,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "Walks REPORT.md, surfaces every numeric assertion as "
             "claim_inventory.tsv with effect_size/CI/p-value flags, "
             "appends an audit JSONL line to <output-dir>/audit/phase0.jsonl. "
-            "See SPEC_v0_8 §4.6 + DECISIONS.md D-034 Q2."
+            "See SPEC §4.6 + DECISIONS.md D-034 Q2."
         ),
     )
     p.add_argument(

@@ -1,1056 +1,1256 @@
-# beril-paper-writer — Specification (v0.1)
+# beril-paper-writer — Specification (v0.8)
 
-> **Version notice (v0.6.5):** This document was written at v0.1 and has not
-> been comprehensively updated through v0.6.x. The core design intent
-> (§1–§4, §6–§8) remains accurate; implementation details (specific
-> validator counts, section ordering, gap-fill mechanics) may have
-> evolved. For current behavior, cross-reference LAYOUT.md (runtime
-> contracts), DECISIONS.md (D-001–D-033), and the per-version release
-> notes (RELEASE_NOTES_v0_*.md). A full SPEC refresh is planned for
-> v1.0.
+**Status:** SIGNED OFF — M0 complete 2026-05-07. M1 unblocked.
+**Authored:** 2026-05-07. **Decision context:** see auto-memory entry
+`project_paper_writer_v0_8_architecture.md`. All twelve sign-off items
+resolved (§19); Q11 housekeeping (rename of prior punch list) executed.
+**Relationship to existing docs:**
+- Supersedes `SPEC.md` (v0.1) for the architectural layer. SPEC.md's §1–§4
+  (purpose, scope, design premises, throughline mechanism) and §10 (ICMJE
+  AI-disclosure boilerplate) remain authoritative — v0.8 changes the
+  *pipeline* and *review machinery*, not the product mission.
+- Supersedes the prior `V0_8_0_PUNCH_LIST.md` (language-quality + post-checkers
+  on top of v0.7.x). That punch list's Tier-A prompt rules and Tier-B
+  post-checkers are absorbed into this spec's Phase 2 (holistic prompt
+  discipline) and Phase 3 (Tier-1/2 deterministic + light reviewer). The
+  punch-list file should be archived or renamed to
+  `archive-v0_8_language_quality_punch_list.md` once this spec is signed off.
+- Sister-skill contract: `beril-adversarial v0.7.x` (paper schema v2 → v3
+  trajectory). This spec assumes adversarial v0.7.0+ is installed; the Tier-3
+  reviewer is the canonical adversarial CLI invocation.
 
-**Status:** v0.1 — community-facing design rationale. Implementation
-shipped through v0.6.x. Decisions captured here are load-bearing for
-the build; changes require updates to [DECISIONS.md](DECISIONS.md).
-
-This document explains *what* the skill does and *why* the design choices were
-made. It is the document an external reviewer should read to decide whether to
-trust an output of this skill. [LAYOUT.md](LAYOUT.md) covers internal
-architecture (package shape, CLI, file paths). [README.md](README.md) is the
-quick-start.
-
----
-
-## 1. Purpose and scope
-
-### 1.1 What this skill does
-
-Takes a finished BERDL analysis project and produces a defensible, ICMJE-
-conformant scientific manuscript draft from its artifacts (research plan,
-report, notebooks, figures, references, optional adversarial review). Where
-the underlying work cannot support a rigorous claim, the skill says so and
-lists what would need to be done to bring it closer to publishability — it
-does **not** paper over evidence gaps with fluent prose.
-
-### 1.2 What this skill is NOT
-
-- Not a writer of clinical-trial papers (CONSORT scope), systematic reviews
-  (PRISMA scope), or diagnostic-test validation (STARD scope). v1 targets
-  computational reanalysis of public datasets (STROBE-adjacent rigor norms).
-- Not a journal-formatter. Output is generic IMRAD .docx; journal-specific
-  templating is post-MVP.
-- Not a figure generator. v1 reuses existing project figures only; missing
-  figures become explicit gap-fill requests.
-- Not a peer reviewer. The adversarial-review loop is for self-improvement
-  before submission, not a substitute for journal review.
-- Not a substitute for human authorship. ICMJE is unambiguous: AI tools
-  cannot be authors. The skill auto-emits an AI-disclosure paragraph
-  (per ICMJE January 2026); the user must fill in the actual author list,
-  funding, conflicts, and ethics statements.
-
-### 1.3 Who this skill is for
-
-BERIL users who have completed an analysis and want a defensible first
-manuscript draft, with the discipline to:
-
-- Refuse to write what the evidence doesn't support.
-- Surface alternative throughlines so the user, not the LLM, picks the story.
-- Make every citation, every methods statement, every numerical claim
-  traceable to a verified source (DOI/PMID for citations; notebook output
-  or REPORT.md line for numbers).
-- Hand off to harsh review and revise iteratively, with bounded cycles.
+This document is *what* v0.8 does and *why*. The *how* (package layout, file
+paths, state schema, CLI flags) is captured per-milestone in
+`LAYOUT_v0_8.md` (M1 deliverable when first touched) and pinned in
+`DECISIONS.md` as v0.8 entries land.
 
 ---
 
-## 2. Design premises (what we're optimizing for)
+## 1. Why v0.8 — three converging signals
 
-In rough order of priority:
+### 1.1 The per-section sprawl pattern (v0.4 → v0.7.x)
 
-1. **Honesty.** The manuscript must not fabricate citations, methods, or
-   numerical claims. Where evidence is thin, the writer says so. A paper-
-   writer that produces fluent-sounding manuscripts about thin work is more
-   dangerous than one that refuses; bad work made to look credible is the
-   primary failure mode to design against.
-2. **Auditability.** Every claim must trace to (a) a project artifact
-   (notebook output, REPORT.md line, figure file) or (b) a verified citation
-   in the citation pool. The reframing-log and citation-map make the trace
-   explicit and human-readable.
-3. **User judgment over LLM judgment** at the load-bearing decisions:
-   throughline pick, gap-fill take/defer, accepting unfixable issues as
-   limitations.
-4. **Bounded cost and latency.** Target $5–$15 per full run, 15–40 minutes.
-   Every loop has a hard cap. No infinite revise-review cycles.
-5. **Reuse over generation.** Reuse existing project figures, existing
-   methods text from REPORT/notebooks, existing citations from references.md.
-   Generate prose only for what doesn't already exist.
+Every live-test failure cycle in v0.4–v0.7.x produced a per-section patch:
+
+- v0.4: caption sufficiency gate, panel-count word budgets.
+- v0.5: boilerplate-aware sufficiency (`_strip_prose_for_inline`).
+- v0.6: tables pipeline (extract, manifest, post-check, embed).
+- v0.7.0/0.1: rewrite_passes counter, abstract italic labels, figure-manifest
+  + scope-coherence false positives, M2 sentence caps, abstract anti-patterns.
+- v0.7.2 (in flight): Data Availability fixes.
+- The deferred v0.8.0 punch list: 7 prompt rules + 3 advisory checkers.
+
+The pattern is asymptotic. Each patch closes one symptom of the same
+upstream weakness — the per-section orchestrator hands each prompt a slice
+of context and lets the prompt synthesize prose without seeing the whole
+manuscript's narrative arc. Symptoms surface downstream as register drift,
+echo repetition, sentence-complexity failures, scope-coherence false
+positives. Patching downstream is the wrong layer.
+
+### 1.2 The AI Scientist evidence (Lu et al., Nature 2026)
+
+The most-engineered automated-paper system to date — per-section LaTeX-fill
+pipeline + 20-round iterative citation injection + 5-reviewer ensemble +
+meta-reviewer — reached the **workshop bar but not the main-conference bar**
+for fully-AI papers (Lu et al., *Nature* 2026, doi:10.1038/s41586-026-10265-5;
+quote: "none met the higher bar for a main ICLR publication"). Per-section
+sophistication is not the missing ingredient. The bottleneck is upstream:
+story selection, integrative finding curation, novelty argumentation. v0.7.x
+already invests in per-section discipline; doubling down does not move the
+needle.
+
+What the AI Scientist work *does* validate as a building block: iterative
+citation rounds with adaptive stop and per-citation justification. v0.8 adopts
+that pattern (Phase 5) — calibrated to the BERIL setting with the verified
+citation pool as the source.
+
+### 1.3 The IBD one-shot exercise (2026-05-06/07)
+
+Adam ran `ibd_phage_targeting` through BERIL paper-writer v0.7.x and through
+a single Claude conversation with the `paper-review` skill. The two outputs
+diverged on which dimension each one won:
+
+- **BERIL won on methodology honesty.** ANCOM-BC failure disclosure,
+  AI-disclosure block, scope discipline. These trace directly to the Phase-0
+  tooling artifacts (methods_provenance, figures_manifest, citation_pool
+  with verify-by-resolution).
+- **The one-shot draft won on integrative biology.** NB07d/CC1 single-axis
+  claim featured as Results §4. Six-line cross-corroboration narratives
+  shaped Results §3. Hourglass arc end-to-end. These come from the model
+  seeing the whole project at once and synthesizing a story across the
+  evidence, not from per-section prompts knitting localized claims together.
+
+Conclusion: BERIL's competitive advantage is *not* the per-section prompts.
+It is the deterministic tooling that produces verifiable artifacts (provenance,
+citation pool, discrepancy register, claim inventory). The drafting layer
+should be a single holistic pass that consumes those artifacts; the review
+layer should catch what the holistic pass misses, with reviewer ensemble
+sized to actual failure modes rather than to a theoretical taxonomy.
 
 ---
 
-## 3. Inputs (what the skill expects)
+## 2. Design premises (what v0.8 is optimizing for)
 
-From the project directory (per the BERIL convention `projects/<id>/`):
+The five SPEC.md §2 premises (honesty, auditability, user judgment over LLM
+judgment, bounded cost, reuse over generation) carry forward. v0.8 adds two:
 
-- **`RESEARCH_PLAN.md`** (required) — the planned hypotheses and approach.
-  Used to detect gap between plan and what was actually done; used in
-  Introduction/Methods context.
-- **`REPORT.md`** (required) — the canonical synthesized findings. The
-  manuscript MUST NOT silently contradict REPORT; reframing is logged
-  explicitly in `reframing_log.md`.
-- **`README.md`** (optional) — project-level context, often includes
-  one-paragraph summary.
-- **`REVIEW.md`, `ADVERSARIAL_REVIEW_*.md`** (optional but strongly used) —
-  prior reviews flag known weaknesses the manuscript must engage with rather
-  than restate as findings.
-- **Notebooks** (`*.ipynb`) — source of truth for methods (algorithms,
-  parameters, package versions) and numerical claims. Methods section is
-  *extracted* from notebooks, not generated from a free prompt.
-- **Figures** (`figures/*.png` or similar) — reused as-is for the manuscript;
-  selection logic chooses 4–8 of typically 30+ project figures.
-- **`references.md`** (optional) — pre-existing citations. If absent, the
-  skill builds a citation pool from scratch via literature search.
+6. **Subtraction over addition.** Most v0.4–v0.7.x complexity is patching
+   downstream symptoms of upstream prompt weakness. The v0.8 simplification
+   is mostly removal. Tooling investment (Phase 0) is the only net-new
+   engineering; everything else is reorganization of existing components.
+7. **Failure-mode-driven review tiering.** Reviewer cost should match the
+   class of failure being detected. Cheap deterministic checks for cheap
+   problems (section presence, citation resolution, manifest cross-walks).
+   A light Haiku-class reviewer for narrative problems with reproducible
+   detection patterns. The expensive canonical adversarial only after the
+   cheap layers have done their job.
 
-### 3.0.1 RESEARCH_PLAN.md expected structure
+---
 
-The Methods agent reads `RESEARCH_PLAN.md` to extract design intent
-(per §6.3). Because the plan is user-authored and varies in style, the
-writer expects at minimum these sections (any header level, fuzzy match
-on synonyms):
+## 3. Pipeline overview — the 8-phase architecture
 
-- **Hypothesis / Research Question** — what is being asked
-- **Planned Methods / Approach** — how it will be answered
-- **Analysis Plan / Statistical Methods** — what tests, what corrections,
-  what success criteria (where applicable)
+```
+Project artifacts (REPORT, RESEARCH_PLAN, notebooks, figures, references.md)
+   │
+   ▼
+[Phase 0]   Deterministic tooling (run-once per project, idempotent)
+   │       ├── methods_provenance.md   (existing v0.7.x)
+   │       ├── citation_pool/pool.json (existing v0.7.x; verify-by-resolution)
+   │       ├── figures_manifest.tsv +
+   │       │   figures_inventory.md    (existing v0.7.x)
+   │       ├── tables_inventory.md +
+   │       │   tables_manifest.tsv     (existing v0.7.x)
+   │       ├── discrepancy_register.md (NEW)
+   │       └── claim_inventory.md      (NEW)
+   ▼
+[Phase 1]   Story builder (INTERACTIVE — the load-bearing user gate)
+   │       Input: target journal + arc preference + author block.
+   │       Output: 1-page outline + figure/table budget. User approves
+   │       or amends; on amend, re-emit until approval.
+   ▼
+[Phase 2]   Holistic write (one pass)
+   │       Input: ALL Phase-0 artifacts + Phase-1 outline.
+   │       Output: complete manuscript.md (all sections in one call).
+   │       System prompt ≤300 lines.
+   ▼
+[Phase 3]   Tiered review cascade with fail-fast
+   │       ├── Tier 1: deterministic + minimal LLM (~2–5K tokens). Cap 2 passes.
+   │       ├── Tier 2: Haiku + subset of beril-adversarial classes
+   │       │           (~10–15K tokens). Cap 2 passes.
+   │       └── Tier 3: Sonnet + full beril-adversarial v3 canonical.
+   │                   Run once; retry once on P0 only. Cap 2 passes.
+   ▼
+[Phase 4]   Selective per-section optimizers
+   │       ├── Abstract optimizer (always, bounded).
+   │       ├── Methods reproducibility audit (always, deterministic).
+   │       └── Other sections only if reviewer-flagged.
+   ▼
+[Phase 5]   Iterative citation rounds (5–8 adaptive)
+   │       Per-citation justification + integration + manuscript re-check.
+   │       Adaptive stop: 2 consecutive rounds with no new candidates.
+   ▼
+[Phase 6]   Compliance gate (deterministic; build-fails-if-missing)
+   │       ICMJE structural items, AI-disclosure block, data-availability,
+   │       reference-list integrity.
+   ▼
+[Phase 7]   Copy edit (low-temp, narrow-scope, diff-capped)
+   │       Forbidden from changing claims, structure, or citations.
+   │       Cap on lines changed per pass.
+   ▼
+[Phase 8]   Final docx (existing v0.3+ figure-embedding pipeline)
+```
 
-If `RESEARCH_PLAN.md` is present but lacks these sections, the Methods
-agent reports `"RESEARCH_PLAN.md does not contain expected sections
-(Hypothesis, Planned Methods, Analysis Plan); proceeding with
-methods-only grounding from notebooks. Design rationale will be
-incomplete in Methods."` and treats the project as if no plan-level
-intent were available. This is a soft warning, not a fail.
+Each phase has: an idempotent contract, a state.json checkpoint, an
+audit/ artifact, and a halt-to-handoff failure path that preserves the
+parser-facing `phase=halted` shape from v0.7.x.
 
-### 3.0.2 Empty or near-empty REPORT.md
+---
 
-If `REPORT.md` exists but is empty or under ~500 characters (no
-synthesized findings, only headers, or a stub):
+## 4. Phase 0 — Deterministic tooling
 
-- Plan-phase triage MUST classify the project as EXPLORATORY (overriding
-  any other heuristic), per §3.1.
-- The writer emits a gap-fill request (type: `analysis-request`):
-  *"REPORT.md is empty or stub-only. Please run `/synthesize` to produce
-  a structured REPORT, or add narrative findings manually before
-  drafting can proceed past Plan phase."*
-- The writer pauses; on `continue` it re-reads `REPORT.md` and proceeds
-  if content is now present. If the user invokes `continue` without
-  populating REPORT, the writer offers `--mode report` as the only
-  available output (REPORT mode does not require a structured findings
-  section, only a notebooks-as-source narrative).
+Phase 0 is the load-bearing competitive advantage and the only net-new
+engineering investment. Everything in §4.1–§4.4 already ships in v0.7.x;
+§4.5–§4.6 are NEW for v0.8.
 
-### 3.1 Project-quality triage
+### 4.1 methods_provenance.md (KEPT — `extract_methods.py`)
 
-Before drafting, the skill classifies the project (this becomes part of the
-Plan-phase user gate):
+No change to extraction. Phase 2's holistic prompt consumes the same
+provenance artifact methods.v1 currently consumes. Keep `extract_methods.py`,
+keep its contracts, keep its tests.
 
-- **STRONG** — REPORT has clear research question, methods, numbered findings
-  with effect sizes / CIs / FDR-corrected p-values, explicit limitations.
-  Examples in our test corpus: `functional_dark_matter`, `cf_formulation_design`.
-  → Proceed to drafting.
-- **THIN** — Novel finding but methodological gaps, incomplete analyses
-  (e.g., "Act II deferred"), sparse statistical reporting.
-  Example: `genotype_to_phenotype_enigma` (Act I publication-ready as a
-  dataset/methods paper; Act II not yet).
-  → Surface scope-down options to user (write narrower paper on what's
-  actually done; or wait for additional analyses).
-- **EXPLORATORY** — Proof-of-concept, single analysis layer, no validation,
-  small n.
-  → Emit warning: "This project is EXPLORATORY-tier. The output will be an
-  exploration report, not a research paper." Proceed with drafting using
-  the **exploration-report template** (§3.2): same IMRAD shell, but with
-  explicit title/abstract framing ("Preliminary exploration of..." /
-  "Exploratory analysis suggests..."), expanded Limitations section, and
-  a substantive Future Work section enumerating what would be needed to
-  reach publishability. Honest reporting of what was attempted and what
-  was learned — including null and negative findings — is the goal.
-  Refusing to draft would lose the value of exploratory work; producing
-  a paper that overclaims the evidence would be worse than refusing.
-  This middle path is the v0.1 design.
+### 4.2 citation_pool/pool.json (KEPT — `citation_pool.v1` + `citation_pool.py`)
 
-The triage verdict is shown to the user before drafting begins.
+The verified-citation-pool builder is the most expensive Phase-0 component
+($1–$3 per run; 30–80 verified entries) and the most defensive. Reused as-is.
+v0.8 changes citation *use* (Phase 5's iterative rounds) but not citation
+*acquisition*.
 
-### 3.1.1 What "evidence-strength framing" means
+### 4.3 figures_manifest.tsv + figures_inventory.md (KEPT — `extract_figures.py`)
 
-"Framing" is *prompt-driven*, not a mechanized rule. Each per-section
-agent (plan, methods, results, discussion, intro, abstract) receives
-the tier as a parameter; the system prompt for each section adjusts:
+Reused as-is. The v0.4/v0.5 sufficiency gate, panel-count caption budgets,
+and Source-4 LLM caption synthesis remain in Phase 8's docx pipeline.
 
-- **Language conservatism** — declarative ("X causes Y") vs scoped
-  ("X correlates with Y in our cohort") vs preliminary ("X may relate
-  to Y")
-- **Claim certainty** — whether assertions are flagged as
-  hypothesis-tested vs hypothesis-generating
-- **Discussion scope** — engages contrasts with prior work (STRONG)
-  vs engages with caveats (THIN) vs hypothesis-generating only
-  (EXPLORATORY)
-- **Limitations weight** — required (STRONG), required and expanded
-  (THIN), substantially expanded with explicit "what would be needed
-  for rigor" (EXPLORATORY)
+### 4.4 tables_inventory.md + tables_manifest.tsv (KEPT — `extract_tables.py`)
 
-Because framing is prompt-driven, the exact language varies with model
-and prompt revision. The §3.2.1 / §3.2.2 tables describe the *intent*
-per tier; per-section system prompts encode the language patterns.
-Mechanical validators (M1–M10) do not enforce framing.
+Reused as-is. v0.6's full tables pipeline (extract → inventory → LLM selection
+→ manifest → check → embed) is invoked from Phase 8.
 
-### 3.2 Output mode and tier (orthogonal axes)
+### 4.5 discrepancy_register.md (NEW — `discrepancy_register.py`)
 
-The writer has two independent dimensions:
+**Purpose.** Plan-vs-execution diff scanner. Surfaces every place where
+RESEARCH_PLAN.md prescribed an analysis the notebooks did not execute, OR
+the notebooks executed an analysis the plan did not prescribe. This is what
+the v0.7.x reframer.v1 prompt does *post hoc, in prose*, after the manuscript
+exists. v0.8 lifts it upstream: the holistic write sees the discrepancies
+*before* it drafts, and the manuscript opens with a footing already
+calibrated to actual execution rather than to the plan's intent.
 
-- **`--mode`** controls the *output shape*:
-  - `paper` — IMRAD research paper with claims, abstract, references,
-    discussion. Aimed at journal submission.
-  - `report` — structured activity report describing what was done
-    and what was observed. No claims-of-significance framing, no
-    abstract-as-claim, no discussion-as-interpretation. Aimed at
-    internal documentation, handoff, lab-notebook write-up.
+**Inputs.**
+- `methods_provenance.md` (notebook-grounded methods).
+- `RESEARCH_PLAN.md` (intent).
+- Optional: prior `reframing_log.md` if a draft already exists for this project.
 
-- **Tier** (STRONG / THIN / EXPLORATORY) controls the *evidence-strength
-  framing within that shape*. Determined by triage; influences how
-  claims are framed and how aggressive the limitations / future-work
-  discussion is.
+**Output schema** (markdown, append-only across drafts):
 
-Default mode is determined by tier but is overridable:
+```markdown
+# Discrepancy Register
 
-| Tier | Default mode | Notes |
+## D-001 — type: plan-prescribed-not-executed
+- Plan §X: "Welch's t-test with α=0.05 across 343 conditions"
+- Execution: notebook NB04 cell 12 implements Mann-Whitney U; α not stated.
+- Severity: load-bearing (claim N depends on choice of test).
+- Recommendation: report Mann-Whitney U in Methods; re-state Hypothesis
+  framing in Intro; note in Limitations if power changed.
+
+## D-002 — type: executed-not-prescribed
+- Plan: silent on multiple-testing correction.
+- Execution: NB04 cell 18 applies Benjamini-Hochberg FDR.
+- Severity: cosmetic (plan was incomplete; execution is correct).
+- Recommendation: surface in Methods; no other section impact.
+```
+
+**Severity scale:** `load-bearing` (claim depends on the discrepancy) /
+`cosmetic` (transparent improvement) / `unclear` (needs human review).
+
+**Cost.** Deterministic Python + small LLM pass (~2K tokens) for the
+plan-text classification. **Tracked, not gated** (D-037, 2026-05-07):
+the per-call constant `_COST_CEILING_USD = 0.05` remains as
+informational; audit JSONL records cost per run; no stderr warning
+or smoke gate fires on overrun. **Decided 2026-05-07 (Q1):** LLM-
+assisted, not pure string-match — synonym/paraphrase robustness
+required for hand-authored RESEARCH_PLAN.md text. **Q1 deferred
+2026-05-07 (D-035):** re-evaluation requires fixing two upstream
+defects (plan-side heading regex too narrow; overlap-ratio threshold
+too restrictive on prose-heavy bullets) which are v0.9 architectural
+work; on `ibd_phage_targeting` the LLM never fires because the
+deterministic pre-pass produces zero overlap candidates.
+
+**Why upstream rather than post hoc.** v0.7.x's reframer.v1 runs *after*
+sections are drafted; if the manuscript has already woven a plan-prescribed
+claim into Results, the reframer must rewrite Results, Methods, and
+Limitations to reconcile. Lifting discrepancy detection into Phase 0 lets
+the holistic write avoid the contradiction in the first place. This is the
+single largest lever for the holistic-write quality story.
+
+**Tests (M1).** Synthetic projects with each discrepancy type; confirm
+register schema validation; confirm idempotent re-run.
+
+### 4.6 claim_inventory.md (NEW — `claim_inventory.py`)
+
+**Purpose.** Index of every numeric assertion in REPORT.md, traced to its
+notebook source (NB#:cell:line) and its supporting figure/table if any.
+v0.7.x's M7 validator (numerical claims have n + effect size + 95% CI) checks
+the *manuscript* after drafting. v0.8 inverts: produce the inventory of
+claimable numbers up front, then the holistic write picks from the inventory
+rather than invents numbers.
+
+**Inputs.**
+- `REPORT.md` (canonical findings).
+- `methods_provenance.md` (so each numeric claim can be linked to the
+  notebook cell that produced it).
+- `figures_inventory.md` + `tables_inventory.md` (cross-link to display items).
+
+**Output schema (TSV, machine-readable for the holistic prompt's grounding):**
+
+```
+claim_id  claim_text                                  source_notebook  source_cell  figure_or_table  effect_size_present  ci_present  pvalue_present  notes
+C001      "88.2% of E1 Tier-A signs concordant"      NB07d            14           Fig 3            yes                  yes         yes             primary
+C002      "95 of 343 conditions with AUC > 0.75"     NB04             18           Tbl 2            no                   no          no              uncorrected; M7 risk
+C003      "16.2 mg/L MIC for compound X"             NB02             7            Fig 1B           no                   no          no              cosmetic
+```
+
+**Schema rationale.** Phase 2's holistic prompt is told: *"Every numeric
+claim in your manuscript must reference a `claim_id`. Claims without a
+`claim_id` are forbidden. Claims with `effect_size_present=no` AND
+`ci_present=no` AND `pvalue_present=no` must be qualified with the
+appropriate hedge."* This collapses the M7 validator from a post-hoc regex
+into a constructive constraint at draft time.
+
+**Cost.** Deterministic regex extraction over REPORT.md + small LLM pass for
+ambiguous claim demarcation. **Tracked, not gated** (D-037, 2026-05-07):
+constant `_DEMARCATOR_COST_CEILING_USD = 0.10` remains as informational;
+audit JSONL records cost; no stderr warning or smoke gate fires on
+overrun. The B1.e regex catalog extension (D-036) raised observed
+demarcator workload on dense projects (`ibd_phage_targeting`: ~133
+multi-numeric sentences ≈ ~$1.00/run with Haiku 4.5 in the B1.f batched
+path); cap will be re-tuned from observed data at M2 orchestrator layer
+rather than per-tool.
+
+**Batched demarcation (B1.f, D-038, 2026-05-07).** Demarcator calls are
+chunked at `--batch-size` (default 15). The LLM sees per-batch local
+indices [0..batch_size); the tool offsets back to absolute indices
+into `unresolved_candidates` before validation, sums per-call costs,
+and validates full coverage. Default batch size of 15 was calibrated
+on `ibd_phage_targeting` after a 133-candidate single call truncated
+the LLM output (only 91 indices covered → exit 4) and a follow-up run
+hit the subprocess wrapper's 180s timeout. Batching trades
+"single-LLM-call latency" for "predictable per-call latency × N
+batches"; total per-run cost on dense projects is now `ceil(N /
+batch_size) × ~$0.10`. The cache key includes `batch_size` so changing
+the chunk size invalidates the idempotency cache.
+
+**Cite allowlists in the demarcator user prompt (B1.h, D-040,
+2026-05-07).** `build_demarcator_user_prompt` extracts every notebook
+path from methods_provenance.md and every `Fig N`/`Tbl N`/`Table N`
+label from figures_inventory.md + tables_inventory.md, then emits
+two explicit "VALID values" allowlists ABOVE the INPUTS section of
+the user prompt. The system prompt at `prompts/claim_demarcate.v1.md`
+gains anti-pattern worked examples covering: (1) notebook-name
+truncation (paraphrasing by scientific subject instead of copying the
+literal filename), (2) treating a notebook ID as a figure label.
+Driven by live-LLM smoke after B1.g where the demarcator emitted
+`notebooks/NB07a_H3a_falsifiability.ipynb` (real:
+`notebooks/NB07a_pathway_DA_H3a_falsifiability.ipynb`) and
+`figure_or_table="Fig NB15"`. The validator's per-row checks remain
+unchanged; the allowlist is a guide, not a gate.
+
+**Bounded retry + tolerated_missing fallback (B1.g, D-039, 2026-05-07).**
+Even with batching, the live Haiku 4.5 demarcator non-deterministically
+drops 1–3 input candidates per dense-project run (different indices
+each run; ~98% per-batch coverage). After the initial batched pass,
+missing indices are re-batched into a fresh LLM call, up to
+`max_retries=3` rounds. Indices that remain missing after retries fall
+back to the original `notes='unresolved'` row via
+`expand_with_demarcations`' defensive empty-rows pass-through. The
+validator's `allow_missing` kwarg allows residuals through coverage
+without failing exit 4. The cache schema gains a `tolerated_missing`
+field so reruns are byte-stable. M2's holistic prompt sees a mix of
+demarcated rows (notes='') and rare unresolved rows (notes='unresolved')
+and is responsible for hedging the latter.
+
+**Notebook-cite grounding (B1.e, 2026-05-07).** The validator accepts
+`source_notebook` if EITHER (a) substring of `methods_provenance.md`
+OR (b) the path resolves to an existing file under
+`<project-root>/`. The disk-fallback was added after live-LLM smoke
+on `ibd_phage_targeting` revealed `methods_provenance.md` covers only
+~40% of project notebooks (the AST extractor in `extract_methods.py`
+catalogs only notebooks with detected stat-test invocations, missing
+those that produce numerics via pandas/SQL/custom code). Anti-
+fabrication discipline is preserved by the `is_file()` requirement —
+the LLM cannot cite a path that doesn't exist on disk. Tests pass
+synthetic fixtures with `project_root=None` and rely on the substring
+path; production runs derive `project_root` from
+`methods_provenance.md`'s expected layout
+(`<project>/papers/draft_N/methods_provenance.md`) or take an
+explicit `--project-root` flag.
+
+**Regex catalog (B1.e, D-036, 2026-05-07).** 11 pattern classes
+(extended from 6 in B1.b): `percentage` (now whitespace-tolerant),
+`ratio_with_unit`, `p_value` (now accepts ≤/≥ + dot-less mantissa),
+`confidence_interval`, `n_count`, `metric` (AUC/R²/RMSE/MAE),
+`correlation` (r/ρ), `odds_ratio` (OR), `log_fc` (log₂FC), `count_of`
+(M of N / M / N), `cliff_delta` (cliff δ). Recall on the
+ibd_phage_targeting ground-truth check: 0.562 (B1.b) → 1.000 (B1.e).
+
+**Coverage policy.** **Decided 2026-05-07 (Q2):** full coverage — every
+numeric claim in REPORT.md gets a `claim_id`. No salience filter in v0.8.0.
+The holistic prompt's word budget is the natural cut. Inventory size for
+dense projects (functional_dark_matter expects ~40–80 claim_ids) is
+tractable at the TSV level. If a future project's inventory exceeds ~150
+claim_ids and the holistic prompt's input budget is strained, revisit at
+v0.8.x.
+
+**Tests (M1).** Smoke against ibd_phage_targeting; confirm every numeric
+claim in REPORT.md surfaces with a `claim_id`; confirm each claim_id resolves
+to an extractable notebook cell.
+
+### 4.7 Shared Phase-0 contracts
+
+- All Phase-0 artifacts live in `papers/draft_N/` (the per-draft directory),
+  not at the project root. Different drafts may want different inventories
+  (e.g., a STRONG-tier paper draft and a separate exploration-report draft
+  should each get their own claim_inventory).
+- Each Phase-0 tool emits an entry to `papers/draft_N/audit/phase0.jsonl`:
+  invocation timestamp, inputs hashed, outputs written, exit status, cost.
+- Re-running Phase 0 with unchanged input hashes is a no-op (read cache from
+  audit log; re-emit identical artifacts).
+
+---
+
+## 5. Phase 1 — Story builder (interactive)
+
+**Decided 2026-05-07 (Q3):** STRONG/THIN/EXPLORATORY triage (SPEC.md §3.1)
+is rolled into the story builder; no separate triage phase. The story
+builder's outline is tier-shaped — section budgets, framing language, and
+limitations weight follow from the inferred tier. The triage verdict is
+recorded explicitly in `00_story_outline.md`'s frontmatter so Phase 2's
+holistic prompt and Phase 3's reviewers can reference it.
+
+### 5.1 Why this phase exists separately from Phase 2
+
+The throughline-pick gate (SPEC.md §4) was the v0.7.x mechanism for keeping
+a human in the loop on the load-bearing scientific decision. v0.8 keeps that
+intent and elevates it: in v0.7.x the user picks among 2–3 candidates *before*
+the writer has seen the whole project; in v0.8 the user picks among
+candidates *that have been calibrated to* the discrepancy register and claim
+inventory.
+
+### 5.2 Input contract
+
+User-facing slash command `/beril-paper-writer` collects (or auto-detects):
+
+| Field | Value | Source |
 |---|---|---|
-| STRONG | `paper` | User may pick `report` for internal documentation use |
-| THIN | `paper` (scope-narrowed) | User may pick `report` if scope-down is too restrictive |
-| EXPLORATORY | `report` | User may pick `paper` and accept the exploration-paper template (see §3.2.2) |
+| target_journal | venue name OR "generic-IMRAD" OR "exploration-report" | user supplies; defaults to "generic-IMRAD" |
+| arc_preference | "hourglass" / "linear" / "case-study" / "auto" | user supplies; defaults to "auto" |
+| author_block | author list, affiliations, corresponding author | from `RESEARCH_PLAN.md` "Authors" section if present; otherwise prompted |
+| word_target | per-section soft caps OR "default" | "default" = 4000 main text |
+| figure_budget | integer 4–10 | from figures_inventory.md count, capped at 10 |
 
-### 3.2.1 `--mode paper` template per tier
+### 5.3 Output: 1-page outline + figure budget
 
-| Section / Check | STRONG | THIN | EXPLORATORY (paper override) |
-|---|---|---|---|
-| Title framing | declarative ("X causes Y") | scoped ("In our cohort, X correlates with Y") | preliminary ("Preliminary exploration of X–Y relationship") |
-| Abstract conclusions | substantive claims | narrower claims | observations + caveats |
-| Methods rigor | M-tier validators all in force | M-tier in force; gaps logged | M-tier in force; expect more `[NEEDS CITATION]` and limitations |
-| Results | full | scope-narrowed | includes null/negative findings prominently |
-| Discussion novelty | engages contrasts with prior work | engages with caveats | hypothesis-generating, not hypothesis-testing |
-| Limitations | required, substantive | required, expanded | substantially expanded; explicit "what would be needed for rigor" |
-| Next Steps | optional but recommended | recommended | required, structured (data needs / analysis needs / experimental validation) |
-
-### 3.2.2 `--mode report` template (any tier)
-
-Activity-report structure (NOT IMRAD):
-
-1. **Project Summary** — one paragraph: what was the question, what
-   was done, what was observed.
-2. **Background and Question** — context from `RESEARCH_PLAN.md`; no
-   field-positioning beyond what the project itself states.
-3. **What Was Done (Methods)** — narrative of the actual analysis,
-   grounded in notebooks per §6.3. Same provenance discipline as
-   paper mode; no methods-fabrication.
-4. **What Was Observed (Findings)** — descriptive presentation of
-   results; figures embedded; numerical claims traceable to artifacts.
-   No abstract-of-significance framing; the reader draws their own
-   conclusions.
-5. **Observations and Open Questions** — what stood out; what's
-   unclear; what would be worth investigating next. NOT a "Discussion"
-   section: no novelty-positioning, no field-context, no claims of
-   significance.
-6. **Limitations and Caveats** — honest scope of what was and wasn't
-   examined.
-7. **Next Steps** — what would need to happen to reach a paper-grade
-   claim, or what other directions look promising.
-8. **Appendices** — any analyses that didn't fit the main narrative,
-   per §1.
-
-Citation pool, methods grounding, and validator subset (subset of
-M1–M10) still apply. Validators that don't apply to report mode (e.g.,
-M2 Structured Abstract — reports don't have abstracts) are skipped;
-the writer's run log records which validators were applied vs. skipped.
-
-All three tiers + both modes go through the same drafting pipeline
-(Plan → Throughline → Drafting → Citation pool → Review → Rewrite);
-the *output template* and *framing emphasis* shift, not the underlying
-mechanism.
-
-### 3.3 THIN-tier scope-down mechanism
-
-For THIN-tier projects, the Plan-phase agent extracts both:
-
-- **Broad throughline candidates** (the typical 2–3 from §4) that cover
-  the project's stated scope, and
-- **One narrowed-claim candidate** that scopes down to the strongest
-  paper-ready sub-claim the project actually supports.
-
-The narrowed candidate is presented in the same throughline-pick UI as
-the broader options, with explicit annotation: *"This is the strongest
-sub-claim that meets paper-grade rigor; the broader candidates require
-addressing the gaps listed in `analysis_requests.md`."* The user picks
-as usual. If they pick the narrowed candidate, the writer proceeds in
-`--mode paper`; if they pick a broader one, the writer continues in
-`--mode paper` but flags that gap-fills will be needed before any
-adversarial review will accept it. If they want neither, `--mode report`
-is offered as the third option.
-
-This makes the THIN-tier UX an explicit choice, not a silent scope-down.
-
----
-
-## 4. The throughline mechanism (the highest-risk step)
-
-### 4.1 Why this matters
-
-The throughline — the story the paper tells — determines what gets written.
-An LLM left to auto-pick will favor narratives that are easy to write
-(linear, single-hypothesis, dramatic) over narratives that fit the data
-(often messy, multi-hypothesis, partial). This is the single most important
-place to keep humans in the loop.
-
-### 4.2 Mechanism
-
-The Plan-phase agent extracts 2–3 candidate throughlines from the project
-artifacts. Each candidate has:
-
-- **Claim** — the central scientific assertion (one sentence).
-- **Evidence map** — for the candidate's main sub-claims, which project
-  artifact (notebook, figure, table) supports it, and at what strength
-  (✓ direct / ⚠ partial / ✗ contradicts / ◇ orthogonal).
-- **Weakness inventory** — what gaps the candidate has if used; what the
-  rebuttal would be.
-- **What the paper would NOT include** if this candidate is chosen.
-
-These are written to `throughline_candidates.md` using this template
-(per candidate; separator `---` between candidates):
+The story builder LLM (Sonnet, ~5–10K tokens) consumes Phase-0 artifacts and
+emits `papers/draft_N/00_story_outline.md`:
 
 ```markdown
-## Candidate TL{N}: {one-sentence claim}
+# Draft N — Story outline
 
-**Evidence map:**
+**Target:** {target_journal} / {arc_preference}
+**Tier:** STRONG | THIN | EXPLORATORY (per SPEC.md §3.1 triage)
+**Mode:** paper | report (per SPEC.md §3.2)
 
-| Sub-claim | Source | Strength |
+## Throughline (one sentence)
+{the central claim the manuscript will make}
+
+## Section budget
+| Section | Words | Primary evidence |
 |---|---|---|
-| {sub-claim 1} | notebook X cell Y | ✓ direct |
-| {sub-claim 2} | REPORT.md §{n} | ⚠ partial |
-| ... | ... | ... |
+| Abstract | 250 | C001, C002 (claim inventory) |
+| Introduction | 700 | references R1, R3, R7 (citation pool) |
+| Methods | 900 | methods_provenance §§1–4 + D-001, D-002 (discrepancy register) |
+| Results | 1500 | C001–C012 + Fig 1, Fig 2, Fig 3, Tbl 2 |
+| Discussion | 1100 | C001, C005, C012 + references R12, R18 |
+| Limitations | 350 | discrepancy register: load-bearing items only |
+| Data availability | 100 | template fill |
 
-**Weakness inventory:**
+## Figure plan
+Fig 1: NB02 plot from figures_inventory (panel layout: 2x2)
+Fig 2: NB04 plot, single panel
+Fig 3: NB07 panel grid (4 panels)
+Tbl 1: tables_inventory tbl_03 (top-N hits)
+Tbl 2: tables_inventory tbl_05 (FDR-corrected counts)
 
-- Gap: {what's missing}
-- Rebuttal a sharp reviewer would offer: {anticipated critique}
+## Discrepancies that shape the story
+- D-001 (load-bearing): Methods narrates Mann-Whitney U, not Welch's; Limitations notes the power tradeoff.
+- D-002 (cosmetic): Methods includes the BH-FDR step.
 
-**What this paper would NOT include if this is chosen:**
-
-- {finding A — orthogonal; → appendix or out}
-- {finding B — contradicts; → appendix with discussion}
-
----
+## What this draft will NOT include
+- (per SPEC.md §4.2 throughline mechanism — finds that fall outside the throughline are noted as "Demoted to appendix" or "Deferred to follow-up")
 ```
 
-The skill then **pauses** and prompts the user to pick one (or to
-provide an alternative). On `beril-paper-writer continue`, the chosen
-throughline is written to `00_throughline.md` (same template, single
-candidate) and drafting proceeds.
+### 5.4 User gate (load-bearing)
 
-`--throughline auto` opts into the writer's choice (highest-evidence-density
-candidate). This is for non-interactive runs; default is `interactive`.
+The skill pauses with `phase=story_pick` handoff. The user reviews
+`00_story_outline.md` and either:
 
-### 4.3 Throughline as load-bearing constraint
+1. **Approve.** `/beril-paper-writer-continue <draft_dir> --approve-story`
+2. **Amend.** `/beril-paper-writer-continue <draft_dir> --amend-story "tighten Results to focus on E1; demote E2/E3 to appendix"`. The story builder re-runs with the amendment text included as input; emits a revised outline.
+3. **Pick alternative.** If multiple candidate outlines were emitted (story builder may, by request via `--candidates 3`, produce 2–3), `--pick STORY{N}` selects.
 
-After a throughline is chosen:
+**Hard cap:** 3 amendment cycles. After 3, the writer halts with a
+`phase=story_blocked` handoff suggesting the user manually edit
+`00_story_outline.md` and run `--approve-story`.
 
-- Every drafted claim must trace to the throughline's evidence map.
-- Claims supported by the project but irrelevant to the throughline go to
-  appendices (not deleted; demoted).
-- The adversarial reviewer's `--type paper` mode reads the throughline and
-  flags drift between claim and evidence map.
+### 5.5 Why this is a separate phase, not the front of Phase 2
 
----
+Two reasons:
 
-## 5. The gap-fill / analysis-request loop
-
-### Terminology
-
-**Gap-fill request** is the umbrella term for any item the writer
-identifies as missing from the project but needed for the chosen
-throughline. Each gap-fill has a **type**: `analysis-request`,
-`figure-request`, `data-request`, `citation-request`, or
-`validator-escalation`.
-
-All gap-fills funnel into a single file, `analysis_requests.md`, in
-the draft directory. The filename reflects the most-common type, but
-the file contains all gap-fill types. (The name is sticky for backward
-compatibility; renaming is post-MVP.)
-
-
-### 5.1 The problem
-
-While drafting, the skill identifies evidence gaps the chosen throughline
-needs filled (e.g., "claim X requires effect size with CI; only point
-estimate present" or "Methods don't specify multiple-testing correction").
-Some gaps can be filled by the user re-running BERIL; others require
-additional data; others are unfillable and become limitations.
-
-### 5.2 Mechanism
-
-Identified gaps are written to `analysis_requests.md` as structured items:
-
-```markdown
-## REQ-1: [analysis-request | figure-request | data-request | citation-request]
-
-**What's needed:** Bonferroni-corrected p-values for the 343 conditions
-in Finding 6 (currently uncorrected).
-
-**Why:** Finding 6 claims 95 of 343 conditions show AUC > 0.75. At α=0.05
-uncorrected, ~17 are expected by chance. Without correction, the claim
-overstates the result.
-
-**Where it lands:** Results §3.2; Methods §"Statistical analysis"; Limitations
-if not addressed.
-
-**Suggested action for BERIL:** *(markdown snippet the user can append
-to `RESEARCH_PLAN.md` as a new analysis task, or paste as a natural-
-language prompt into a fresh `/berdl_start`-initiated session)*
-
-> Re-run the Finding 6 analysis (`02_gapmind_concordance_phylo.ipynb`,
-> cell 14) with explicit FDR control: apply Benjamini-Hochberg correction
-> across the 343 conditions; report corrected p-values and the
-> count of conditions surviving q < 0.05. Update REPORT.md §"Finding 6"
-> with the corrected counts and the corrected significance threshold.
-
-**Note on format:** the writer emits a markdown snippet, not a literal
-slash command. `/berdl` is a SQL-query skill in BERIL, not a generic
-"do this analysis" entry point. The actual BERIL workflow is: the user
-extends `RESEARCH_PLAN.md` with the new task, then a `/berdl_start`-
-initiated Claude session executes it via the appropriate skills
-(`/berdl-query`, notebook editing, etc.). The writer's job is to
-articulate the request precisely; routing it through BERIL is the
-user's call.
-
-**If declined:** finding's claim must be re-scoped (e.g., "we observed N
-conditions with elevated AUC, of which ~N×0.05 are expected by chance").
-
----
-**Status:** pending  ← user updates: pending | taken | deferred | dropped
-```
-
-### 5.3 Hard caps
-
-- Max 2 gap-fill rounds per draft (a "round" = one user response on the
-  request file).
-- Max 5 requests per round per type (analysis / figure / data / citation).
-- If after round 2 there are still requests pending, the writer proceeds
-  with a degraded scope and folds remaining gaps into Limitations or
-  Next Steps.
-
-### 5.4 Gap-fill response protocol (what the user actually does)
-
-The writer pauses after writing `analysis_requests.md` and exits. The
-user reviews the file and edits the **`Status:`** line of each request
-to one of:
-
-- `pending` (default; the writer will treat this as "still waiting")
-- `taken` — user has run / will run the suggested BERIL command; new
-  artifact will appear before resume
-- `deferred` — defer to next paper draft / next steps; do not include in
-  this draft
-- `dropped` — request was not warranted; do not re-suggest in this draft
-- `manual: <note>` — user resolved manually; the note explains how (e.g.,
-  `manual: added correction in REPORT.md §3.2`)
-
-**Status line grammar (load-bearing for parser):**
-
-```
-Status: <value>
-
-where <value> matches one of:
-  pending
-  taken
-  deferred
-  dropped
-  manual: <free-form note, single-line>
-
-Parsing rule (line-based):
-  ^Status:\s+(pending|taken|deferred|dropped|manual:\s+.+)$
-
-Edge cases:
-- `Status: manual:` (colon, no space, no note) → invalid; treat as
-  `pending` and emit warning to user
-- Multiline notes are NOT supported in v0.1; users wanting longer
-  rationale put a one-line summary as the note and add the full text
-  as a markdown blockquote on the next line(s) (informational only;
-  the writer does not parse the blockquote)
-- Anything not matching the regex → treat as `pending` and warn
-```
-
-The user then invokes `beril-paper-writer continue <draft_dir>`. The
-writer parses statuses, hash-diffs source artifacts (per §5.5), and
-proceeds:
-
-- `taken` requests with new artifacts → integrate
-- `taken` requests without new artifacts yet → emit warning; user likely
-  meant to defer
-- `deferred` / `dropped` → no action
-- `manual` → re-extract from the noted location; add the note to
-  `reframing_log.md`
-
-Status entries are append-only across rounds: a `dropped` request from
-round 1 is not re-surfaced in round 2 even if it would otherwise apply.
-
-### 5.5 The intercalation problem (between BERIL and the writer)
-
-### 5.4 The intercalation problem (between BERIL and the writer)
-
-When the user invokes `/berdl` to address an analysis request, BERIL writes
-new artifacts to the project directory while the paper draft is paused.
-On `beril-paper-writer continue`:
-
-1. The writer hashes all source artifacts (sha256 + mtime of every
-   `RESEARCH_PLAN.md`, `REPORT.md`, `notebooks/*`, `figures/*`,
-   `references.md`) and compares against `state.json`'s recorded hashes
-   from the last build.
-2. New / changed artifacts are reported to the user explicitly:
-   `"Since last run: 2 new files (paths), 1 changed file (path), 3
-   unchanged. Proceed?"`
-3. Manuscript files (`manuscript.md`, `01_methods.md`, etc.) are also
-   hashed. If the user hand-edited any, the writer **does not overwrite**
-   — it offers a side-by-side diff and asks which to keep (user's edits,
-   writer's regeneration, or merged).
-4. If new artifacts materially change the throughline's evidence map
-   (e.g., a previously unsupported claim is now supported, or vice versa),
-   the writer flags `"Throughline candidate X may need re-evaluation
-   given new evidence Y"` and asks the user to confirm before propagating.
-   The writer never silently rebuilds the throughline. The reevaluation
-   outcome (confirmed-still-valid / re-picked / abandoned) is recorded
-   in `state.json`'s `throughline.reevaluations[]` array (see LAYOUT
-   state.json schema).
-
-This explicit-on-resume behavior is the answer to "how do we not lose the
-thread when paper-writing pauses for BERIL analysis." Silent integration is
-forbidden.
-
-### 5.6 reframing_log.md schema
-
-Append-only log of every honest reframing the writer made: deviations
-from REPORT.md, validator failures accepted as limitations, design
-discrepancies between RESEARCH_PLAN and notebooks, manual user
-overrides. One markdown entry per event:
-
-```markdown
-# Reframing Log
-
-## Entry {N} — {ISO timestamp} — type: {reframing | validator-escalated | accepted-limitation | plan-execution-discrepancy | manual-override}
-
-- **Issue:** {what was found / changed}
-- **Source:** {REPORT.md §X | validator M_n | notebook X cell Y | RESEARCH_PLAN §Z}
-- **Manuscript impact:** {which section(s); what language was added}
-- **Resolution:** {auto-fixed | escalated | accepted as Limitations | user-modified}
-- **Note:** {context for future reviewers; one paragraph max}
-
----
-```
-
-Never edited or deleted by the writer; users may add their own entries
-for transparency, but the writer treats user entries as informational
-only (does not parse them).
+- **Cost discipline.** Phase 2's holistic write is the most expensive single
+  call in the pipeline (~50K input, ~30K output; $1.50–$3.00). Resuming Phase
+  2 from scratch on every story amendment would be punitive. Phase 1's
+  outline iteration is small (~10K input, ~5K output; ~$0.10/cycle).
+- **Auditability.** The story outline is the artifact every downstream phase
+  references. If Phase 7 copy-edit is suspected of changing scope, the diff
+  is against `00_story_outline.md`, not against the draft's prior version.
 
 ---
 
-## 6. Drafting: agent decomposition and section order
+## 6. Phase 2 — Holistic write (one pass)
 
-### 6.1 Section assembly order
+### 6.1 Single LLM call producing the full manuscript
 
-Drafted in this order (information flows forward):
+One `claude -p` invocation. Input: all Phase-0 artifacts + the approved
+`00_story_outline.md`. Output: a single `manuscript.md` containing every
+section in its final position, drafted as one coherent document.
 
-1. **Methods** — extracted from notebooks + RESEARCH_PLAN. Foundational;
-   constrains how Results can be reported.
-2. **Results** — extracted from REPORT.md, organized to align with the
-   throughline. Numerical claims cross-checked against notebook outputs.
-3. **Discussion** — written against the throughline's claims, with
-   field-context citations from the verified pool.
-4. **Introduction** — written last among body sections, after Methods/
-   Results/Discussion are settled. Sets up exactly what the paper delivers,
-   no more, no less.
-5. **Abstract** — written after the body is stable; constrained to claims
-   demonstrable from the body.
-6. **Conclusion / Limitations / Next Steps** — limitations include any
-   unfilled gap-fills and any unfixable adversarial-review findings.
+**Why holistic.** The IBD one-shot exercise demonstrated that an LLM
+seeing the whole project at once produces better integrative biology than
+per-section prompts knitting localized claims together. The "see everything
+at once" property is the v0.8 architectural bet.
 
-### 6.2 Per-section agents
+### 6.2 System prompt budget
 
-Each section has a dedicated subagent with a system prompt scoped to:
+≤300 lines (~10K tokens). Replaces the v0.7.x cumulative prompt budget of
+plan.v1 (~250 lines) + methods.v1 (~480 lines) + results.v1 (~520 lines) +
+discussion.v1 (~410 lines) + intro.v1 (~250 lines) + abstract.v1 (~330 lines)
++ reframer.v1 (~260 lines) ≈ 2500 lines across 7 prompts. The subtraction
+is real: most of the per-section discipline collapses to "consume the
+artifact in §X" + "obey the prompt rules from V0_8_0_PUNCH_LIST Tier A."
 
-- What artifacts it reads (Methods reads notebooks + RESEARCH_PLAN; Results
-  reads REPORT + notebooks for numerical verification; etc.).
-- What constraints apply (Methods: extract, don't fabricate; Results:
-  every number must be greppable in REPORT or a notebook output; etc.).
-- What output format it produces.
+### 6.3 Discipline rules baked into the holistic prompt
 
-Subagents do NOT see the full project artifact set; each gets only what
-its section needs. This keeps each call's context focused and reduces
-the chance of cross-contamination between sections.
+The v0.8.0 punch list's Tier-A prompt rules (sentence length, abbreviation
+expansion, quantitative stacking, single-hedge, transitions, notebook-citation
+externalization, echo repetition) were designed to be applied per-section.
+v0.8 folds them into the single holistic prompt with one important change:
+they apply to the *manuscript as a whole*, not to each section in isolation.
+"Each abbreviation expanded on first use" is now globally checkable; "no
+quantitative finding stated more than 2× in the manuscript" needs only one
+prompt-level enforcement, not three.
 
-### 6.3 Methods grounding (the second-highest-risk step)
+### 6.4 Inputs the holistic prompt consumes (load-bearing)
 
-The fastest way to make this skill dangerous is to let it write fluent
-methods prose ("we performed Welch's t-test with α=0.05") that wasn't
-actually done. Methods has two complementary sources, both required:
+| Artifact | Role |
+|---|---|
+| 00_story_outline.md | The narrative skeleton; section word budgets; figure plan. |
+| methods_provenance.md | Methods source-of-truth; every protocol claim must trace here. |
+| claim_inventory.md | Every numeric claim in the manuscript must reference a `claim_id`. |
+| discrepancy_register.md | Methods + Limitations + (sometimes) Results discipline. |
+| figures_inventory.md + figures/ | Figure choices + caption candidates. |
+| tables_inventory.md | Table choices + caption candidates. |
+| pool.json | Citation pool; citations cited in prose must resolve here. |
+| references.md | Pre-existing citations user supplied. |
 
-**Intent — `RESEARCH_PLAN.md`.** The plan documents *why* a method was
-chosen: hypothesis structure, prespecified statistical tests, sample
-size justification, dataset selection criteria, anticipated controls.
-The plan provides the "design rationale" that notebooks-as-code rarely
-articulate.
+### 6.5 Output contract
 
-**Execution — notebooks + scripts.** The actual code as run.
+Single file: `papers/draft_N/manuscript.md`. Sections delimited by
+markdown headers in IMRAD order (per SPEC.md §6.1). Figure callouts use
+`(Fig. N)` and table callouts use `(Table N)` (the v0.6 contract). No
+inline image tags; embedding is Phase 8's job.
 
-The Methods agent:
+### 6.6 What the holistic prompt is forbidden from doing
 
-- Reads `RESEARCH_PLAN.md` first to extract design intent and prespecified
-  analyses.
-- AST-walks Python notebooks (`.ipynb`) and any standalone `.py` scripts
-  in the project to extract: function calls, package versions, parameter
-  values, data filters, statistical tests actually invoked, software
-  imports.
-- Cross-checks: does the executed analysis match the prespecified plan?
-  Discrepancies are noted in `methods_provenance.md` (e.g., "Plan
-  prespecified Welch's t-test; notebook implements Mann-Whitney U" — this
-  is not an error per se, but the Methods section must report what was
-  actually done, and the discrepancy is logged for transparency).
-- Forbidden from claiming any method that cannot be pointed to either
-  (a) in the plan as prespecified-but-deferred-with-rationale, or (b) in
-  executed code. Implied-but-not-explicit steps are flagged as
-  `[METHOD UNCLEAR: see notebook X cell Y]` for user resolution.
-- Produces `methods_provenance.md` listing each Methods statement
-  alongside its source: plan section, notebook+cell, or script+line.
+- Inventing numeric claims (every number must reference a `claim_id` from
+  `claim_inventory.md`).
+- Inventing citations (every citation must resolve in `pool.json`).
+- Inventing methods (every protocol must trace to `methods_provenance.md`).
+- Citing notebook cells in main-text prose (v0.8 punch list A6).
+- Stating any quantitative finding more than 2× in the manuscript (A7).
 
-**Notebook format scope for v1:** `.ipynb` only (Python kernels). `.Rmd`,
-`.qmd`, and `.R` scripts are post-MVP — they appear infrequently in the
-BERIL test corpus, and AST extraction differs by language. If a project
-contains non-`.ipynb` analysis files, the Methods agent reports them as
-`[METHOD SOURCE NOT EXTRACTED: <path>]` and asks the user to either
-provide a Methods snippet manually or wait for v0.2.
+### 6.7 Cost target + model choice
 
-**Spark / cluster-execution caveat:** when notebooks contain `spark.sql`
-or remote-execution calls (some BERIL projects use this for K-BERDL
-queries), the local AST gives the *query string* but not the actual
-execution path. The Methods agent extracts the query and labels the
-execution context as "K-BERDL via Spark" without claiming details about
-remote execution it cannot verify locally.
+**Decided 2026-05-07 (Q4):** default model is **Opus 4.6**
+(`claude-opus-4-6`). Holistic write is the load-bearing integrative-biology
+step; the AI Scientist evidence and the IBD one-shot exercise both used
+frontier-class models for this kind of synthesis. Sonnet remains available
+via `--model claude-sonnet-4-6` for cost-sensitive runs.
 
-**Manual-snippet protocol for non-.ipynb sources.** When the Methods
-agent encounters non-`.ipynb` files (e.g., `.R`, `.Rmd`, `.qmd`, plain
-`.py` scripts):
+50K input + 30K output Opus 4.6 ≈ $4–$8 per pass (roughly 2.5–3× Sonnet).
+Compare to v0.7.x's 8 per-section LLM calls (Sonnet for mechanical, Opus
+for narrative) totaling ~$2.50–$5.00 cached. Net cost at the holistic-write
+phase is +$2–$3 vs v0.7.x; the Phase-0 reframer-equivalent runs cheaper
+upstream, partially offsetting. Accepted trade-off: front-loaded quality
+investment matches the "subtraction over addition" frame — fewer calls,
+each with more context, on a stronger model.
 
-1. Report each path as `[METHOD SOURCE NOT EXTRACTED: <path>]` in the
-   draft and in `methods_provenance.md`.
-2. Emit a gap-fill request (type: `analysis-request`) asking the user
-   to either (a) add a "Manual Methods (non-.ipynb sources)" section to
-   `RESEARCH_PLAN.md` with a methods snippet for each unhandled file,
-   or (b) convert the analysis to `.ipynb` for v0.1 to extract.
-3. On `continue`, the writer scans `RESEARCH_PLAN.md` for the new
-   section and incorporates each snippet into `01_methods.md` in place
-   of the corresponding `[METHOD SOURCE NOT EXTRACTED]` placeholder.
-   `methods_provenance.md` records the source as `RESEARCH_PLAN.md
-   §"Manual Methods" (user-provided)`.
+### 6.8 Per-section prompts retired (subtraction)
 
-If after one gap-fill round the user has not provided a snippet, the
-unhandled files become a Limitations entry ("Methods for `<path>`
-were not extracted; reproducibility may be limited; see Next Steps").
+v0.8's M8 cut-over removes from the orchestrator:
+`methods.v1.md`, `results.v1.md`, `discussion.v1.md`, `intro.v1.md`,
+`abstract.v1.md`, `reframer.v1.md`, `revise_throughline.v1.md`,
+`rewrite.v1.md`, `fallback_reviewer.v1.md`. (`citation_pool.v1.md`,
+`figure_caption.v1.md`, and `plan.v1.md` carry forward — citation_pool
+is Phase 0; figure_caption is Phase 8; plan's role is absorbed into Phase 1
+but the prompt's triage logic may be reused.)
 
-### 6.4 Citation pool and prose generation
-
-To prevent citation hallucination during prose generation:
-
-1. Before drafting begins, a literature-scan agent builds a **verified
-   citation pool**: for each candidate citation, DOI / PMID checked via
-   `WebSearch` or BERIL's PubMed MCP, full 9-field metadata captured
-   (Authors / Year / Title / Venue / DOI / ID / Studied / Finding / Scope
-   alignment / Assessment — same discipline as the adversarial reviewer).
-2. The pool is capped at **80 references** for v1. If more are needed,
-   the writer fails loud and asks the user to scope down the discussion
-   or add a gap-fill request.
-3. During prose generation, the writer is constrained to draw citations
-   only from the pool. Claims that need citations not in the pool either
-   (a) trigger an additional pool-build cycle for the missing topic
-   (one round only), or (b) are flagged as `[NEEDS CITATION]` for the
-   user to resolve.
-4. The pool serializes to both `references.md` (human-readable, numbered
-   in order of first citation) and `bibliography.bib` (BibTeX for the
-   adversarial reviewer's expectations and for downstream journal
-   submission).
-
-### 6.4.1 What happens when the pool is exhausted mid-Discussion
-
-The 80-reference cap is intended as a budget control, but Discussion
-sections may exceed it (rich field engagement is aspirational per §7.2).
-On exhaustion, the writer flags every remaining `[NEEDS CITATION]`
-claim in Discussion and presents the user with a structured choice:
-
-1. **Scope down (default)** — drop the `[NEEDS CITATION]` claims from
-   Discussion, retain the rest. Lowest cost; smallest Discussion.
-2. **Spend a gap-fill round on a citation-request** — costs one of the
-   two available gap-fill rounds (§5.3), adds 5–15 verified citations
-   to the pool. Heavier; may starve later gap-fills.
-3. **Accept-as-limitation** — fold the unsupported claims into
-   Limitations as "claims that would require additional literature
-   engagement." Documents the gap honestly without inflating the pool.
-
-The default is (1) unless the user explicitly chooses (2) or (3) on
-the pause-and-resume prompt. This decision is recorded in
-`reframing_log.md`.
+The retired prompts are not deleted; they are moved to
+`prompts/archive/v0_7/` and remain reachable for fallback or for resurrection
+if M7 cut-over fails.
 
 ---
 
-## 7. Reporting-standards subset (mechanized vs aspirational)
+## 7. Phase 3 — Tiered review cascade
 
-This is the load-bearing reporting discipline. The full extraction lives
-at [reference/reporting-standards-extract.md](reference/reporting-standards-extract.md);
-this section is the curated subset we will actually enforce.
+### 7.1 Three tiers, fail-fast
 
-### 7.1 Mechanized validators (10 items, hard checks before output)
+Each tier:
 
-Every draft is validated against these before being considered complete.
-A failure on any item blocks the draft from being marked "ready" and is
-reported to the user.
+- Reads `manuscript.md` + Phase-0 artifacts.
+- Emits findings in the beril-adversarial schema (paper v3 single-array
+  shape; consumer contract is `adversarial-review-paper.v3` per
+  beril-adversarial v0.7.x).
+- Hands findings to a deterministic dispatcher that decides whether to
+  trigger a Phase-2 rewrite, a Phase-4 selective optimizer, or escalate
+  to the next tier.
 
-| # | Check | Source | Validator |
-|---|---|---|---|
-| M1 | All ICMJE V.A IMRAD sections present (Title page, Abstract, Intro, Methods, Results, Discussion, References) | ICMJE IV.A.3 | Section-header presence check |
-| M2 | Structured abstract (Background/Objective, Methods, Results, Conclusions) | ICMJE IV.A.3.b | Subsection check within Abstract |
-| M3 | AI-disclosure paragraph present, names tool + version + task | ICMJE V.A (Jan 2026) | Regex on Methods or Acknowledgments |
-| M4 | Data-availability statement present, contains URL or accession or explicit-restriction rationale | ICMJE IV.A | Section length > 100 chars + URL/accession regex |
-| M5 | Methods names statistical tests with software + version (e.g., "scipy.stats.fisher_exact, SciPy 1.11") | SAMPL §1; ICMJE IV.A.3.d | **Soft-warning only in v0.1** (see §7.1.2) |
-| M6 | Multiple-testing correction declared if ≥5 distinct tests reported | SAMPL §3 | p-value regex count × correction-method regex |
-| M7 | Numerical claims have n + effect size + 95% CI + exact p-value (or Bayesian equivalent), not bare percentages | SAMPL §2 | Prose walk; flag bare-percentage claims |
-| M8 | Counts (n) precede derivatives (%) — "42/156 (26.9%)" not "26.9%" | ICMJE IV.A.3.e | Regex |
-| M9 | Limitations section present with substantive content (>150 chars) | ICMJE IV.A.3.f | Section length |
-| M10 | Every citation in prose appears in references.md AND bibliography.bib | basic integrity | Cross-grep |
+**Fail-fast** means: if Tier 1 surfaces P0s, do NOT spend on Tier 2/3 until
+Tier 1 P0s are resolved. If Tier 2 surfaces P0s, do NOT spend on Tier 3.
+This bounds cost in the failure case and matches reviewer cost to defect
+class.
 
-### 7.1.1 Four escalation paths for an M-tier failure
+### 7.2 Tier 1 — deterministic + minimal LLM (~2–5K tokens)
 
-A failed validator does not always have an in-writer fix. Each failure
-takes one of four paths:
+Pure mechanical checks; LLM pass only for ambiguity resolution.
 
-1. **Auto-fix.** The writer can resolve the issue without external work.
-   Examples: M1 (missing IMRAD section header), M2 (Abstract missing a
-   subsection structure), M3 (AI-disclosure paragraph absent — emit
-   the standard template). Writer attempts a single fix pass on the
-   offending section; on success, re-runs the validator.
-2. **Escalate as analysis-request.** The fix requires new analysis the
-   writer cannot perform. Examples: M6 failure (10+ p-values reported
-   without correction — the writer cannot recompute Bonferroni / FDR
-   thresholds without re-running the analysis); M7 failure (effect size
-   missing because it was never computed). The writer adds an entry to
-   `analysis_requests.md` (per §5) tagged as a `validator-escalation`
-   request, and the validator failure is recorded as `escalated` rather
-   than `pass` or `fail`.
-3. **User-modify.** The user opens the section file in their preferred
-   editor between paused runs and fixes the validator failure manually.
-   On `continue`, the writer's hash-diff (per §5.5) detects the edit
-   and re-runs the validator. If pass, status becomes `user-fixed`.
-   If still fails, the user is shown what the validator wants and asked
-   whether to escalate-as-analysis-request, accept-as-limitation, or
-   try again. This path is always available implicitly; it is documented
-   here as a first-class option so users know they can resolve issues
-   directly without waiting for the writer to try.
-4. **Accept-as-limitation.** The user (on resume) declines to take the
-   analysis-request and does not want to edit manually — either because
-   it's out of scope for this draft or because the underlying data won't
-   support it. The validator failure is then woven into the manuscript:
-   an honest admission in Methods (e.g., "Multiple-testing correction
-   was not applied to the 343-condition screen; ~17 false positives are
-   expected at α=0.05"), a corresponding caveat in Results, and an
-   entry in Limitations. Logged in `reframing_log.md`; validator status
-   becomes `accepted-as-limitation`.
+| Check | Implementation |
+|---|---|
+| All ICMJE V.A IMRAD sections present | regex |
+| AI-disclosure block present + names tool/version/task | regex + minimal LLM |
+| Figure callouts resolve to figures_inventory entries | regex cross-walk |
+| Reference pool resolution (every prose citation in pool.json) | regex cross-walk |
+| Discrepancy-register citation (every load-bearing D-N is acknowledged in Methods or Limitations) | regex |
+| Provenance tags (every claim_id referenced in prose resolves to claim_inventory) | regex cross-walk |
+| Word count per section within ±20% of `00_story_outline.md` budget | wc -w |
+| AI-disclosure block (M3-equivalent) | regex |
+| Data-availability statement (M4-equivalent) | regex + length check |
 
-Two consecutive auto-fix failures on the same section escalate to user
-review. The validator-status field in `state.json` records the
-disposition (`pass | escalated | user-fixed | accepted-as-limitation`)
-per validator so subsequent passes know which failures are unfixable
-in-writer.
+This subsumes v0.7.x's `validate_manuscript.py M1–M10` plus the v0.6
+manifest cross-walks (`check_figures_manifest.py`, `check_tables_manifest.py`,
+`check_caption_provenance.py`) plus the v0.8 punch list Tier-B advisory
+checkers (`check_sentence_complexity.py`, `check_abbreviation_discipline.py`,
+`check_echo_repetition.py`).
 
-### 7.1.2 M5 (software + version) implementation note
+**Cost:** ~$0.02 per pass. **Cap:** 2 passes; on second-pass failure, the
+specific failures route to Phase 4 selective per-section work or to
+human-in-loop via `phase=tier1_blocked` handoff.
 
-Mechanizing M5 robustly is hard: a regex for `[tool] [version]` patterns
-generates too many false positives (any space-separated token pair
-followed by a version-like number triggers it), and a whitelist of
-known tools is brittle (misses domain-specific tools).
+**Pass criterion:** zero P0 findings. Tier 1 has no P1/P2 — every check is
+binary.
 
-For v0.1, M5 is implemented as a **soft warning**, not a hard fail:
+### 7.3 Tier 2 — narrative-light (Haiku + subset of beril-adversarial classes)
 
-- The validator scans Methods for any of: explicit version statements
-  matching `(scipy|numpy|scikit-learn|pandas|statsmodels|R|matlab|python)\s+v?\d+\.\d+(?:\.\d+)?` (case-insensitive); references to a `requirements.txt` or `environment.yml`; or an explicit "Software" subsection.
-- If Methods is longer than 200 words AND has ≥3 named statistical
-  tests AND has zero matches for the patterns above, emit a soft
-  warning: `"M5 (soft): Methods names statistical tests but does not
-  appear to specify software versions. ICMJE IV.A.3.d / SAMPL §1
-  recommend versioned tool statements."`
-- The warning is recorded in `state.json` validator status as
-  `soft-warning`; the user can choose to add versions manually
-  (user-modify path), accept-as-limitation, or ignore.
-- M5 will be tightened in v0.2 once we observe how Methods sections
-  actually phrase software statements across BERIL projects.
+A focused subset of beril-adversarial v3 detection classes that are
+amenable to fast, low-context detection. Sized for Haiku to keep cost low.
 
-This is the only M-tier validator demoted to soft-warning in v0.1. All
-others (M1–M4, M6–M10) are hard checks per §7.1.1.
+**Detection-class subset (PROVISIONAL — empirical refinement at M3):**
 
-### 7.2 Aspirational guidance (in the prompts, not auto-checked)
+| Class | Why Tier 2 |
+|---|---|
+| claim_evidence | Most-flagged in v0.5.x logs; binary detection with manifest cross-walk |
+| register_drift | Fast pattern detection (informal phrases, undefined jargon) |
+| qa_softball | Question-mark detection + low-novelty heuristic |
+| unbacked_quantitative | Cross-walk against claim_inventory.md (already done in Tier 1; Tier 2 is the *judgment* call about whether the hedging is sufficient) |
+| methods_underspecified | Cross-walk against methods_provenance.md gaps |
 
-These live in the per-section system prompts as discipline. Not mechanized
-because false positives are too high or the judgment is too contextual.
+**Cost:** Haiku at ~10–15K input + ~5K output ≈ $0.05–$0.10 per pass.
+**Cap:** 2 passes. Findings dispatch to Phase 2 rewrite (small targeted
+section regeneration, not full holistic re-pass) or Phase 4 optimizer.
 
-- Lead with novelty, not rehash, in Abstract and Introduction.
-- Distinguish prespecified from exploratory analyses explicitly.
-- Discuss alternative explanations for findings; do not rest on a single
-  mechanistic interpretation.
-- Engage with conflicting prior findings when they exist; do not ignore.
-- Translate effect sizes to biologically meaningful units where possible.
-- Use conservative language for observational/correlational claims;
-  reserve causal language for designs that support it.
-- Validate predictions against held-out data if making predictive claims.
-- For computational reanalysis: state the data snapshot date and reanalysis
-  rationale (what's new vs. the original analysis).
-- Acknowledge uncertainty in point estimates; report CIs / posteriors,
-  not just point values.
+**Pass criterion:** zero P0 in the Tier-2 subset.
 
-### 7.3 Out-of-scope for v1
+### 7.4 Tier 3 — heavy canonical (Sonnet + full beril-adversarial v3)
 
-These items appear in some checklists but do not apply to BERIL's typical
-project shape. Stated here so external reviewers know they are deliberate
-omissions, not oversights:
+Full canonical adversarial review. Run once unconditionally after Tier 2
+passes, then retry once if any P0 remains. The full taxonomy from
+`beril-adversarial v0.7.x` (paper schema v3): all 10+ detection classes
+including central_objection, citation_reality, scope_overreach, novelty_check,
+substory_arc, etc.
 
-- CONSORT flow diagrams (clinical trials only).
-- Trial registration numbers (BERIL projects are not trials).
-- IRB approval statements (BERIL projects typically use public data; no
-  human subjects). If a future BERIL project does use human subjects,
-  this becomes an M-tier check conditional on metadata.
-- Sex / gender stratification (BERIL projects are typically bacterial
-  datasets). Conditional on `metadata.subject_type == "human"`.
-- PRISMA / STARD checklists (different study types).
+**Invocation:** `beril-adversarial review --type paper --auto-number <draft_dir>`
+(per CONTRACT.md from beril-adversarial v0.6.0+).
 
-### 7.4 What we don't claim
+**Fallback when beril-adversarial absent (Q5).** **Decided 2026-05-07:**
+v0.8.0 does NOT hard-require beril-adversarial. If the canonical CLI is
+absent, Tier 3 falls back to an embedded `prompts/fallback_reviewer.v2.md`
+(rewritten from v0.7.x's `fallback_reviewer.v1.md` to emit the same
+`adversarial-review-paper.v3` schema as the canonical). Detection: shell
+`command -v beril-adversarial`; on absence, `configure` warns at install
+time and the orchestrator emits a stderr notice at Tier 3. The fallback is
+clearly logged in `audit/cascade.jsonl` as `tier:3, reviewer:"fallback"`
+so the M7 cut-over score sheet can distinguish runs that exercised the
+canonical reviewer from runs that didn't. Tier 1 and Tier 2 are
+self-contained (their prompts ship with the paper-writer skill); only
+Tier 3 has a fallback path.
 
-Mechanized checks pass = the manuscript meets a *minimum format bar*. This
-is necessary but not sufficient for scientific rigor. Scientific rigor
-comes from (a) the underlying project being sound, (b) the throughline-
-selection step picking a defensible story, (c) the methods-grounding step
-preventing fabrication, and (d) the adversarial-review-driven rewrite loop.
-Format conformance alone is not a quality guarantee — it's the floor.
+**Cost:** Canonical: $1.00–$2.50 per pass; fallback: $0.30–0.80 per pass
+(lighter prompt, narrower coverage). **Cap:** 2 passes (run + 1 retry on P0).
 
----
+**Pass criterion:** zero P0 across the full canonical taxonomy (or the
+fallback's coverage subset, with a documented coverage gap in
+`audit/cascade.jsonl`). P1/P2 findings dispatch to Phase 4 (abstract
+optimizer, methods audit) or land in Limitations as accept-as-limitation
+per SPEC.md §7.1.1.
 
-## 8. Review-rewrite loop
+### 7.5 Tier 2/3 split is empirical, not designed
 
-### 8.1 Coupling to the adversarial reviewer
+**M3 prerequisite (one afternoon's work).** Before M3 starts, analyze the
+v0.5.x–v0.7.x adversarial-findings JSON logs (under
+`spike/beril-adversarial-skill-draft/audit/` and per-paper-writer
+`papers/draft_*/reviews/`):
 
-Loose coupling. After drafting, the writer shells out to:
+- For each detection class, count the P0/P1/P2 distribution across all
+  reviews emitted.
+- A class that mostly produces P2 in production → Tier 2.
+- A class that mostly produces P0 → Tier 3 only.
+- Mixed classes go to Tier 2 with escalation to Tier 3 on Tier 2 P0 surfacing.
 
-```bash
-/beril-adversarial --type paper <draft_dir>
-```
+This calibrates the split to actual failure modes rather than to a
+theoretical taxonomy. The §7.3 PROVISIONAL list is M0's best guess and is
+**expected to change** at M3.
 
-This expects `beril-adversarial` to be installed as a sibling skill. The
-writer reads the resulting `papers/draft{N}-review.md`, identifies
-fixable vs unfixable issues, and either:
+### 7.6 Cascade orchestration contract
 
-- **Fixable** — re-invokes the affected section agents with the violation
-  list, regenerates, re-validates.
-- **Unfixable** (the underlying evidence won't support the claim) — folds
-  the issue into Limitations or Next Steps with citation to the review.
-
-### 8.2 Fallback inline reviewer
-
-If `beril-adversarial` is not on PATH, the writer falls back to a minimal
-inline reviewer (see `prompts/fallback_reviewer.v1.md`, ~150 lines, focused
-on overclaim detection + citation rigor + scope alignment with the
-throughline). Marked clearly as a fallback in the run log; the user is
-warned via stderr: *"Using fallback reviewer; install beril-adversarial
-for stronger review."*
-
-### 8.3 Iteration cap
-
-Hard cap: **2 rewrite passes**. After the second rewrite, any remaining
-issues from the latest review are folded into Limitations / Next Steps,
-not re-rewritten. The user can manually re-invoke for a third pass if
-they want, but the default loop terminates.
-
-This prevents the rewrite-introduces-new-issues spiral.
-
----
-
-## 9. Final assembly
-
-`beril-paper-writer assemble <draft_dir>` is a separate CLI step. It:
-
-1. Concatenates `00_throughline.md`, `01_methods.md`, `02_results.md`,
-   `03_discussion.md`, `04_introduction.md`, `05_abstract.md`,
-   `06_limitations.md`, `07_data_availability.md`, `references.md` into
-   `manuscript.md`.
-2. Runs the M1–M10 validators (final check).
-3. Renders to `manuscript.docx` via `python-docx` (figures embedded
-   inline, numbered references, IMRAD structure, no journal-specific
-   styling). Pure-Python; no `pandoc` system dependency required.
-   See DECISIONS D-024 for rationale.
-4. Reports the validator pass/fail summary.
-
-Users can stop at markdown if they want; the docx step is opt-in. This
-matches the principle of separating writing from formatting.
-
----
-
-## 10. Authorship, AI disclosure, and other ICMJE-required boilerplate
-
-### 10.1 What the writer auto-emits
-
-- An "AI-Assisted Analysis" subsection in Methods, with this template:
-
-  > Manuscript drafting was performed with the BERIL paper-writer skill
-  > (`beril-paper-writer v{X.Y}`), using `{model_id}` via the Claude Code
-  > harness. Inputs were the project artifacts at
-  > `projects/{project_id}/` (snapshot SHA: `{sha}`). The throughline was
-  > selected by the human author from candidates surfaced by the writer.
-  > Methods were extracted from the project's notebooks; statistical
-  > claims were verified against notebook outputs. Citations were drawn
-  > from a literature pool with DOI/PMID verification. The draft was
-  > reviewed adversarially using `beril-adversarial v{X.Y}` and revised
-  > over {N} pass(es). The human authors reviewed and edited the final
-  > manuscript and accept full responsibility for its content. No AI tool
-  > is listed as an author.
-
-- Placeholder lines for items the writer cannot generate honestly:
-
-  ```
-  Authors: [AUTHORS: TBD — fill before submission]
-  Affiliations: [AFFILIATIONS: TBD]
-  Funding: [FUNDING: TBD]
-  Conflicts of Interest: [CONFLICTS: TBD]
-  Ethics Approval: [ETHICS: TBD or N/A — confirm before submission]
-  Corresponding author: [CORRESPONDING: TBD]
-  ORCIDs: [ORCIDS: TBD]
-  ```
-
-The presence of any `[X: TBD]` placeholder is a soft warning at assembly
-time, not a hard fail (some projects may legitimately want to defer these
-to a later editing pass).
-
-### 10.2 ICMJE language quoted
-
-ICMJE V.A (January 2026), on AI-assisted writing tools:
-
-> "Chatbots (such as ChatGPT) and other AI-assisted tools should not be
-> listed as authors because they cannot be responsible for the accuracy,
-> integrity, and originality of the work… Authors should carefully review
-> and edit the AI-generated content as the output can be incorrect,
-> incomplete, or biased. … Referencing AI-generated material as the
-> primary source is not acceptable. … Nondisclosure of AI use may require
-> corrective action and may be construed as misconduct in some
-> circumstances."
-
-Source: https://www.icmje.org/recommendations/browse/roles-and-responsibilities/defining-the-role-of-authors-and-contributors.html
-
-The writer's auto-emitted disclosure satisfies this; the user must still
-review and confirm before submission.
-
----
-
-## 11. Cost and latency
-
-Target budget per full run (Plan + Throughline + Drafting + Citation
-verification + Review + 1 rewrite pass + assembly):
-
-- **Wall clock:** 15–40 minutes
-- **Tokens:** ~500K input, ~50K output (rough)
-- **Cost:** $5–$15 (Sonnet-4 rates, plus adversarial-review pass)
-
-If a run is approaching 2× the upper bound on either dimension, the writer
-fails loud with a checkpoint and asks the user whether to continue.
-
-This is roughly 5–10× the cost of `/beril-adversarial` alone, which is
-expected — paper-writing is fundamentally heavier than reviewing.
-
-**Cost target excludes gap-fill iteration overhead.** The $5–$15 / 15–40
-min budget assumes one drafting pass with no gap-fill rounds taken (or
-gap-fills resolved via accept-as-limitation, which adds negligible cost).
-Each gap-fill round the user takes (per §5.3 cap of 2) adds approximately
-$2–$5 and 5–10 minutes — re-drafting affected sections, re-running the
-citation pool builder if a citation-request was taken, etc. A worst-case
-run with both gap-fill rounds + 2 rewrites + citation-pool exhaustion
-escalation can reach $25 / 60 minutes. The 2× checkpoint at $30 / 80 min
-catches this before runaway.
-
-### 11.1 Persistent cost log (cross-draft tracking)
-
-Per-invocation cost is tracked at two levels:
-
-- **Per-draft summary** in `papers/draft_N/state.json` and
-  `papers/draft_N/audit/cost-summary.md` — captures all calls within a
-  single invocation.
-- **Per-project rolling log** at `papers/cost-log.jsonl` — append-only
-  JSON Lines, one entry per invocation across all drafts. Captures:
-  invocation timestamp, draft number, phase
-  (plan|throughline|drafting|review|rewrite|assembly|continue),
-  command line, model, elapsed seconds, input/output token counts,
-  cost in USD, exit status, validator pass/fail counts.
-
-The rolling log enables tracking how the skill's cost profile evolves
-over time: across project quality tiers, across spec/prompt revisions,
-across model changes. This is what feeds the BERIL atlas's
-`paper-writer` metrics for system-self-improvement tracking.
-
-Format example:
+The cascade orchestrator (planned: `tools/review_cascade.py`) reads
+`papers/draft_N/state.json` and dispatches the next tier based on prior tier
+verdicts. Per-tier audit JSON in `papers/draft_N/audit/cascade.jsonl`:
 
 ```jsonl
-{"ts":"2026-04-25T14:32:00Z","project":"functional_dark_matter","draft_number":1,"phase":"plan","model":"claude-sonnet-4-20250514","elapsed_s":142,"in_tokens":28430,"out_tokens":4200,"cost_usd":0.18,"exit":0}
-{"ts":"2026-04-25T14:38:00Z","project":"functional_dark_matter","draft_number":1,"phase":"throughline","model":"claude-sonnet-4-20250514","elapsed_s":210,"in_tokens":51200,"out_tokens":9800,"cost_usd":0.30,"exit":0}
+{"ts":"...","tier":1,"pass":1,"verdict":"PASS","p0_count":0,"cost_usd":0.02}
+{"ts":"...","tier":2,"pass":1,"verdict":"FAIL","p0_count":1,"p0_classes":["claim_evidence"],"cost_usd":0.07}
+{"ts":"...","tier":2,"pass":2,"verdict":"PASS","p0_count":0,"cost_usd":0.07}
+{"ts":"...","tier":3,"pass":1,"verdict":"FAIL","p0_count":2,"cost_usd":1.84}
+{"ts":"...","tier":3,"pass":2,"verdict":"PASS","p0_count":0,"cost_usd":1.91}
 ```
 
-Never deleted by the writer; users may rotate manually if the file grows
-unwieldy.
+State.json's `phase` advances to `selective_optimizers` only after the
+cascade passes (or all tiers' caps are exhausted, in which case unresolved
+P0/P1 findings dispatch to Phase 4 with explicit `[NEEDS RESOLUTION]` markers
+that downstream phases preserve).
 
 ---
 
-## 12. Open questions (deferred to v0.2 spec revisions)
+## 8. Phase 4 — Selective per-section optimizers
 
-1. **Multi-paper output** (e.g., a "main paper + companion methods paper"
-   split). Out of scope for v1; some BERIL projects could support both
-   but the splitting logic is non-trivial.
-2. **Journal-specific formatting** (Nature / Cell / PLoS templates).
-   Post-MVP. v1 emits generic IMRAD .docx.
-3. **Supplementary materials package** (separate supplementary methods,
-   supplementary figures, supplementary tables). v1 has appendices in
-   the main draft; supplementary-package generation is post-MVP.
-4. **Real bibliography manager integration** (Zotero, EndNote). Out of
-   scope; users export the BibTeX themselves.
-5. **Cross-paper citation reuse** (a project that produces multiple papers
-   should reuse the same citation pool). Post-MVP.
-6. **Co-authoring with human edits in flight** (more sophisticated diff/
-   merge than v1's pause-and-prompt). Could become important if the skill
-   is used in a tight human-in-the-loop pattern; revisit after first runs.
-7. **Multi-language output.** v1 is English-only.
+### 8.1 Two always-on optimizers
 
----
+**Abstract optimizer.** A bounded prompt that tightens the Abstract using
+the post-cascade manuscript as ground truth. Inputs: `manuscript.md` (the
+authoritative claim source), `claim_inventory.md`, `00_story_outline.md`'s
+Abstract budget. Output: replacement Abstract section. Cap: 2 passes if
+the abstract optimizer's own self-review fails. Cost: ~$0.20.
 
-## 13. Sources and references for this spec
+**Methods reproducibility audit.** A deterministic Python pass plus a small
+LLM cleanup. Reads `methods_provenance.md` and the drafted Methods section;
+identifies provenance entries that did not surface in the draft and asks
+whether they should be added or noted in Limitations. Cost: ~$0.10.
 
-- ICMJE Recommendations: https://www.icmje.org/recommendations/
-  - Section IV.A (Manuscript Preparation): manuscript structure
-  - Section V.A (Roles and Responsibilities of Authors): AI disclosure
-- SAMPL Guidelines (Statistical Analyses and Methods in the Published
-  Literature): https://www.equator-network.org/wp-content/uploads/2013/07/SAMPL-Guidelines-6-27-13.pdf
-- Companion documents in this directory:
-  - [reference/reporting-standards-extract.md](reference/reporting-standards-extract.md)
-    — full extraction from reporting-standards sources, with the carved
-    subset rationale
-  - [reference/prior-art-scan.md](reference/prior-art-scan.md) — survey of
-    automated paper-writing systems (claude-scientific-writer, AI-Scientist-v2,
-    ScienceClaw, open-coscientist, scientific-agent-skills, K-Dense
-    agentic DS); patterns adopted, improved, skipped
-- Sister-skill specs:
-  - `../beril-adversarial-skill-draft/LAYOUT.md` — package layout we mirror
-  - `../beril-adversarial-skill-draft/src/beril_adversarial/skill/prompts/adversarial_paper.v1.md`
-    — paper-mode reviewer expectations the writer must produce against
+### 8.2 Reviewer-flagged optimizers (conditional)
+
+If Tier 2 or Tier 3 flagged a specific section's failure class as a P1/P2
+worth fixing rather than accepting-as-limitation, a targeted section
+optimizer runs. The class → optimizer mapping is the M3 deliverable
+(established alongside the Tier 2/3 split):
+
+| Class flagged | Optimizer |
+|---|---|
+| claim_evidence on Results §K | Results-§K targeted rewrite (reads claim_inventory.md, the §K prose, the cited figures/tables) |
+| register_drift in Discussion | Discussion-targeted register-pass |
+| substory_arc | Outline-amendment loop (back to Phase 1; rare) |
+| methods_underspecified | feeds Methods reproducibility audit (8.1) |
+
+Optimizers are bounded ($0.20–$0.40 each, ≤2 passes).
+
+### 8.3 Phase 4 is fundamentally smaller than v0.7.x's per-section orchestrator
+
+v0.7.x has 8 per-section LLM calls + a reframer + a fallback reviewer. v0.8's
+Phase 4 has 2 always-on optimizers + 0–4 conditional optimizers, each
+narrowly scoped (≤300-line target sections). Net cost should be flat to
+lower vs v0.7.x while yielding tighter targeted improvements.
 
 ---
 
-*This spec is a working document. Before any non-trivial change to the
-mechanism described here, update [DECISIONS.md](DECISIONS.md) with the
-decision and rationale.*
+## 9. Phase 5 — Iterative citation rounds
+
+### 9.1 Inspired by AI Scientist; calibrated for BERIL
+
+Per Lu et al. 2026: the citation-iteration step is the only AI-Scientist
+component with empirical validation as a quality lever. v0.8 adopts the
+pattern with the following BERIL-specific calibrations:
+
+- The candidate-citation source is `pool.json` (verified-by-resolution),
+  not free WebSearch. This is the single biggest quality lever — citations
+  are real before they enter the loop.
+- 5–8 rounds (not the AI Scientist 20). The pool is bounded; diminishing
+  returns hit faster.
+- Adaptive stop: 2 consecutive rounds with no new candidate citations
+  added → terminate.
+- Per-citation justification: the LLM emits why each new citation supports
+  a specific claim_id, not just where it could be cited.
+
+### 9.2 Per-round contract
+
+Each round:
+
+1. **Candidate identification.** LLM reads current `manuscript.md` +
+   `pool.json` + `claim_inventory.md`; identifies up to 3 places where a
+   pool entry is unused but supports an existing claim.
+2. **Justification.** For each candidate, LLM emits: target_claim_id,
+   target_section, proposed_citation_pool_id, justification (≤2 sentences).
+3. **Integration.** A bounded edit pass to insert the citation in the
+   target section.
+4. **Manuscript re-check.** Tier 1 deterministic (cheap, ~$0.02) re-runs;
+   if any check regresses, the round's edits are rolled back.
+
+### 9.3 Cost target
+
+5–8 rounds × ($0.10–$0.20 per round + $0.02 Tier-1 re-check) ≈
+$0.60–$1.80 total. Bounded.
+
+### 9.4 What Phase 5 (the iterative rounds) does NOT do
+
+- Does NOT change manuscript claims or structure (only adds citation
+  references to existing claims).
+- Does NOT fix citation orphans (those are Tier-1 deterministic failures
+  surfaced earlier).
+- Does NOT add new pool entries on its own — pool growth is the explicit
+  purview of §9.5 below, separately gated.
+
+### 9.5 Handling `[NEEDS CITATION]` markers (Q6 design proposal)
+
+The holistic write may produce claims for which no pool entry supports the
+exact assertion. Rather than forcing the LLM to either (a) fabricate a
+plausible-sounding pool match or (b) reframe the claim under pressure (both
+of which sacrifice scientific honesty for pipeline cleanliness), v0.8 lets
+the holistic prompt emit `[NEEDS CITATION: <topic>]` markers as a
+first-class output. Disposition is tiered:
+
+**Tier 1 deterministic counts the markers** as part of its check pass
+(non-blocking warning, not a P0). Marker count is recorded in
+`audit/needs_citation.json` with each marker's section + claim_id +
+topic-text.
+
+**At the Phase 5 boundary, `phase_supplementary_pool` runs** if any
+`[NEEDS CITATION]` markers exist. Sub-step:
+
+1. Group markers by topic (LLM clusters near-duplicate topics).
+2. For each topic, run a bounded `citation_pool.v1`-style search
+   (WebSearch + DOI/PMID verification) limited to **5 candidate
+   citations per topic**.
+3. Verified candidates merge into `pool.json` with a `source: "supplementary_round"`
+   tag (auditable; distinguishes from seed pool).
+4. Phase 5's iterative-citation rounds then run as normal — the new
+   pool entries become candidates for integration.
+
+**Bounded by:** total supplementary additions ≤ 15 entries across all
+gap topics; per-topic verification cap of 5; one supplementary-pool
+round per draft (no recursion). On hitting the bound, remaining
+`[NEEDS CITATION]` markers are dispatched to user choice via halt:
+
+5. Halt with `phase=citation_gap_blocked` if any `[NEEDS CITATION]`
+   markers survive the supplementary round. User picks per-marker:
+   - **scope-down** (the claim is reframed or dropped — sends back to
+     a Phase-2 *targeted* rewrite of the affected section, scoped to
+     the offending claim only),
+   - **accept-as-limitation** (claim is folded into Limitations with
+     a note that targeted literature engagement was attempted and
+     failed),
+   - **manual-citation** (user provides a DOI; verifier runs once;
+     entry inserts as `source: "user_supplied"`).
+
+**Cost.** Supplementary pool round: $0.30–0.80 (capped). Per-marker
+halt-resolution: ≤$0.05 (manual; mostly file edits).
+
+**Why this design.** It preserves the v0.8 architectural bet that
+citation acquisition is mostly Phase-0 work, while accommodating the
+reality that holistic write surfaces gaps the seed pool may not have
+covered. The 15-entry / 5-per-topic / 1-round caps prevent the
+supplementary path from absorbing the project's effective citation
+discovery (which would defeat Phase 0). The halt-and-resume path
+preserves user judgment on the load-bearing decisions (scope-down vs
+accept-as-limitation) per SPEC.md §3.
+
+**Open: Q6 sign-off.** Spec proposes the above. Adam's call:
+- (a) Adopt as written.
+- (b) Tighten — supplementary pool is too generous; cap at 5 entries / 3
+  per topic.
+- (c) Loosen — let supplementary run twice if first round triggered ≥10
+  successful additions.
+- (d) Different design — e.g., always halt on marker presence, never
+  auto-supplement.
+
+---
+
+## 10. Phase 6 — Compliance gate
+
+### 10.1 Build-fails-if-missing semantics
+
+Every check in Phase 6 is binary: if any fails, the phase exits non-zero,
+the orchestrator halts with `phase=compliance_blocked`, and the user gets
+an explicit list of missing items. No re-attempts; this is the floor.
+
+### 10.2 Compliance items (deterministic)
+
+| Item | Source |
+|---|---|
+| ICMJE V.A AI-disclosure block present | SPEC.md §10.1 template; regex match |
+| Authors / Affiliations / Funding / Conflicts / Ethics / Corresponding all populated (no `[TBD]`) | regex |
+| Data-availability statement substantive (>100 chars, contains URL/accession/restriction) | M4 from SPEC.md §7.1 |
+| References list integrity (every prose citation in references.md AND bibliography.bib) | M10 from SPEC.md §7.1 |
+| Limitations section ≥150 chars and acknowledges all load-bearing discrepancies | discrepancy_register.md cross-walk |
+| Figure embeddings resolved (every `(Fig. N)` callout has a corresponding figure file in `figures/`) | filesystem check |
+| Table embeddings resolved | filesystem check |
+
+### 10.3 Why a separate phase, not part of Tier 1
+
+Phase 6 runs *after* Phase 5's citation rounds because citation iteration
+can introduce reference-list churn that needs re-verification. Tier 1 also
+checks reference resolution, but Phase 6 is the final gate before assembly
+— passing here is the contract that downstream consumers (assemble, journal
+submission) can rely on.
+
+---
+
+## 11. Phase 7 — Copy edit (clarity + concision pass)
+
+### 11.1 Scope (Q7)
+
+**Decided 2026-05-07 (Q7):** Phase 7 is on by default. Scope is broader
+than spelling/grammar — clarity and concision are first-class objectives.
+The phase may rewrite sentences for tighter scientific prose. What
+distinguishes Phase 7 from Phase 4 (selective optimizers) is *semantic
+preservation*: claims, citations, structure, and the manuscript's
+quantitative content are invariants.
+
+**Permitted edits.**
+- Sentence rewriting at the same semantic level (tightening, voice
+  conversion, breaking long sentences).
+- Sentence reordering within a paragraph.
+- Removing redundancy across paragraphs (echo-repetition cleanup the
+  Tier-1 mechanical check flagged as advisory).
+- Word-choice tightening (replacing weak verbs, scoping vague modifiers).
+- Punctuation/typography normalization.
+
+**Forbidden edits.**
+- Changing any *quantitative claim* — numbers, units, ranges, p-values,
+  effect sizes, CIs preserved byte-identical.
+- Changing any *citation token* — `[R12]` / `(Smith 2024)` / `[doi:...]`
+  preserved byte-identical.
+- Changing any *hedge marker* in a way that shifts a claim's certainty
+  level (e.g., "may" → "does"; "associates" → "causes" is forbidden).
+- Adding or deleting paragraphs.
+- Reordering at the section or subsection level.
+- Adding new claims or citations.
+
+### 11.2 Semantic-preservation post-check (NEW — Q7)
+
+The diff-cap from the prior spec (≤10% line change) is too coarse for the
+broader scope; clarity rewrites can legitimately touch most paragraphs.
+Replaced with a **per-claim semantic-invariance check** that runs
+deterministically pre/post:
+
+1. **Claim_id cross-walk.** Every `claim_id` referenced in pre-edit prose
+   MUST appear in post-edit prose at the same section. (Stricter than line
+   diff; checks meaning preservation.)
+2. **Citation cross-walk.** Every citation token in pre-edit prose MUST
+   appear in post-edit prose. Inserts forbidden; removals forbidden.
+3. **Numeric token preservation.** Every numeric literal (regex
+   `\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b`) in pre-edit prose MUST appear in
+   post-edit prose at least as often as in pre-edit. (Allows duplicate
+   removal in service of echo-repetition cleanup; forbids invention.)
+4. **Hedge-marker level.** Each claim's hedge-marker count (`may`, `might`,
+   `suggests`, `appears`, `candidate`, `hypothesis-generating`,
+   `preliminary`, `correlates`, `is associated with`) is computed pre and
+   post; per-claim level may decrease by ≤1 (cleanup) but not increase
+   (no new hedge-injection) and not flip a "scoped" claim to "declarative."
+5. **Section header preservation.** Every `^#`/`^##` header in pre-edit
+   appears in post-edit at the same nesting level.
+6. **Manuscript-level word count delta** ≤ 15% (broader than v0.7-style
+   ≤10% line diff; targets concision while bounding the scope).
+
+If any check (1)–(5) fails, the edit is rejected wholesale; the phase
+halts with `phase=copyedit_invariance_violated`, the validation output
+JSON is written to `audit/copyedit_invariance.json`, and the user can
+either accept manually or skip Phase 7.
+
+If only check (6) fails (word count delta too large), the orchestrator
+retries with a tightened prompt budget (one retry only); on second-pass
+overrun, halt with `phase=copyedit_overrun`.
+
+### 11.3 Cost target
+
+~$0.40–0.80 per pass on Sonnet (40K input + 20K output, broader than v0.7
+spelling-pass scope). Single pass; one retry on word-count overrun only.
+
+---
+
+## 12. Phase 8 — Final docx
+
+The existing v0.3+ figure-embedding pipeline plus the v0.6 tables embedding
+plus `assemble_docx.py` are reused as-is. No changes vs v0.7.x's
+`phase_assemble_docx`. Inputs: `manuscript.md`, `figures_manifest.tsv`,
+`tables_manifest.tsv`. Output: `manuscript.docx` with embedded figures and
+tables, ICMJE structure, no journal-specific styling.
+
+---
+
+## 13. State + handoff contract
+
+State.json schema preserves v0.7.x's top-level fields and adds v0.8 phase
+states. Schema bump: `STATE_SCHEMA_VERSION = "0.8"`. A v0.7→v0.8 migration
+script is the M8 deliverable; v0.8 runs do not back-migrate v0.7.x state.
+
+**v0.8 phase enum (state.phase):**
+
+```
+initializing → phase0_tooling → story_pick → story_pick_blocked →
+holistic_write → cascade_tier1 → cascade_tier2 → cascade_tier3 →
+selective_optimizers → citation_rounds → compliance → copyedit →
+assembled
+```
+
+Plus the halt states: `tier{1,2,3}_blocked`, `compliance_blocked`,
+`copyedit_overrun`, `halted` (catch-all).
+
+The v0.7.x handoff JSON contract (`.handoff.json` with `phase`,
+`prompt_to_user`, `resume_command`, etc.) carries forward unchanged. The
+slash-command parser keeps its "always read .handoff.json" rule.
+
+---
+
+## 14. Cost + latency targets
+
+| Phase | Tokens (in/out) | Model | Cost | Wall-clock |
+|---|---|---|---|---|
+| 0 — tooling | ~30K/15K | mixed (Sonnet citation_pool + small Opus pass for discrepancy LLM) | $0.55–1.55 | 2–5 min |
+| 1 — story builder | 10K/5K | Sonnet | $0.10–0.20 | 1–2 min |
+| 2 — holistic write | 50K/30K | **Opus 4.6** (Q4) | $4.00–8.00 | 4–8 min |
+| 3 — cascade tier 1 | 5K/2K | Haiku (ambiguity-resolution only) | $0.02–0.05 | <30 s |
+| 3 — cascade tier 2 | 12K/5K | Haiku | $0.05–0.10 | 1 min |
+| 3 — cascade tier 3 | 80K/15K | Sonnet (canonical adversarial) | $1.00–2.50 | 3–6 min |
+| 4 — selective optimizers | 20K/10K | Sonnet (targeted), Opus only for abstract | $0.40–1.00 | 2–4 min |
+| 5 — citation rounds (5–8) | 30K/10K total | Sonnet | $0.60–1.80 | 3–6 min |
+| 5b — supplementary pool build (only if `[NEEDS CITATION]` triggered; see Q6) | 15K/5K | Sonnet + WebSearch | $0.30–0.80 conditional | 2–4 min if engaged |
+| 6 — compliance | <5K | Haiku | $0.02 | <30 s |
+| 7 — copy edit | 40K/20K (broader scope per Q7) | Sonnet | $0.40–0.80 | 2–3 min |
+| 8 — docx | 0 | — | $0 | <30 s |
+| **Total (typical, no supplementary pool)** | — | — | **$7.50–16.00** | **22–38 min** |
+| **Total (with supplementary pool, both gap-fills)** | — | — | **$8.00–17.00** | **25–42 min** |
+
+This is roughly 1.7–2.0× v0.7.x's $4–8 / 17–25 min on
+functional_dark_matter. The cost increase is concentrated in the Opus
+holistic write (Q4) — the explicit accepted trade-off for the integrative-
+biology quality gain that motivated v0.8.0. The cut-over gate at M7 will
+measure actual cost on ibd_phage_targeting; if v0.8.0 cost lands above
+1.3× *and* quality dominance on §16's metrics is not clear, the M7
+go/no-go shifts toward "keep v0.7.x as default."
+
+---
+
+## 15. v0.7.x → v0.8.0 migration matrix
+
+| Component | v0.7.x state | v0.8.0 disposition | Notes |
+|---|---|---|---|
+| `extract_methods.py` | Phase 2 extractor | KEPT (Phase 0 §4.1) | No change to extraction |
+| `extract_figures.py` | Phase 2 extractor | KEPT (Phase 0 §4.3) | No change |
+| `extract_tables.py` | v0.6 addition | KEPT (Phase 0 §4.4) | No change |
+| `citation_pool.py` (Python tool) | builder + verifier | KEPT (Phase 0 §4.2) | No change |
+| `prompts/citation_pool.v1.md` | Phase 0 LLM | KEPT (Phase 0 §4.2) | Sole prompt-side keeper |
+| `prompts/plan.v1.md` | throughline candidates | RETIRED → archive/ | Phase 1 story builder absorbs the role |
+| `prompts/methods.v1.md` | section drafter | RETIRED → archive/ | Holistic write absorbs |
+| `prompts/results.v1.md` | section drafter | RETIRED → archive/ | Holistic write absorbs |
+| `prompts/discussion.v1.md` | section drafter | RETIRED → archive/ | Holistic write absorbs |
+| `prompts/intro.v1.md` | section drafter | RETIRED → archive/ | Holistic write absorbs |
+| `prompts/abstract.v1.md` | section drafter | RETIRED → archive/ | Phase 4 abstract optimizer is much smaller |
+| `prompts/reframer.v1.md` | drift detection | RETIRED → archive/ | Phase 0 §4.5 discrepancy_register replaces |
+| `prompts/revise_throughline.v1.md` | mini-prompt | RETIRED → archive/ | Phase 1 story-amendment cycle replaces |
+| `prompts/rewrite.v1.md` | rewrite loop | RETIRED → archive/ | Phase 4 selective optimizers replace |
+| `prompts/fallback_reviewer.v1.md` | inline reviewer | REWRITTEN → `fallback_reviewer.v2.md` | Tier 3 fallback when beril-adversarial CLI absent (Q5); rewrites to v3 paper schema; stays in active prompts/, not archive/ |
+| `prompts/figure_caption.v1.md` | LLM caption synthesis | KEPT (Phase 8) | No change |
+| `validate_manuscript.py` (M1–M10) | post-draft validator | REWRITTEN as Tier 1 cascade | Logic preserved; routing and verbiage change |
+| `check_throughline_glyphs.py` | plan.v1 cross-walk | RETIRED → archive/ | Phase 1 story builder absorbs glyph discipline |
+| `check_data_availability.py` | M4 helper | KEPT → Phase 6 | Compliance gate item |
+| `check_figures_manifest.py` | manifest cross-walk | KEPT → Tier 1 | Mechanical check |
+| `check_tables_manifest.py` | manifest cross-walk | KEPT → Tier 1 | Mechanical check |
+| `check_caption_provenance.py` | caption integrity | KEPT → Tier 1 | Mechanical check |
+| `check_scope_coherence.py` | section drift | RETIRED → archive/ | Tier 2 register_drift class replaces |
+| `check_overclaim.py` | overclaim detector | RETIRED → archive/ | Tier 2 unbacked_quantitative class replaces |
+| `check_sentence_complexity.py` | language quality | KEPT → Tier 1 | Mechanical (the v0.8.0 punch-list version) |
+| `check_abbreviation_discipline.py` | language quality | KEPT → Tier 1 | Mechanical |
+| `check_echo_repetition.py` | language quality | KEPT → Tier 1 | Mechanical |
+| `check_repair_scope.py` | rewrite-loop scope | RETIRED → archive/ | No rewrite loop in v0.8 |
+| `ensemble_review.py` | (currently unused?) | RETIRED if not wired | TBD at M3 |
+| `assemble_docx.py` | docx renderer | KEPT (Phase 8) | No change |
+| `paper_writer.sh` | 3000+ line orchestrator | REWRITTEN | New phase enum, new dispatch table; ~1500 lines targeted |
+| `state.py` | state.json schema | EXTENDED | v0.7→v0.8 migration in M8 |
+| `commands/draft.py` + `continue_run.py` | CLI dispatchers | EXTENDED | New phase enum support; v0.7 flags retained for back-compat where possible |
+
+`discrepancy_register.py` and `claim_inventory.py` are NEW (Phase 0 §4.5,
+§4.6). `review_cascade.py` is NEW (Phase 3 orchestration). All other Phase
+3/4/5/6/7 logic is in the existing tools or the rewritten orchestrator.
+
+---
+
+## 16. Cut-over gate (M7)
+
+A/B run on `ibd_phage_targeting` through v0.7.x (current default) and
+v0.8.0 (M0–M6 deliverable). Score on 6 metrics:
+
+1. **Token cost.** Sum of all LLM-call input + output tokens. Objective.
+2. **Wall-clock time.** First-byte to last-byte. Objective.
+3. **Adversarial findings count after one Tier-3 pass.** Run beril-adversarial
+   v0.7.x against both manuscripts with identical settings. Objective.
+4. **Plan-vs-execution gap count.** Hand-audit: claims about methods that
+   don't match REPORT.md. Objective (with manual labor).
+5. **Citation accuracy.** 10% audit sample of citations: % that resolve to
+   a paper supporting the claim they're attached to. Objective.
+6. **Paper-review skill quality assessment.** Run the paper-review skill
+   against both manuscripts; take the qualitative summary. Subjective but
+   reproducible.
+
+**Decision rule.** v0.8.0 must dominate v0.7.x on **≥4 of 6** metrics OR
+have a documented accepted-trade-off reason for ties/regressions.
+
+**If gate fails:** keep v0.7.x as default; ship v0.8.0 as experimental flag
+(`--writer-version v0_8`); file follow-up tasks for the failed metrics. Do
+NOT cut over by tradition; the gate is real.
+
+**Reviewer pool (Q8).** **Decided 2026-05-07:** for v0.8.0 the M7
+go/no-go is Adam-only. Structured user-centered review — multi-reviewer,
+naive-reader pass, colleague cross-evaluation — is deferred to a
+post-v0.8.0 launch milestone (planned but unscheduled; not blocking M0–M8).
+The intent of the deferral: M7 is a research-iteration decision, not a
+public launch; broader review fits the launch event, not the cut-over.
+
+**Sanity-check project:** functional_dark_matter (the v0.7.x calibration
+project). Run v0.8.0 against it as well; expect it to pass without surprise.
+If functional_dark_matter regresses materially, that's a stop-the-press
+signal — the issue is more fundamental than a gate fail.
+
+---
+
+## 17. Milestones M0–M8
+
+**M0 — Spec sign-off (this document).** ~600–1000 lines of `SPEC_v0_8.md`
+plus a DECISIONS.md v0.8.0 entry capturing the decision frame. NO code.
+End of milestone is Adam's sign-off on the spec questions in §19.
+
+**M1 — Phase 0 NEW tools.** `discrepancy_register.py` +
+`claim_inventory.py` + unit tests + smoke against `ibd_phage_targeting`.
+Independently testable; no orchestrator changes yet. ~400 LOC + ~40 tests.
+
+**M1 / M2 contract pointer (added 2026-05-07).** Phase 0's extracted
+artifacts are **`methods_provenance.md` + `figures_inventory.md` +
+`tables_inventory.md`** — the three markdowns produced by v0.7.x's
+`extract_methods.py` / `extract_figures.py` / `extract_tables.py`. The
+manifest TSVs (`figures_manifest.tsv`, `tables_manifest.tsv`) are NOT
+phase_extract artifacts; they are emitted by the `results.v1` LLM prompt
+during the writing pipeline and encode `paper_order_n` (throughline-driven,
+post-figure-selection). M2's holistic prompt grounds against the three
+markdowns; M1's downstream tools (`discrepancy_register.py`,
+`claim_inventory.py` per §4.5/§4.6) take the markdowns as inputs and have
+no manifest dependency. This contract was discovered via M1 §C0 CLI-surface
+verification on 2026-05-07; M1_PUNCH_LIST.md §C0 was corrected
+correspondingly. Carry this forward when wiring M2's prompt inputs and
+when assessing any future change to phase_extract's surface.
+
+**M2 — Holistic write + story builder.** `paper_writer_v0_8.md` (the
+holistic prompt) + `00_story_outline.md` builder prompt + Phase-1
+amendment loop + state.phase enum extension. Produces a draft on
+`ibd_phage_targeting` end-to-end through Phase 2 (no review yet). The
+opt-in flag `--writer-version v0_8` enables this path; v0.7.x default
+unchanged.
+
+**M3 — Tiered review cascade.** Tier-1 deterministic checks in
+`review_cascade.py` + Tier-2 light reviewer + cascade orchestrator.
+Empirical Tier-2/3 split done **before M3 starts**; results captured in a
+`tier_split_analysis.md` artifact that pins the §7.3 PROVISIONAL list.
+
+**M4 — Phase 4 selective optimizers.** Abstract optimizer + Methods
+reproducibility audit + class→optimizer routing.
+
+**M5 — Phase 5 citation rounds.** Iterative citation injector with adaptive
+stop.
+
+**M6 — Phase 6 compliance gate + Phase 7 copy edit.**
+
+**M7 — A/B test + cut-over decision.** Score sheet on
+`ibd_phage_targeting`; sanity check on `functional_dark_matter`; explicit
+go/no-go decision recorded in DECISIONS.md.
+
+**M8 — Cut-over commit.** Make `--writer-version v0_8` the default;
+deprecate v0.7.x section prompts (move to `archive/`); update CLI defaults
++ slash-command markdowns + RELEASE_NOTES; ship MIGRATION_NOTES.md;
+state-schema migration script.
+
+---
+
+## 18. Per-milestone discipline
+
+Per `feedback_punch_list_release_pattern.md` and the broader pattern
+established for v0.1.0/v0.3.x/v0.6/etc.:
+
+- **Punch list at start of each milestone.** `M{N}_PUNCH_LIST.md` with
+  Tier A/B/C structure, explicit AC per item, dep edges between items,
+  smoke tests at every tier boundary.
+- **Smoke test at end.** `tests/smoke/m{N}_smoke.py` validating the
+  milestone's claim end-to-end. Failure of the smoke is a ship-blocker.
+- **Decision-log entry.** Any non-obvious choice during the milestone goes
+  into `DECISIONS.md` as a new D-N entry.
+- **Memory entry.** A summary of what shipped + gotchas + what to watch
+  in the next milestone, written to auto-memory under
+  `project_paper_writer_v0_8_m{N}.md`. Index entry in `MEMORY.md`.
+
+Per `feedback_cross_skill_contract_drift.md`: any v0.8 change that touches
+the per-draft directory layout, the citation-pool schema, the figures or
+tables manifest schema, or the state.json schema MUST file consumer-update
+tasks for `beril-adversarial` BEFORE the v0.8 milestone tags. The
+v0.7.x → v0.8 state migration is a known interface change (tracked at M8).
+
+---
+
+## 19. Decisions captured (2026-05-07)
+
+All twelve sign-off items resolved. They become D-N entries in DECISIONS.md
+on M0 commit.
+
+| Q | Decision | Where it lives in this spec |
+|---|---|---|
+| Q1 | LLM-assisted discrepancy register (string-match too fragile for synonyms/paraphrase) | §4.5 |
+| Q2 | Full coverage on claim_inventory; no salience filter in v0.8.0 | §4.6 |
+| Q3 | Triage rolled into story builder (no separate `discovery.v1` step) | §5 preamble |
+| Q4 | Default holistic-write model is Opus 4.6; +$2–3/run accepted trade-off | §6.7, §14 |
+| Q5 | Keep a fallback reviewer; rewrite to v3 schema as `fallback_reviewer.v2.md`; not in archive/ | §7.4, §15 |
+| Q6 | `[NEEDS CITATION]` allowed at holistic-write; bounded supplementary pool round at Phase 5 boundary (≤15 entries / 5 per topic / 1 round); halt-and-resume on residual markers | §9.5 |
+| Q7 | Phase 7 on by default; broader scope (clarity + concision); semantic-invariance post-check (5 hard invariants + ≤15% word-count delta) replaces line-diff cap | §11 |
+| Q8 | M7 cut-over reviewer pool: Adam only; user-centered review deferred to a post-v0.8.0 launch milestone | §16 |
+| Q9 | v0.8.0 IS the cut-over after M7 passes; no parallel-track v0.9.0 release shape | §17 M8 |
+| Q10 | Archive layout: directory-layout interpretation — `prompts/archive/v0_7/` mirrors active `prompts/` filenames; resurrection is path-mechanical; no separate PROVENANCE.md file (git history is the canonical record) | §15 + (M1 layout) |
+| Q11 | Old V0_8_0_PUNCH_LIST.md → renamed `archive-v0_8_language_quality_punch_list.md` (executed 2026-05-07) | (done) |
+| Q12 | Keep SPEC.md as the v0.1 baseline; SPEC_v0_8.md as v0.8 spec; consolidate at v1.0 | (status quo) |
+
+M0 is complete on these decisions. M1 (`discrepancy_register.py` +
+`claim_inventory.py` + tests + smoke against ibd_phage_targeting) is
+unblocked. The 12 decisions above will land in DECISIONS.md as D-034
+through D-045 (or the next available range) on M0 commit.
+
+---
+
+## 20. Pointers
+
+- **Architecture decision frame:** auto-memory entry
+  `project_paper_writer_v0_8_architecture.md` (2026-05-07).
+- **Prior art:** AI Scientist (Lu et al., *Nature* 2026,
+  doi:10.1038/s41586-026-10265-5) for citation iteration + reviewer
+  ensemble; the IBD one-shot exercise (2026-05-06/07 conversation) for the
+  holistic-write empirical comparison.
+- **Sister-skill contract:** `beril-adversarial` v0.7.0+ (paper schema v3,
+  per `project_adversarial_v0_7_x.md`). Tier 3 of the cascade is the
+  canonical adversarial CLI subcommand `beril-adversarial review --type paper`.
+- **Reference projects:** `ibd_phage_targeting` (M7 A/B target);
+  `functional_dark_matter` (sanity-check second project; STRONG-tier
+  baseline).
+- **v0.7.x state:** `RELEASE_NOTES_v0_7_1.md`, `RELEASE_NOTES_v0_6.md`,
+  `LAYOUT.md`, `DECISIONS.md` D-001 through D-033+. Auto-memory:
+  `project_paper_writer_v0_7_1.md`.
+- **v0.8 prior plan:** `V0_8_0_PUNCH_LIST.md` (language-quality version,
+  superseded by this spec; disposition Q11).
+- **Per-milestone discipline reference:**
+  `feedback_punch_list_release_pattern.md`,
+  `feedback_cross_skill_contract_drift.md`,
+  `feedback_no_git_writes_in_sandbox.md`.
+
+---
+
+*This spec is the M0 deliverable. Sign-off is via Adam answering Q1–Q12;
+on sign-off, the answers are recorded as DECISIONS.md v0.8.0 entries and
+M1 begins. Nothing in M1+ runs before sign-off.*

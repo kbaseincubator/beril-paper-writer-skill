@@ -10,7 +10,7 @@ This module's regex pre-pass + LLM classifier + validator
 coverage. Decision per STAGED_IMPROVEMENT_PLAN.md Stage 1 Tier E:
 keep, don't delete, don't invest further until a consumer surfaces.
 
-Per SPEC_v0_8 §4.5 + DECISIONS.md D-034 Q1:
+Per SPEC §4.5 + DECISIONS.md D-034 Q1:
 
   Surfaces every place where RESEARCH_PLAN.md prescribed an analysis the
   notebooks did not execute, OR the notebooks executed an analysis the
@@ -1647,7 +1647,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "Walks RESEARCH_PLAN.md and methods_provenance.md, surfaces "
             "discrepancies as discrepancy_register.md, appends an audit "
             "JSONL line to <output-dir>/audit/phase0.jsonl. See "
-            "SPEC_v0_8 §4.5 + DECISIONS.md D-034 Q1."
+            "SPEC §4.5 + DECISIONS.md D-034 Q1."
         ),
     )
     p.add_argument(

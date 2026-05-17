@@ -1,34 +1,35 @@
 """`beril-paper-writer draft <project>` — start a fresh paper draft.
 
-Thin Python wrapper around `tools/paper_writer.sh draft`. The shell
-script does the orchestration; this command:
+Invokes the Python orchestrator (`PaperWriterOrchestrator.run_pipeline`)
+to take the project through init → extract → triage → plan, halting at
+the throughline-pick gate. The user picks a candidate, then resumes via
+`beril-paper-writer continue <draft_dir> --pick TLN`.
 
-  1. Resolves the project argument (path or project_id under projects/)
-  2. Locates paper_writer.sh from the package's bundled skill data
-     (importlib.resources)
-  3. Forwards CLI flags (--model, --depth, --mode, etc.) to the shell
-  4. Runs the shell in the foreground, streams its output, and returns
-     its exit code
-  5. On exit 0 with the bash script having paused at throughline_pick,
-     reads the resulting <draft_dir>/.handoff.json and prints a friendly
-     summary so the slash-command markdown can parse the next step
+This command:
+  1. Resolves the project argument (path, or bare project_id under
+     `<cwd>/projects/<id>/` — Stage 3 Tier J fallback)
+  2. Allocates the next `papers/draft_N/` directory
+  3. Constructs the orchestrator (resolves `claude` and
+     `beril-adversarial` to absolute paths up front, fails loud if
+     `claude` is missing, warns at init if `beril-adversarial` is
+     missing — Tier J + Tier K)
+  4. Runs the pipeline asynchronously; on `PipelineHalted` at
+     throughline_pick, prints a handoff summary parseable by the
+     slash-command markdown
 
-The shell script is the single source of truth for orchestration logic;
-this Python layer is thin glue. See SPEC §5.1 for the drafting flow and
-LAYOUT 'Slash commands' for the user-facing CLI shape.
+See LAYOUT.md 'Slash commands' for the user-facing CLI shape and
+orchestrator.py for the pipeline state machine. (Historical: this
+command was originally a thin wrapper around `tools/paper_writer.sh
+draft`; the Python orchestrator took over in Stage 1, and the bash
+flow is on the retirement track per the 2026-05-17 audit.)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-from importlib import resources
 from pathlib import Path
-
-from beril_paper_writer import __version__
 
 
 def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -102,29 +103,6 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
     return p
 
 
-def _locate_paper_writer_sh() -> Path:
-    """Locate paper_writer.sh in the package data.
-
-    Returns the absolute path to the shipped script. Raises FileNotFoundError
-    if the package data is missing (which would mean the install is broken).
-    """
-    # importlib.resources path: beril_paper_writer/skill/tools/paper_writer.sh
-    try:
-        # Python 3.9+ pattern.
-        ref = resources.files("beril_paper_writer").joinpath(
-            "skill", "tools", "paper_writer.sh"
-        )
-        # ref is a Traversable; .as_posix() works for filesystem-resident packages.
-        # Convert to a real Path for subprocess.
-        with resources.as_file(ref) as p:
-            return Path(p)
-    except (ModuleNotFoundError, FileNotFoundError) as e:
-        raise FileNotFoundError(
-            "paper_writer.sh not found in package data. "
-            "Reinstall beril-paper-writer-skill (pipx install --force ...)."
-        ) from e
-
-
 def run(args: argparse.Namespace) -> int:
     import asyncio
     from beril_paper_writer.orchestrator import PaperWriterOrchestrator
@@ -179,11 +157,16 @@ def run(args: argparse.Namespace) -> int:
         # optimizer); a bare `beril-paper-writer draft` should not
         # silently scaffold the manuscript on Sonnet. `--model` still
         # overrides. See the orchestrator constructor for rationale.
+        # Stage 3 Tier K (2026-05-16): plumb --no-adversarial through.
+        # Default False; when set, phase_review skips the canonical
+        # beril-adversarial reviewer and uses the inline fallback
+        # explicitly (no warning — user has chosen).
         orch = PaperWriterOrchestrator(
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),
             model=getattr(args, "model", None) or "claude-opus-4-6",
             model_writing=getattr(args, "model_writing", None) or "claude-opus-4-6",
+            no_adversarial=getattr(args, "no_adversarial", False),
         )
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)

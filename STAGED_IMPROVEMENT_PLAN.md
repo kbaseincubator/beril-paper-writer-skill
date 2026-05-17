@@ -374,11 +374,13 @@ review, now renumbered Stage 4 below): the regression cluster had to
 clear before deterministic cross-walks could be built on a
 trustworthy pipeline.
 
-**Closure result.** Ten tiers shipped; 957 unit tests pass (44 new
-this stage: 17 in `test_orchestrator_stage3.py`, 27 in
+**Closure result.** Eleven tiers shipped; 965 unit tests pass (51 new
+this stage: 24 in `test_orchestrator_stage3.py`, 27 in
 `test_validate_claim_inventory.py`); end-to-end figure-embed verified
 on a re-render of draft_9; pipeline reached the throughline-pick gate
-on a live foreground run (draft_13, plan+triage clean, tier STRONG).
+on a live foreground run (draft_13, plan+triage clean, tier STRONG)
+and a subsequent full live run completed end-to-end ($12.88 continue
++ later a $53.70 deep run; the $53.70 surfaced Tier K's need).
 
 | Tier | Fix | Verification |
 |---|---|---|
@@ -392,6 +394,7 @@ on a live foreground run (draft_13, plan+triage clean, tier STRONG).
 | H | `extract_claims.v1.md` — explicit `source_notebook` exact-filename rule + worked counter-example (the amplifier fix) | prompt review |
 | I | `validate_claim_inventory.py` — conservative repair pass (notebook-ID match + missing-extension); rewrites `source_notebook` to the full real filename on unambiguous match | reconstructed draft_9: 183/191 repaired, 8 correctly stay cleared |
 | J | **`claude` CLI resolution** — `resolve_claude_bin()` resolves `claude` to an absolute path at orchestrator init (`BERIL_CLAUDE_BIN` override → PATH → well-known locations incl. nvm), fails loud at init; all 4 `claude` call sites use `self.claude_bin`. Plus `draft.py`: the documented `projects/<id>/` path fallback (never implemented) + a stillborn-dir hint on a pre-flight `RuntimeError`; `configure.py` reports the same resolution the orchestrator uses | live test (draft_10–13): backgrounded `beril-paper-writer` raised `FileNotFoundError: 'claude'`, foreground worked — bare-name PATH lookup is launch-context-dependent; absolute path is immune |
+| K | **`beril-adversarial` resolution + loud-warn fallback** — `resolve_adversarial_bin()` parallels Tier J but returns `None` instead of raising (adversarial is required-by-default-with-fallback, not hard-required). Orchestrator `__init__` resolves and logs a loud WARNING upfront when canonical is missing and `--no-adversarial` wasn't passed. `phase_review` Tier 3 branches three ways (canonical via absolute path / fallback-with-warning / explicit `--no-adversarial` opt-out). New `_run_fallback_reviewer()` invokes `fallback_reviewer.v1.md` via the cost helper. New `audit/review_mode.json` records which reviewer ran (canonical / canonical-failed / fallback / fallback-failed / none). `--no-adversarial` flag plumbed through `draft.py` AND `continue_run.py` (continue was previously ignoring it). | live test (draft_1, $53.70 run): canonical reviewer didn't fire despite being on PATH — bare-name spawn class. Tier K's absolute-path resolution removes the variable; the loud warning + audit/review_mode.json makes the lighter-review state impossible to miss going forward. |
 
 **Root cause of the headline regression (source_notebook).** The
 presentation-maker team flagged draft_9's claim_inventory validator

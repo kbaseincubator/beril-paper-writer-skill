@@ -1,15 +1,14 @@
 """config.py — Configuration and .env parser.
 
-Loads API keys and discovers the active LLM provider based on available keys.
-Prioritizes CBORG for cost efficiency if available, falling back to Anthropic
-or OpenAI.
-
-STATUS (Stage 1 Tier E, 2026-05-11): the `haiku_model` attribute is
-read by orchestrator.phase_review for Tier 2 model selection.
-Otherwise this module's purpose (multi-provider API-key discovery)
-is unused by the active pipeline (claude -p subprocess inherits its
-own auth). Companion to `llm_client.py`; both kept as
-forward-deployed per STAGED_IMPROVEMENT_PLAN.md Stage 1 Tier E.
+STATUS (audit 2026-05-17): only the `haiku_model` attribute is read
+by orchestrator.phase_review for Tier-2 model selection. The
+multi-provider API-key discovery (CBORG / Anthropic / OpenAI) is
+not used by the active pipeline — `claude -p` subprocesses inherit
+their own auth via Claude Code. The companion `llm_client.py`
+forward-deployed alongside this module has been deleted (audit
+2026-05-17, item 2). Once the dust settles on the architecture this
+module could shrink to just the `haiku_model` env lookup; deferred
+for now.
 """
 
 import os

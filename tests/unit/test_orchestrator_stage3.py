@@ -44,6 +44,7 @@ import pytest
 from beril_paper_writer.orchestrator import (
     PaperWriterOrchestrator,
     resolve_claude_bin,
+    resolve_adversarial_bin,
 )
 
 
@@ -347,6 +348,148 @@ def test_resolve_claude_bin_unresolvable_raises_with_searched_paths(
     assert "Cannot locate the `claude` CLI" in msg
     assert "Searched:" in msg
     assert "BERIL_CLAUDE_BIN" in msg
+
+
+# ---------------------------------------------------------------------------
+# resolve_adversarial_bin — Tier K
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_adversarial_bin_honors_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BERIL_ADVERSARIAL_BIN pointing at a real file wins over PATH."""
+    fake_adv = tmp_path / "my-beril-adversarial"
+    fake_adv.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("BERIL_ADVERSARIAL_BIN", str(fake_adv))
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.shutil.which",
+        lambda name: "/somewhere/else/beril-adversarial",
+    )
+    assert resolve_adversarial_bin() == str(fake_adv.resolve())
+
+
+def test_resolve_adversarial_bin_env_override_not_a_file_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BERIL_ADVERSARIAL_BIN set to a non-file is a hard error — explicit
+    misconfiguration should fail loud, not silently fall through to the
+    inline fallback reviewer."""
+    monkeypatch.setenv(
+        "BERIL_ADVERSARIAL_BIN", str(tmp_path / "does-not-exist"),
+    )
+    with pytest.raises(RuntimeError, match="BERIL_ADVERSARIAL_BIN"):
+        resolve_adversarial_bin()
+
+
+def test_resolve_adversarial_bin_falls_back_to_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No override → shutil.which result is used."""
+    monkeypatch.delenv("BERIL_ADVERSARIAL_BIN", raising=False)
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.shutil.which",
+        lambda name: (
+            "/usr/local/bin/beril-adversarial"
+            if name == "beril-adversarial" else None
+        ),
+    )
+    assert resolve_adversarial_bin() == "/usr/local/bin/beril-adversarial"
+
+
+def test_resolve_adversarial_bin_returns_none_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike resolve_claude_bin (which raises), resolve_adversarial_bin
+    returns None when the canonical reviewer isn't installed — the
+    orchestrator handles that case by warning loudly + falling back to
+    the inline reviewer rather than halting."""
+    monkeypatch.delenv("BERIL_ADVERSARIAL_BIN", raising=False)
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.shutil.which", lambda name: None,
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    assert resolve_adversarial_bin() is None
+
+
+# ---------------------------------------------------------------------------
+# Tier K — orchestrator init logs warning when adversarial missing
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_warns_when_adversarial_missing(
+    project_with_figures: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When beril-adversarial is unavailable and --no-adversarial wasn't
+    set, orchestrator __init__ emits a WARNING log that surfaces the
+    install instruction. This warning fires at construction time so the
+    user knows minutes before phase_review what kind of review they're
+    heading toward."""
+    # Force adversarial resolver to return None.
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.resolve_adversarial_bin",
+        lambda: None,
+    )
+    draft_dir = project_with_figures / "papers" / "draft_1"
+    with caplog.at_level("WARNING", logger="orchestrator"):
+        orch = PaperWriterOrchestrator(draft_dir=draft_dir)
+    assert orch.adversarial_bin is None
+    assert orch.no_adversarial is False
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "beril-adversarial" in msgs
+    assert "FALL BACK" in msgs or "fall back" in msgs.lower()
+    assert "BERIL_ADVERSARIAL_BIN" in msgs or "pipx install" in msgs
+
+
+def test_orchestrator_no_warning_when_adversarial_resolved(
+    project_with_figures: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When adversarial resolves, an INFO log records the path and no
+    WARNING fires."""
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.resolve_adversarial_bin",
+        lambda: "/usr/local/bin/beril-adversarial",
+    )
+    draft_dir = project_with_figures / "papers" / "draft_1"
+    with caplog.at_level("INFO", logger="orchestrator"):
+        orch = PaperWriterOrchestrator(draft_dir=draft_dir)
+    assert orch.adversarial_bin == "/usr/local/bin/beril-adversarial"
+    # No fallback warning emitted.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("beril-adversarial" in r.message for r in warnings)
+
+
+def test_orchestrator_no_adversarial_flag_skips_resolution(
+    project_with_figures: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When --no-adversarial is set, resolve_adversarial_bin is not even
+    called (it's an explicit user opt-out, not a missing-tool warning)."""
+    called = {"count": 0}
+
+    def _spy():
+        called["count"] += 1
+        return "/usr/local/bin/beril-adversarial"
+
+    monkeypatch.setattr(
+        "beril_paper_writer.orchestrator.resolve_adversarial_bin", _spy,
+    )
+    draft_dir = project_with_figures / "papers" / "draft_1"
+    with caplog.at_level("INFO", logger="orchestrator"):
+        orch = PaperWriterOrchestrator(
+            draft_dir=draft_dir, no_adversarial=True,
+        )
+    assert orch.no_adversarial is True
+    assert orch.adversarial_bin is None
+    assert called["count"] == 0  # resolver not invoked
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "--no-adversarial" in msgs
 
 
 def test_classify_tier_preserves_explicit_user_set_tier(

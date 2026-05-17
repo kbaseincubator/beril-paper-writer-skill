@@ -333,11 +333,24 @@ Apply the user's revision per your system prompt's discipline pass. Write THROUG
 
 
 
-def _resume_via_orchestrator(draft_dir: Path, max_cost_usd: float | None = None) -> int:
+def _resume_via_orchestrator(
+    draft_dir: Path,
+    max_cost_usd: float | None = None,
+    no_adversarial: bool = False,
+) -> int:
     import asyncio
     from beril_paper_writer.orchestrator import PaperWriterOrchestrator
-    
-    orch = PaperWriterOrchestrator(draft_dir, max_cost_usd=max_cost_usd)
+
+    # Stage 3 Tier K (2026-05-16): plumb --no-adversarial through to
+    # the orchestrator. Previously the continue path constructed the
+    # orchestrator with defaults only, so a user passing
+    # `--no-adversarial` to `continue` would have been silently
+    # ignored.
+    orch = PaperWriterOrchestrator(
+        draft_dir,
+        max_cost_usd=max_cost_usd,
+        no_adversarial=no_adversarial,
+    )
     try:
         asyncio.run(orch.run_pipeline())
         return 0
@@ -433,11 +446,19 @@ def run(args: argparse.Namespace) -> int:
         print(f"✓ state.json updated: phase=citation_pool, throughline={args.pick}", file=sys.stderr)
 
         # Now dispatch to paper_writer.sh resume to run the drafting phases.
-        return _resume_via_orchestrator(draft_dir, max_cost_usd=getattr(args, "max_cost_usd", None))
+        return _resume_via_orchestrator(
+            draft_dir,
+            max_cost_usd=getattr(args, "max_cost_usd", None),
+            no_adversarial=getattr(args, "no_adversarial", False),
+        )
 
     elif st.phase in ("init", "citation_pool", "drafting", "supplementary_pool", "review", "optimize", "rewrite", "compliance_gate", "compliance"):
         # paper_writer.sh handles each of these idempotently.
-        return _resume_via_orchestrator(draft_dir, max_cost_usd=getattr(args, "max_cost_usd", None))
+        return _resume_via_orchestrator(
+            draft_dir,
+            max_cost_usd=getattr(args, "max_cost_usd", None),
+            no_adversarial=getattr(args, "no_adversarial", False),
+        )
 
     elif st.phase == "assembled":
         print("✓ Already complete (phase=assembled).", file=sys.stderr)

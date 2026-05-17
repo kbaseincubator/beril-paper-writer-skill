@@ -102,11 +102,17 @@ From BERIL_ROOT:
   also runs Opus; the Tier-2 light review always runs on Haiku.
   Pass `--model` to override the reasoning/draft model (e.g. to
   Sonnet for a cheaper, faster iteration pass).
-- `--no-adversarial` skips the canonical `beril-adversarial` reviewer
-  and falls back to the inline `fallback_reviewer.v1` prompt. The
-  canonical reviewer is the default; the inline fallback is legacy and
-  only used when `beril-adversarial` isn't installed or this flag is
-  passed.
+- `--no-adversarial` — explicit opt-out. Tier-3 review uses the
+  inline `fallback_reviewer.v1` prompt (lighter scope: 3 finding
+  classes vs the canonical reviewer's 10; no literature scan; no
+  biological-claim verification; no drift-from-REPORT cross-check).
+  The optimizer cannot dispatch on the fallback's markdown output and
+  will skip — the manuscript ships with whatever the holistic draft
+  produced. Default (omit the flag) is to use the canonical
+  `beril-adversarial`; if `beril-adversarial` isn't installed, the
+  orchestrator emits a loud WARNING at startup and falls back to the
+  inline reviewer automatically. Set `BERIL_ADVERSARIAL_BIN=<path>`
+  to point at a `beril-adversarial` binary not on PATH.
 - `--max-cost-usd N` halts with a handoff if cumulative LLM spend
   exceeds N USD (checked before each LLM call). Default: no cap.
 - `--recaption` forces re-synthesis of LLM figure captions; by default

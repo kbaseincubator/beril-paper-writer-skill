@@ -115,6 +115,68 @@ def resolve_claude_bin() -> str:
     )
 
 
+def resolve_adversarial_bin() -> Optional[str]:
+    """Resolve the `beril-adversarial` CLI to an absolute path
+    (Stage 3 Tier K, 2026-05-16).
+
+    Mirrors resolve_claude_bin's approach but is OPTIONAL: returns the
+    absolute path if found, or None if not. The orchestrator treats a
+    missing `beril-adversarial` as a degraded-review condition (loud
+    warning + fallback inline reviewer), not a hard halt — unlike
+    `claude`, which is required by every LLM phase.
+
+    Background: phase_review's Tier-3 call used a bare-name spawn
+    (`cmd = ["beril-adversarial", ...]`), the same class of bug Tier J
+    fixed for `claude`. Observed on draft_1 of ibd_phage_targeting:
+    `beril-adversarial` was on PATH per `configure`, but `phase_review`
+    fell through to the inline fallback anyway (silently advancing to
+    phase_optimize without a structured findings JSON). Resolving to
+    an absolute path here removes the PATH-visibility variable; making
+    the fallback path noisy makes the lighter-review state impossible
+    to miss.
+
+    Resolution order:
+      1. BERIL_ADVERSARIAL_BIN env var (explicit operator override).
+      2. shutil.which("beril-adversarial") against the current PATH.
+      3. Well-known install locations.
+
+    Returns the absolute path (str) or None. If BERIL_ADVERSARIAL_BIN
+    is set but points at a non-file, raises RuntimeError (explicit
+    misconfiguration should fail loud, not silently fall through to
+    the fallback).
+    """
+    # 1. Explicit operator override.
+    override = os.environ.get("BERIL_ADVERSARIAL_BIN", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file():
+            return str(p.resolve())
+        raise RuntimeError(
+            f"BERIL_ADVERSARIAL_BIN is set to {override!r} but that path "
+            "is not a file. Unset it or point it at the real "
+            "`beril-adversarial` binary."
+        )
+
+    # 2. PATH lookup.
+    found = shutil.which("beril-adversarial")
+    if found:
+        return str(Path(found).resolve())
+
+    # 3. Well-known install locations.
+    home = Path.home()
+    candidates: list[Path] = [
+        home / ".local" / "bin" / "beril-adversarial",
+        Path("/opt/homebrew/bin/beril-adversarial"),
+        Path("/usr/local/bin/beril-adversarial"),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+
+    # Not found — return None. Caller decides whether to fall back.
+    return None
+
+
 class PaperWriterOrchestrator:
     """Manages the full lifecycle of a paper draft."""
 
@@ -236,6 +298,7 @@ class PaperWriterOrchestrator:
         # review stays on Haiku (config.haiku_model) by design.
         model: str = "claude-opus-4-6",
         model_writing: str = "claude-opus-4-6",
+        no_adversarial: bool = False,
     ):
         self.draft_dir = draft_dir
         self.project_dir = draft_dir.parent.parent
@@ -248,6 +311,44 @@ class PaperWriterOrchestrator:
         # makes the spawn immune to the launch context's PATH.
         self.claude_bin = resolve_claude_bin()
         logger.info(f"Resolved claude CLI: {self.claude_bin}")
+        # Stage 3 Tier K (2026-05-16): resolve `beril-adversarial`
+        # similarly. Unlike claude this is optional — the orchestrator
+        # falls back to the inline `fallback_reviewer.v1.md` prompt
+        # when the canonical reviewer is unavailable. But that fallback
+        # is a degraded review (3 finding classes vs 10, no literature
+        # scan, no biological-claim verification), so we want the user
+        # to KNOW when it's about to fire.
+        #
+        # `no_adversarial=True` is an explicit opt-out (passed by the
+        # `--no-adversarial` CLI flag); in that case we don't even
+        # attempt resolution. Otherwise we resolve, store, and warn at
+        # init if the canonical reviewer is missing so the warning
+        # surfaces minutes before phase_review fires.
+        self.no_adversarial = no_adversarial
+        if no_adversarial:
+            self.adversarial_bin: Optional[str] = None
+            logger.info(
+                "--no-adversarial flag set; Tier-3 review will use the "
+                "inline fallback reviewer (lighter scope by design)."
+            )
+        else:
+            self.adversarial_bin = resolve_adversarial_bin()
+            if self.adversarial_bin:
+                logger.info(
+                    f"Resolved beril-adversarial CLI: {self.adversarial_bin}"
+                )
+            else:
+                logger.warning(
+                    "beril-adversarial CLI not found on PATH or in any "
+                    "well-known install location. Tier-3 review will "
+                    "FALL BACK to the lighter inline reviewer "
+                    "(fallback_reviewer.v1) — manuscript review will "
+                    "MISS biological-accuracy errors, citation-reality "
+                    "checks, and drift-from-REPORT analysis that the "
+                    "canonical reviewer catches. Install with: "
+                    "pipx install beril-adversarial-skill, or set "
+                    "BERIL_ADVERSARIAL_BIN to its absolute path."
+                )
         self.state: DraftState = self._initialize_state()
 
     def _initialize_state(self) -> DraftState:
@@ -1043,24 +1144,169 @@ with the citation key in the manuscript.
             )
             stdout, stderr = await proc.communicate()
             
-        # Tier 3: Canonical Adversarial
-        logger.info("Tier 3: Canonical Adversarial review...")
+        # Tier 3: Canonical Adversarial OR loud-warn fallback
+        # (Stage 3 Tier K, 2026-05-16).
+        #
+        # Branch logic:
+        #   1. self.no_adversarial → explicit opt-out (--no-adversarial
+        #      flag). Run inline fallback; log INFO (user knows).
+        #   2. self.adversarial_bin is None → canonical reviewer not
+        #      installed. Run inline fallback; log WARNING (user may not
+        #      have realized) + write audit/review_mode.json so it's
+        #      machine-discoverable.
+        #   3. self.adversarial_bin is set → invoke canonical reviewer
+        #      via absolute path (Tier J discipline: no bare-name PATH
+        #      lookup). On non-zero exit, log ERROR but advance — the
+        #      optimizer's missing-findings check will skip cleanly.
         (self.draft_dir / "references.md").touch(exist_ok=True)
         (self.draft_dir / "citation_map.md").touch(exist_ok=True)
-        env = self._isolate_env()
-        cmd = ["beril-adversarial", "review", "--type", "paper", str(self.draft_dir)]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(self.draft_dir),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error(f"Adversarial review failed:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode('utf-8', errors='ignore')}")
-            
+
+        if self.no_adversarial:
+            logger.info(
+                "Tier 3: --no-adversarial flag set; running inline "
+                "fallback reviewer (lighter scope by design)."
+            )
+            await self._run_fallback_reviewer(reason="explicit-opt-out")
+        elif self.adversarial_bin is None:
+            logger.warning(
+                "Tier 3: beril-adversarial CLI is unavailable — running "
+                "the inline FALLBACK reviewer. This is a LIGHTER review "
+                "(3 finding classes vs 10; no literature scan; no "
+                "biological-claim verification; no drift-from-REPORT "
+                "cross-check). The optimizer cannot dispatch on the "
+                "fallback's markdown output and will skip. Manuscript "
+                "will ship with whatever errors the canonical reviewer "
+                "would have caught. Install beril-adversarial-skill "
+                "(pipx install ...) or set BERIL_ADVERSARIAL_BIN."
+            )
+            await self._run_fallback_reviewer(reason="adversarial-missing")
+        else:
+            logger.info(
+                f"Tier 3: Canonical Adversarial review via {self.adversarial_bin}"
+            )
+            env = self._isolate_env()
+            cmd = [
+                self.adversarial_bin, "review", "--type", "paper",
+                str(self.draft_dir),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(self.draft_dir),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(
+                    f"Adversarial review failed (rc={proc.returncode}):\n"
+                    f"STDOUT: {stdout.decode('utf-8', errors='ignore')[:2000]}\n"
+                    f"STDERR: {stderr.decode('utf-8', errors='ignore')[:2000]}"
+                )
+                # Record the failure mode so downstream / audit knows.
+                self._write_review_mode(
+                    reviewer="canonical-failed",
+                    note=f"beril-adversarial exited {proc.returncode}; see logs",
+                )
+            else:
+                self._write_review_mode(reviewer="canonical")
+
         self.advance_phase("optimize")
+
+    async def _run_fallback_reviewer(self, *, reason: str) -> None:
+        """Stage 3 Tier K: invoke the inline fallback reviewer.
+
+        Used when the canonical `beril-adversarial` CLI is unavailable
+        or when `--no-adversarial` is set explicitly. The fallback
+        produces a markdown review file (NOT the structured
+        adversarial_review.json the optimizer dispatches on), so the
+        downstream optimizer will skip cleanly with a missing-findings
+        warning. The user reads the markdown manually.
+
+        `reason` is a short tag recorded in audit/review_mode.json so
+        the run state is machine-discoverable.
+        """
+        prompt_path = (
+            Path(__file__).parent / "skill" / "prompts"
+            / "fallback_reviewer.v1.md"
+        )
+        if not prompt_path.is_file():
+            logger.error(
+                f"Fallback reviewer prompt missing at {prompt_path}; "
+                "Tier 3 is silently skipped — manuscript ships unreviewed."
+            )
+            self._write_review_mode(
+                reviewer="none",
+                note="fallback prompt file missing on disk",
+            )
+            return
+
+        reviews_dir = self.draft_dir / "reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        review_out = reviews_dir / "fallback_review.md"
+
+        user_prompt = (
+            f"Run the inline fallback reviewer per the system prompt.\n"
+            f"- ASSEMBLED_PATH: {self.draft_dir / 'manuscript.md'}\n"
+            f"- REPORT_PATH: {self.project_dir / 'REPORT.md'}\n"
+            f"- THROUGHLINE_PATH: {self.draft_dir / '00_throughline.md'}\n"
+            f"- CITATION_POOL_PATH: {self.draft_dir / 'citation_pool.json'}\n"
+            f"- REVIEW_OUT_PATH: {review_out}\n"
+            f"\nWrite REVIEW_OUT_PATH via the Write tool, then emit the "
+            f"closing-message template."
+        )
+
+        rc, stdout, stderr, _cost = await self._run_claude_p_with_cost(
+            phase_label="phase_review.fallback",
+            system_prompt_text=prompt_path.read_text(encoding="utf-8"),
+            user_prompt=user_prompt,
+            model=self.model,
+            allowed_tools="Read,Write,Edit,Grep,Glob",
+        )
+        if rc != 0:
+            logger.error(
+                f"Fallback reviewer failed (rc={rc}):\n"
+                f"STDOUT: {stdout[:1000]}\nSTDERR: {stderr[:1000]}"
+            )
+            self._write_review_mode(
+                reviewer="fallback-failed",
+                note=f"fallback reviewer exited {rc}; reason={reason}",
+            )
+            return
+
+        self._write_review_mode(reviewer="fallback", note=f"reason={reason}")
+        logger.warning(
+            f"Tier 3 fallback review written to {review_out}. The "
+            "optimizer (Phase 4) will skip — no structured findings "
+            "JSON. Read the markdown review manually before relying "
+            "on this manuscript."
+        )
+
+    def _write_review_mode(
+        self, *, reviewer: str, note: str = "",
+    ) -> None:
+        """Stage 3 Tier K: record which Tier-3 reviewer ran, so the
+        run state is machine-discoverable in audit/.
+
+        Values for `reviewer`:
+          - "canonical"        — beril-adversarial succeeded
+          - "canonical-failed" — beril-adversarial exited non-zero
+          - "fallback"         — inline fallback_reviewer.v1 used
+          - "fallback-failed"  — inline fallback also failed
+          - "none"             — Tier-3 skipped entirely
+        """
+        import json
+        audit_dir = self.draft_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        out = audit_dir / "review_mode.json"
+        payload = {
+            "reviewer": reviewer,
+            "note": note,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        out.write_text(
+            json.dumps(payload, indent=2), encoding="utf-8",
+        )
 
     async def phase_optimize(self):
         logger.info("Running selective optimizers (M4)...")
