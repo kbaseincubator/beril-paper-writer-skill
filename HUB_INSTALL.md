@@ -21,11 +21,17 @@ The hub user environment must have:
    orchestrator invokes `claude -p` per pipeline phase.
 3. **Read access to `BERIL_ROOT/projects/`** — at least one project
    with `REPORT.md`, `RESEARCH_PLAN.md`, and `notebooks/*.ipynb`.
-4. **Optional but recommended: `beril-adversarial`** v0.7.0+ — for
-   standalone adversarial review of finished drafts. The paper-writer
-   uses its own inline fallback reviewer for the in-loop rewrite
-   cycle; the canonical adversarial reviewer is a separate pre-ship
-   audit step.
+4. **Strongly recommended: `beril-adversarial`** v0.7.0+. As of Stage 3
+   Tier K (2026-05-17), the paper-writer wires the canonical
+   adversarial reviewer **directly into Tier 3 of the in-pipeline
+   review cascade**. If installed and resolvable, the canonical
+   reviewer runs (10 finding classes, literature scan,
+   biological-claim verification, drift-from-REPORT cross-check). If
+   missing, the orchestrator emits a loud WARNING at init and falls
+   back to the inline `fallback_reviewer.v1` — a degraded review with
+   3 finding classes and no literature scan. The fallback path is a
+   safety net; for production deployments, beril-adversarial is
+   effectively required.
 
 Verify each:
 
@@ -42,6 +48,27 @@ need `--break-system-packages`.
 
 If `claude` is missing, install Claude Code per Anthropic's docs.
 The skill cannot run without it.
+
+**Env-var overrides (Stage 3 Tier J + K).** If `claude` or
+`beril-adversarial` lives in a non-standard location, point at it
+explicitly:
+
+```bash
+export BERIL_CLAUDE_BIN=/abs/path/to/claude
+export BERIL_ADVERSARIAL_BIN=/abs/path/to/beril-adversarial
+```
+
+The orchestrator resolves both to absolute paths at init (PATH lookup
+fallback → well-known locations fallback), so a binary findable from
+your interactive shell but not from a nested Claude Code subshell will
+still resolve correctly. `beril-paper-writer configure` reports what
+the orchestrator will actually use.
+
+**Multi-shim caveat.** Conda environments often shadow `pipx` shims.
+If `which beril-paper-writer` returns `/opt/anaconda3/bin/...` instead
+of `~/.local/bin/...`, you have a stale conda-installed copy. Fix:
+`/opt/anaconda3/bin/pip uninstall beril-paper-writer-skill` (or
+similar), or ensure `~/.local/bin` comes first in PATH.
 
 ## Install — three steps
 
@@ -65,19 +92,26 @@ Alternative URL forms:
   deployments):**
 
   ```bash
-  pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.7.1
+  pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.8.0
   ```
 
 - **From a wheel file (offline / pinned):**
 
   ```bash
-  pipx install --force /path/to/beril_paper_writer_skill-0.7.1-py3-none-any.whl
+  pipx install --force /path/to/beril_paper_writer_skill-0.8.0-py3-none-any.whl
   ```
+
+**Do NOT use `--editable`.** pipx's `--editable` mode produces a
+partial install for this package's hatchling layout — top-level .py
+files (`orchestrator.py`, `config.py`) end up missing from the venv
+while the `commands/` subpackage is installed. The Python orchestrator
+then fails to import. The non-editable `pipx install` is correct and
+takes ~30 seconds to repeat after a source change.
 
 Verify the install:
 
 ```bash
-beril-paper-writer --version    # should print 0.7.1 or later
+beril-paper-writer --version    # should print 0.8.0 or later
 ```
 
 If `pipx` warns about PATH, run `pipx ensurepath` once and start a
@@ -120,9 +154,23 @@ Verify:
 ls "$BERIL_ROOT/.claude/skills/beril-paper-writer/"
 # Expect: SKILL.md, commands/, prompts/, tools/, references/, state/
 ls "$BERIL_ROOT/.claude/skills/beril-paper-writer/prompts/"
-# Expect: plan.v1.md, methods.v1.md, results.v1.md, discussion.v1.md,
-#         introduction.v1.md, abstract.v1.md, citation_pool.v1.md,
-#         reframer.v1.md, fallback_reviewer.v1.md, rewrite.v1.md
+# Expect (post-Stage-3, the holistic-draft era):
+#   plan.v1.md              ← throughline candidates + tier verdict
+#   citation_pool.v1.md     ← verified DOI/PMID pool builder
+#   extract_claims.v1.md    ← numeric-claim inventory (Stage 3 Tier H tightened)
+#   audit_discrepancies.v1.md
+#   holistic_draft.v1.md    ← single Opus pass producing manuscript.md
+#   haiku_review.v1.md      ← Tier-2 light review
+#   fallback_reviewer.v1.md ← Tier-3 inline fallback (used when beril-adversarial missing)
+#   optimizer.v1.md         ← subtraction-only optimizer (Stage 1 Tier A)
+#   supplementary_citations.v1.md ← resolves [NEEDS CITATION] markers
+#   compliance_fix.v1.md    ← ICMJE compliance autofix
+#   revise_throughline.v1.md ← optional revision pass at throughline pick
+#   reframer.v1.md          ← discrepancy reframing
+#   figure_caption.v1.md    ← LLM caption synthesis
+#   _SKELETON.md            ← prompt template (not invoked)
+# Also still shipped but deferred (M1 work, not in active path):
+#   claim_demarcate.v1.md, discrepancy_classify.v1.md, rewrite.v1.md
 ```
 
 ### Step 3 — Configure (verify dependencies)
@@ -202,7 +250,7 @@ after `install-skill`. Type:
 
 The Claude Code agent should:
 
-1. Verify `beril-paper-writer --version` returns 0.7.0+.
+1. Verify `beril-paper-writer --version` returns 0.8.0+.
 2. Walk the 4-signal project resolution tree (explicit arg → git
    branch `projects/<id>` → cwd → ask user).
 3. Confirm the project has the required inputs (`REPORT.md`,
@@ -215,12 +263,29 @@ If the slash command isn't recognized, check that
 has the `user-invocable: true` frontmatter line. Re-run `install-skill`
 if missing.
 
+## Running tests on the hub (optional, for operator validation)
+
+The pipx venv has all runtime deps but doesn't include pytest. Inject
+it once:
+
+```bash
+pipx inject beril-paper-writer-skill pytest
+
+PYBIN=$(pipx environment --value PIPX_LOCAL_VENVS)/beril-paper-writer-skill/bin/python
+cd <path-to-skill-source>   # or wherever you cloned the repo for testing
+PYTHONPATH=src $PYBIN -m pytest tests/unit -q   # expect 965 pass
+```
+
+Do NOT run tests via the hub's system Python — it won't have
+`nbformat`, `python-docx`, or the package itself, and you'll see
+`ModuleNotFoundError` for the extract / assemble tests.
+
 ## Upgrading
 
 Re-run pipx install with the new version tag:
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.7.2
+pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.8.0
 beril-paper-writer --version                      # confirm new version
 beril-paper-writer configure                      # verify deps still resolve
 beril-paper-writer install-skill "$BERIL_ROOT"   # refresh skill files

@@ -2,7 +2,7 @@
 """M1 §C1 smoke harness for ``discrepancy_register.py`` on ibd_phage_targeting.
 
 This is the M1 milestone-gate smoke for the Phase-0 plan-vs-execution diff
-scanner. See ``M1_PUNCH_LIST.md`` §C1 + ``SPEC_v0_8.md`` §4.5.
+scanner. See ``M1_PUNCH_LIST.md`` §C1 + ``SPEC.md`` §4.5.
 
 Three modes:
 
@@ -523,7 +523,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         prog="m1_discrepancy_smoke.py",
         description=(
             "M1 §C1 smoke harness for discrepancy_register. See "
-            "M1_PUNCH_LIST.md §C1 + SPEC_v0_8.md §4.5."
+            "M1_PUNCH_LIST.md §C1 + SPEC.md §4.5."
         ),
     )
     p.add_argument(

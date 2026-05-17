@@ -1,28 +1,352 @@
-# beril-paper-writer — Specification (v0.8)
+# beril-paper-writer — Specification
 
-**Status:** SIGNED OFF — M0 complete 2026-05-07. M1 unblocked.
-**Authored:** 2026-05-07. **Decision context:** see auto-memory entry
-`project_paper_writer_v0_8_architecture.md`. All twelve sign-off items
-resolved (§19); Q11 housekeeping (rename of prior punch list) executed.
-**Relationship to existing docs:**
-- Supersedes `SPEC.md` (v0.1) for the architectural layer. SPEC.md's §1–§4
-  (purpose, scope, design premises, throughline mechanism) and §10 (ICMJE
-  AI-disclosure boilerplate) remain authoritative — v0.8 changes the
-  *pipeline* and *review machinery*, not the product mission.
-- Supersedes the prior `V0_8_0_PUNCH_LIST.md` (language-quality + post-checkers
-  on top of v0.7.x). That punch list's Tier-A prompt rules and Tier-B
-  post-checkers are absorbed into this spec's Phase 2 (holistic prompt
-  discipline) and Phase 3 (Tier-1/2 deterministic + light reviewer). The
-  punch-list file should be archived or renamed to
-  `archive-v0_8_language_quality_punch_list.md` once this spec is signed off.
-- Sister-skill contract: `beril-adversarial v0.7.x` (paper schema v2 → v3
-  trajectory). This spec assumes adversarial v0.7.0+ is installed; the Tier-3
-  reviewer is the canonical adversarial CLI invocation.
+**Status (2026-05-17):** canonical. This document combines:
+- The **durable foundation** (§0) — purpose, scope, design premises,
+  inputs, the throughline mechanism — plus the ICMJE AI-disclosure
+  boilerplate (Appendix A). Content originally in `SPEC.md` (v0.1),
+  now archived at `release-notes/SPEC_v0_1.md`.
+- The **v0.8 architecture** (§1–§18) — the 8-phase pipeline, the
+  three-tier review cascade, selective optimizers, citation rounds,
+  compliance gate, and assembly. Signed off 2026-05-07 (M0); shipped
+  through Stage 3 (Tiers A–K, 2026-05-12 → 2026-05-17).
 
-This document is *what* v0.8 does and *why*. The *how* (package layout, file
-paths, state schema, CLI flags) is captured per-milestone in
-`LAYOUT_v0_8.md` (M1 deliverable when first touched) and pinned in
-`DECISIONS.md` as v0.8 entries land.
+Companion docs:
+- [`LAYOUT.md`](LAYOUT.md) — package shape, CLI surface, file paths,
+  state schema, runtime contracts.
+- [`DECISIONS.md`](DECISIONS.md) — load-bearing design decisions
+  (D-001 onward), one entry per non-obvious choice.
+- [`STAGED_IMPROVEMENT_PLAN.md`](STAGED_IMPROVEMENT_PLAN.md) — active
+  plan-of-record for ongoing work.
+- [`README.md`](README.md) — quick-start.
+- Sister-skill contract: `beril-adversarial v0.7.x` (paper schema
+  v2 → v3); Tier-3 review is the canonical adversarial CLI invocation
+  resolved via `BERIL_ADVERSARIAL_BIN` / PATH at orchestrator init
+  (see Stage 3 Tier K in `STAGED_IMPROVEMENT_PLAN.md`).
+
+---
+
+## 0. Foundation
+
+This section describes what the skill does, why it exists, what it
+expects as input, and the load-bearing user gate (throughline
+selection). These predate v0.8 and remain authoritative — v0.8 changed
+the *pipeline* and *review machinery* (§1 onward), not the product
+mission.
+
+### 0.1 Purpose and scope
+
+#### 0.1.1 What this skill does
+
+Takes a finished BERDL analysis project and produces a defensible, ICMJE-
+conformant scientific manuscript draft from its artifacts (research plan,
+report, notebooks, figures, references, optional adversarial review). Where
+the underlying work cannot support a rigorous claim, the skill says so and
+lists what would need to be done to bring it closer to publishability — it
+does **not** paper over evidence gaps with fluent prose.
+
+#### 0.1.2 What this skill is NOT
+
+- Not a writer of clinical-trial papers (CONSORT scope), systematic reviews
+  (PRISMA scope), or diagnostic-test validation (STARD scope). v1 targets
+  computational reanalysis of public datasets (STROBE-adjacent rigor norms).
+- Not a journal-formatter. Output is generic IMRAD .docx; journal-specific
+  templating is post-MVP.
+- Not a figure generator. v1 reuses existing project figures only; missing
+  figures become explicit gap-fill requests.
+- Not a peer reviewer. The adversarial-review loop is for self-improvement
+  before submission, not a substitute for journal review.
+- Not a substitute for human authorship. ICMJE is unambiguous: AI tools
+  cannot be authors. The skill auto-emits an AI-disclosure paragraph
+  (per ICMJE January 2026, quoted in Appendix A); the user must fill in the
+  actual author list, funding, conflicts, and ethics statements.
+
+#### 0.1.3 Who this skill is for
+
+BERIL users who have completed an analysis and want a defensible first
+manuscript draft, with the discipline to:
+
+- Refuse to write what the evidence doesn't support.
+- Surface alternative throughlines so the user, not the LLM, picks the story.
+- Make every citation, every methods statement, every numerical claim
+  traceable to a verified source (DOI/PMID for citations; notebook output
+  or REPORT.md line for numbers).
+- Hand off to harsh review and revise iteratively, with bounded cycles.
+
+### 0.2 Design premises (what we're optimizing for)
+
+In rough order of priority:
+
+1. **Honesty.** The manuscript must not fabricate citations, methods, or
+   numerical claims. Where evidence is thin, the writer says so. A
+   paper-writer that produces fluent-sounding manuscripts about thin work is
+   more dangerous than one that refuses; bad work made to look credible is
+   the primary failure mode to design against.
+2. **Auditability.** Every claim must trace to (a) a project artifact
+   (notebook output, REPORT.md line, figure file) or (b) a verified citation
+   in the citation pool. The reframing-log and citation-map make the trace
+   explicit and human-readable.
+3. **User judgment over LLM judgment** at the load-bearing decisions:
+   throughline pick, gap-fill take/defer, accepting unfixable issues as
+   limitations.
+4. **Bounded cost and latency.** Target $5–$15 per full run, 15–40 minutes.
+   Every loop has a hard cap. No infinite revise-review cycles.
+5. **Reuse over generation.** Reuse existing project figures, existing
+   methods text from REPORT/notebooks, existing citations from
+   `references.md`. Generate prose only for what doesn't already exist.
+
+v0.8 layers additional architectural premises on top — see §2 — but the
+above five remain primary.
+
+### 0.3 Inputs (what the skill expects)
+
+From the project directory (per the BERIL convention `projects/<id>/`):
+
+- **`RESEARCH_PLAN.md`** (required) — the planned hypotheses and approach.
+  Used to detect gap between plan and what was actually done; used in
+  Introduction/Methods context.
+- **`REPORT.md`** (required) — the canonical synthesized findings. The
+  manuscript MUST NOT silently contradict REPORT; reframing is logged
+  explicitly in `reframing_log.md`.
+- **`README.md`** (optional) — project-level context, often includes a
+  one-paragraph summary.
+- **`REVIEW.md`, `ADVERSARIAL_REVIEW_*.md`** (optional but strongly used) —
+  prior reviews flag known weaknesses the manuscript must engage with rather
+  than restate as findings.
+- **Notebooks** (`*.ipynb`) — source of truth for methods (algorithms,
+  parameters, package versions) and numerical claims. Methods section is
+  *extracted* from notebooks, not generated from a free prompt.
+- **Figures** (`figures/*.png` or similar) — reused as-is for the
+  manuscript; selection logic chooses 4–8 of typically 30+ project figures.
+- **`references.md`** (optional) — pre-existing citations. If absent, the
+  skill builds a citation pool from scratch via literature search.
+
+#### 0.3.1 RESEARCH_PLAN.md expected structure
+
+The Methods agent reads `RESEARCH_PLAN.md` to extract design intent. Because
+the plan is user-authored and varies in style, the writer expects at minimum
+these sections (any header level, fuzzy match on synonyms):
+
+- **Hypothesis / Research Question** — what is being asked
+- **Planned Methods / Approach** — how it will be answered
+- **Analysis Plan / Statistical Methods** — what tests, what corrections,
+  what success criteria (where applicable)
+
+If `RESEARCH_PLAN.md` is present but lacks these sections, the Methods
+agent emits a soft warning and proceeds with methods-only grounding from
+notebooks. Design rationale will be incomplete in Methods.
+
+#### 0.3.2 Empty or near-empty REPORT.md
+
+If `REPORT.md` exists but is empty or under ~500 characters (no synthesized
+findings, only headers, or a stub):
+
+- Plan-phase triage MUST classify the project as EXPLORATORY (overriding
+  any other heuristic), per §0.3.3.
+- The writer emits a gap-fill request (type: `analysis-request`):
+  *"REPORT.md is empty or stub-only. Please run `/synthesize` to produce a
+  structured REPORT, or add narrative findings manually before drafting can
+  proceed past Plan phase."*
+- The writer pauses; on `continue` it re-reads `REPORT.md` and proceeds if
+  content is now present. If the user invokes `continue` without populating
+  REPORT, the writer offers `--mode report` as the only available output
+  (REPORT mode does not require a structured findings section, only a
+  notebooks-as-source narrative).
+
+#### 0.3.3 Project-quality triage
+
+Before drafting, the skill classifies the project (this becomes part of the
+Plan-phase user gate):
+
+- **STRONG** — REPORT has clear research question, methods, numbered
+  findings with effect sizes / CIs / FDR-corrected p-values, explicit
+  limitations. → Proceed to drafting.
+- **THIN** — Novel finding but methodological gaps, incomplete analyses
+  (e.g., "Act II deferred"), sparse statistical reporting. → Surface
+  scope-down options to user (write narrower paper on what's actually done;
+  or wait for additional analyses).
+- **EXPLORATORY** — Proof-of-concept, single analysis layer, no validation,
+  small n. → Emit warning: "This project is EXPLORATORY-tier. The output
+  will be an exploration report, not a research paper." Proceed with
+  drafting using the **exploration-report template** (§0.3.4): same IMRAD
+  shell, but with explicit title/abstract framing ("Preliminary
+  exploration of..." / "Exploratory analysis suggests..."), expanded
+  Limitations section, and a substantive Future Work section enumerating
+  what would be needed to reach publishability. Honest reporting of what
+  was attempted and what was learned — including null and negative
+  findings — is the goal. Refusing to draft would lose the value of
+  exploratory work; producing a paper that overclaims the evidence would
+  be worse than refusing. This middle path is the design.
+
+The triage verdict is shown to the user before drafting begins.
+
+##### What "evidence-strength framing" means
+
+"Framing" is *prompt-driven*, not a mechanized rule. Each per-section agent
+receives the tier as a parameter; the system prompt adjusts:
+
+- **Language conservatism** — declarative ("X causes Y") vs scoped ("X
+  correlates with Y in our cohort") vs preliminary ("X may relate to Y")
+- **Claim certainty** — whether assertions are flagged as hypothesis-tested
+  vs hypothesis-generating
+- **Discussion scope** — engages contrasts with prior work (STRONG) vs
+  engages with caveats (THIN) vs hypothesis-generating only (EXPLORATORY)
+- **Limitations weight** — required (STRONG), required and expanded (THIN),
+  substantially expanded with explicit "what would be needed for rigor"
+  (EXPLORATORY)
+
+Mechanical validators (M1–M10) do not enforce framing.
+
+#### 0.3.4 Output mode and tier (orthogonal axes)
+
+The writer has two independent dimensions:
+
+- **`--mode`** controls the *output shape*:
+  - `paper` — IMRAD research paper with claims, abstract, references,
+    discussion. Aimed at journal submission.
+  - `report` — structured activity report describing what was done and what
+    was observed. No claims-of-significance framing, no abstract-as-claim,
+    no discussion-as-interpretation. Aimed at internal documentation,
+    handoff, lab-notebook write-up.
+
+- **Tier** (STRONG / THIN / EXPLORATORY) controls the *evidence-strength
+  framing within that shape*. Determined by triage; influences how claims
+  are framed and how aggressive the limitations / future-work discussion is.
+
+Default mode is determined by tier but is overridable:
+
+| Tier | Default mode | Notes |
+|---|---|---|
+| STRONG | `paper` | User may pick `report` for internal documentation use |
+| THIN | `paper` (scope-narrowed) | User may pick `report` if scope-down is too restrictive |
+| EXPLORATORY | `report` | User may pick `paper` and accept the exploration-paper template |
+
+##### `--mode paper` template per tier
+
+| Section / Check | STRONG | THIN | EXPLORATORY (paper override) |
+|---|---|---|---|
+| Title framing | declarative | scoped ("In our cohort, X correlates with Y") | preliminary ("Preliminary exploration of X–Y relationship") |
+| Abstract conclusions | substantive claims | narrower claims | observations + caveats |
+| Methods rigor | M-tier validators all in force | M-tier in force; gaps logged | M-tier in force; expect more `[NEEDS CITATION]` and limitations |
+| Results | full | scope-narrowed | includes null/negative findings prominently |
+| Discussion novelty | engages contrasts with prior work | engages with caveats | hypothesis-generating, not hypothesis-testing |
+| Limitations | required, substantive | required, expanded | substantially expanded; explicit "what would be needed for rigor" |
+| Next Steps | optional but recommended | recommended | required, structured (data needs / analysis needs / experimental validation) |
+
+##### `--mode report` template (any tier)
+
+Activity-report structure (NOT IMRAD):
+
+1. **Project Summary** — one paragraph: what was the question, what was
+   done, what was observed.
+2. **Background and Question** — context from `RESEARCH_PLAN.md`; no
+   field-positioning beyond what the project itself states.
+3. **What Was Done (Methods)** — narrative of the actual analysis, grounded
+   in notebooks. Same provenance discipline as paper mode; no
+   methods-fabrication.
+4. **What Was Observed (Findings)** — descriptive presentation of results;
+   figures embedded; numerical claims traceable to artifacts. No
+   abstract-of-significance framing; the reader draws their own conclusions.
+5. **Observations and Open Questions** — what stood out; what's unclear;
+   what would be worth investigating next. NOT a "Discussion" section: no
+   novelty-positioning, no field-context, no claims of significance.
+6. **Limitations and Caveats** — honest scope of what was and wasn't
+   examined.
+7. **Next Steps** — what would need to happen to reach a paper-grade claim,
+   or what other directions look promising.
+8. **Appendices** — any analyses that didn't fit the main narrative.
+
+Citation pool, methods grounding, and a validator subset still apply.
+Validators that don't apply to report mode (e.g., M2 Structured Abstract —
+reports don't have abstracts) are skipped; the run log records which
+validators were applied vs. skipped.
+
+All three tiers + both modes go through the same drafting pipeline; the
+*output template* and *framing emphasis* shift, not the underlying
+mechanism.
+
+#### 0.3.5 THIN-tier scope-down mechanism
+
+For THIN-tier projects, the Plan-phase agent extracts both:
+
+- **Broad throughline candidates** (the typical 2–3 from §0.4) that cover
+  the project's stated scope, and
+- **One narrowed-claim candidate** that scopes down to the strongest
+  paper-ready sub-claim the project actually supports.
+
+The narrowed candidate is presented in the same throughline-pick UI as the
+broader options, with explicit annotation: *"This is the strongest
+sub-claim that meets paper-grade rigor; the broader candidates require
+addressing the gaps listed in `analysis_requests.md`."* If the user picks
+the narrowed candidate, the writer proceeds in `--mode paper`; if they pick
+a broader one, the writer continues in `--mode paper` but flags that
+gap-fills will be needed before any adversarial review will accept it. If
+they want neither, `--mode report` is offered as the third option.
+
+This makes the THIN-tier UX an explicit choice, not a silent scope-down.
+
+### 0.4 The throughline mechanism (the highest-risk step)
+
+#### 0.4.1 Why this matters
+
+The throughline — the story the paper tells — determines what gets written.
+An LLM left to auto-pick will favor narratives that are easy to write
+(linear, single-hypothesis, dramatic) over narratives that fit the data
+(often messy, multi-hypothesis, partial). This is the single most important
+place to keep humans in the loop.
+
+#### 0.4.2 Mechanism
+
+The Plan-phase agent extracts 2–3 candidate throughlines from the project
+artifacts. Each candidate has:
+
+- **Claim** — the central scientific assertion (one sentence).
+- **Evidence map** — for the candidate's main sub-claims, which project
+  artifact (notebook, figure, table) supports it, and at what strength
+  (✓ direct / ⚠ partial / ✗ contradicts / ◇ orthogonal).
+- **Weakness inventory** — what gaps the candidate has if used; what the
+  rebuttal would be.
+- **What the paper would NOT include** if this candidate is chosen.
+
+These are written to `throughline_candidates.md` using this template (per
+candidate; separator `---` between candidates):
+
+```markdown
+## Candidate TL{N}: {one-sentence claim}
+
+**Evidence map:**
+
+| Sub-claim | Source | Strength |
+|---|---|---|
+| {sub-claim 1} | notebook X cell Y | ✓ direct |
+| {sub-claim 2} | REPORT.md §{n} | ⚠ partial |
+| ... | ... | ... |
+
+**Weakness inventory:**
+
+- Gap: {what's missing}
+- Rebuttal a sharp reviewer would offer: {anticipated critique}
+
+**What this paper would NOT include if this is chosen:**
+
+- {finding A — orthogonal; → appendix or out}
+- {finding B — contradicts; → appendix with discussion}
+
+---
+```
+
+The skill then **pauses** and prompts the user to pick one (or to provide
+an alternative). On `beril-paper-writer continue --pick TLN`, the chosen
+throughline is written to `00_throughline.md` and drafting proceeds.
+
+#### 0.4.3 Throughline as load-bearing constraint
+
+After a throughline is chosen:
+
+- Every drafted claim must trace to the throughline's evidence map.
+- Claims supported by the project but irrelevant to the throughline go to
+  appendices (not deleted; demoted).
+- The adversarial reviewer's `--type paper` mode reads the throughline and
+  flags drift between claim and evidence map.
 
 ---
 
@@ -1120,7 +1444,7 @@ signal — the issue is more fundamental than a gate fail.
 
 ## 17. Milestones M0–M8
 
-**M0 — Spec sign-off (this document).** ~600–1000 lines of `SPEC_v0_8.md`
+**M0 — Spec sign-off (this document).** ~600–1000 lines of `SPEC.md`
 plus a DECISIONS.md v0.8.0 entry capturing the decision frame. NO code.
 End of milestone is Adam's sign-off on the spec questions in §19.
 
@@ -1139,9 +1463,10 @@ post-figure-selection). M2's holistic prompt grounds against the three
 markdowns; M1's downstream tools (`discrepancy_register.py`,
 `claim_inventory.py` per §4.5/§4.6) take the markdowns as inputs and have
 no manifest dependency. This contract was discovered via M1 §C0 CLI-surface
-verification on 2026-05-07; M1_PUNCH_LIST.md §C0 was corrected
-correspondingly. Carry this forward when wiring M2's prompt inputs and
-when assessing any future change to phase_extract's surface.
+verification on 2026-05-07 (M1_PUNCH_LIST has since moved to
+`archive-planning/M1_PUNCH_LIST.md`). Carry this forward when wiring
+M2's prompt inputs and when assessing any future change to
+phase_extract's surface.
 
 **M2 — Holistic write + story builder.** `paper_writer_v0_8.md` (the
 holistic prompt) + `00_story_outline.md` builder prompt + Phase-1
@@ -1216,7 +1541,7 @@ on M0 commit.
 | Q9 | v0.8.0 IS the cut-over after M7 passes; no parallel-track v0.9.0 release shape | §17 M8 |
 | Q10 | Archive layout: directory-layout interpretation — `prompts/archive/v0_7/` mirrors active `prompts/` filenames; resurrection is path-mechanical; no separate PROVENANCE.md file (git history is the canonical record) | §15 + (M1 layout) |
 | Q11 | Old V0_8_0_PUNCH_LIST.md → renamed `archive-v0_8_language_quality_punch_list.md` (executed 2026-05-07) | (done) |
-| Q12 | Keep SPEC.md as the v0.1 baseline; SPEC_v0_8.md as v0.8 spec; consolidate at v1.0 | (status quo) |
+| Q12 | Keep SPEC.md as the v0.1 baseline; SPEC.md as v0.8 spec; consolidate at v1.0 | (status quo) |
 
 M0 is complete on these decisions. M1 (`discrepancy_register.py` +
 `claim_inventory.py` + tests + smoke against ibd_phage_targeting) is
@@ -1239,11 +1564,14 @@ through D-045 (or the next available range) on M0 commit.
 - **Reference projects:** `ibd_phage_targeting` (M7 A/B target);
   `functional_dark_matter` (sanity-check second project; STRONG-tier
   baseline).
-- **v0.7.x state:** `RELEASE_NOTES_v0_7_1.md`, `RELEASE_NOTES_v0_6.md`,
-  `LAYOUT.md`, `DECISIONS.md` D-001 through D-033+. Auto-memory:
-  `project_paper_writer_v0_7_1.md`.
-- **v0.8 prior plan:** `V0_8_0_PUNCH_LIST.md` (language-quality version,
-  superseded by this spec; disposition Q11).
+- **Per-version release notes:** `release-notes/v0_1.md` through
+  `release-notes/v0_6.md` cover v0.1 through v0.6 detail; v0.7 + v0.8
+  + Stage 3 work is captured cumulatively in `RELEASE_NOTES.md` and in
+  `STAGED_IMPROVEMENT_PLAN.md`.
+- **Decisions:** `DECISIONS.md` D-001 through D-051+ (D-041 onward
+  covers Stage 3 Tiers A–K).
+- **v0.8 prior plan:** `archive-v0_8_language_quality_punch_list.md`
+  (language-quality version, superseded by this spec; disposition Q11).
 - **Per-milestone discipline reference:**
   `feedback_punch_list_release_pattern.md`,
   `feedback_cross_skill_contract_drift.md`,
@@ -1254,3 +1582,62 @@ through D-045 (or the next available range) on M0 commit.
 *This spec is the M0 deliverable. Sign-off is via Adam answering Q1–Q12;
 on sign-off, the answers are recorded as DECISIONS.md v0.8.0 entries and
 M1 begins. Nothing in M1+ runs before sign-off.*
+
+---
+
+## Appendix A. Authorship, AI disclosure, and other ICMJE-required boilerplate
+
+This appendix predates v0.8 (original SPEC.md §10) and remains
+authoritative for the language and placement of the AI-disclosure
+boilerplate the writer auto-emits.
+
+### A.1 What the writer auto-emits
+
+An "AI-Assisted Analysis" subsection in Methods, with this template:
+
+> Manuscript drafting was performed with the BERIL paper-writer skill
+> (`beril-paper-writer v{X.Y}`), using `{model_id}` via the Claude Code
+> harness. Inputs were the project artifacts at
+> `projects/{project_id}/` (snapshot SHA: `{sha}`). The throughline was
+> selected by the human author from candidates surfaced by the writer.
+> Methods were extracted from the project's notebooks; statistical
+> claims were verified against notebook outputs. Citations were drawn
+> from a literature pool with DOI/PMID verification. The draft was
+> reviewed adversarially using `beril-adversarial v{X.Y}` and revised
+> over {N} pass(es). The human authors reviewed and edited the final
+> manuscript and accept full responsibility for its content. No AI tool
+> is listed as an author.
+
+Placeholder lines for items the writer cannot generate honestly:
+
+```
+Authors: [AUTHORS: TBD — fill before submission]
+Affiliations: [AFFILIATIONS: TBD]
+Funding: [FUNDING: TBD]
+Conflicts of Interest: [CONFLICTS: TBD]
+Ethics Approval: [ETHICS: TBD or N/A — confirm before submission]
+Corresponding author: [CORRESPONDING: TBD]
+ORCIDs: [ORCIDS: TBD]
+```
+
+The presence of any `[X: TBD]` placeholder is a soft warning at assembly
+time, not a hard fail (some projects may legitimately want to defer these
+to a later editing pass).
+
+### A.2 ICMJE language quoted
+
+ICMJE V.A (January 2026), on AI-assisted writing tools:
+
+> "Chatbots (such as ChatGPT) and other AI-assisted tools should not be
+> listed as authors because they cannot be responsible for the accuracy,
+> integrity, and originality of the work… Authors should carefully review
+> and edit the AI-generated content as the output can be incorrect,
+> incomplete, or biased. … Referencing AI-generated material as the
+> primary source is not acceptable. … Nondisclosure of AI use may require
+> corrective action and may be construed as misconduct in some
+> circumstances."
+
+Source: https://www.icmje.org/recommendations/browse/roles-and-responsibilities/defining-the-role-of-authors-and-contributors.html
+
+The writer's auto-emitted disclosure satisfies this; the user must still
+review and confirm before submission.

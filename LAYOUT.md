@@ -1,13 +1,28 @@
 # beril-paper-writer-skill — package layout + CLI structure
 
-> **Version notice (v0.7.1):** This document was written at v0.1 and is
-> incrementally updated as features land. Sections marked "planned" may
-> already be implemented; sections without version annotations reflect
-> the original v0.1 design. For the current implementation state, see
-> DECISIONS.md.
+> **Version notice (v0.8.0 + Stage 3, 2026-05-17):** This document was
+> written at v0.1 and is incrementally updated as features land.
+> Sections marked "planned" may already be implemented; sections
+> without version annotations reflect the original v0.1 design. The
+> "Stage 3 additions" section at the end (added 2026-05-17) captures
+> the post-Stage-3 deltas explicitly. For the current implementation
+> state, see DECISIONS.md (D-001 through D-051) and
+> STAGED_IMPROVEMENT_PLAN.md.
 
-**Date:** 2026-04-25 (originated); updated through v0.7.1.
+**Date:** 2026-04-25 (originated); incrementally updated through v0.8.0
++ Stage 3 closure (2026-05-17).
 **Status:** Living document. Updated incrementally as features ship.
+
+> **Known stale areas (audit 2026-05-17):** The REPAIR_MODE per-section
+> contract (§ "Per-section prompt invocation contract" subsection) and
+> the `state.json` schema example use per-section file names
+> (`01_methods.md`, `02_results.md`, ...) that no longer exist in the
+> Stage 3 holistic-draft flow. The manuscript is now a single
+> `manuscript.md`. Those sections are accurate for the historical
+> v0.7.x bash flow but stale for the current Python orchestrator.
+> Deeper LAYOUT.md cleanup is on the post-bash-retirement backlog;
+> the "Stage 3 additions" section at the end of this doc is the
+> authoritative description of the current runtime state.
 
 This document specifies the shape of `ArkinLaboratory/beril-paper-writer-skill`.
 The skill mirrors `beril-adversarial-skill-draft`'s pipx-installable, ships-
@@ -179,53 +194,54 @@ invocation creates `draft_{N+1}/`).
 
 ```
 projects/<project_id>/papers/draft_N/
-├── state.json                  ← stop/resume state, hashes, choices
-├── manuscript.md               ← assembled draft (regenerated on each pass)
+├── state.json                  ← stop/resume state, phase, cost, tier
+├── manuscript.md               ← assembled draft (single file from holistic_draft.v1)
+├── manuscript.docx             ← rendered Word doc with figures embedded
 ├── 00_throughline.md           ← chosen throughline + evidence map
-├── 01_methods.md
-├── 02_results.md
-├── 03_discussion.md
-├── 04_introduction.md
-├── 05_abstract.md
-├── 06_limitations.md           ← extracted by assembler from 03_discussion.md
-├── 07_data_availability.md     ← ICMJE-required (M4); orchestrator emits from template
 ├── references.md               ← human-readable, numbered
-├── bibliography.bib            ← machine-readable (BibTeX)
 ├── citation_map.md             ← claim → reference index
+├── citation_pool.json          ← verified DOI/PMID pool used by the draft
 ├── methods_provenance.md       ← Methods statements ↔ notebook+cell
-├── reframing_log.md            ← deviations from REPORT.md (auditable)
-├── analysis_requests.md        ← gap-fill requests, statuses
+├── claim_inventory.tsv         ← every numeric claim → source notebook
+├── compliance_errors.json      ← ICMJE compliance gate flags (if any)
 ├── throughline_candidates.md   ← rejected alternatives, kept for audit
-├── figures/                    ← curated subset of project figures
-│   └── (symlinks or copies of project figures, renamed for paper order)
-├── reviews/                    ← if beril-adversarial run
-│   └── draft_N_review_M.md
-├── audit/                      ← per-call streaming logs, costs
-│   ├── plan.stream.log
-│   ├── methods.stream.log
-│   └── ...
-└── manuscript.docx             ← only after `assemble` is invoked
+├── figures/                    ← Stage 3 Tier A: symlink → <project>/figures/
+├── reviews/                    ← non-canonical review outputs
+│   └── fallback_review.md      ← if Tier 3 fell back to inline reviewer
+├── audit/                      ← per-call streaming logs, telemetry, post-checks
+│   ├── plan.metadata.json      ← per-phase cost/timing sidecar
+│   ├── adversarial_review.{md,json}   ← if canonical beril-adversarial ran
+│   ├── review_mode.json        ← Tier K: which reviewer ran
+│   ├── claim_inventory_validation.json ← Stage 1 C + Stage 3 I diagnostic
+│   ├── optimizer_subtraction_check.json ← Stage 1 Tier A post-check
+│   ├── optimization_applied.md ← what the optimizer changed
+│   ├── extract_{methods,figures,tables}.log
+│   └── assemble_docx.log
+└── (manuscript.docx already listed above; rendered by phase_assemble)
 ```
 
-### File-ownership notes for the per-section model
+### File-ownership notes (post-Stage-3 holistic flow)
 
-Two files in the layout above are **not** written by their section-
-labeled drafting prompt:
+The holistic drafter (`holistic_draft.v1.md`, Stage 1 onward) writes
+`manuscript.md` as a single artifact in one Opus pass. Sections are
+internal headers in `manuscript.md`, NOT separate files.
 
-- **`07_data_availability.md`** — orchestrator emits from a template
-  (`reference/data_availability_template.md`, planned), pre-filled
-  with project-specific metadata (K-BERDL database name and
-  snapshot date if available, code-repo URL, public-accession list
-  from `RESEARCH_PLAN.md`). This is metadata-driven boilerplate, not
-  a synthesis task that needs LLM judgment. Same pattern as the
-  `AI_DISCLOSURE_TEMPLATE` that `methods.v1` consumes verbatim.
-- **`06_limitations.md`** — `assemble` extracts the Limitations
-  subsection from `03_discussion.md` and writes it to
-  `06_limitations.md` as well, so M9 finds it at a top-level
-  position in the assembled view. The Limitations content lives
-  once (in Discussion's prose); the split is a serialization
-  concern. `discussion.v1` does NOT write `06_limitations.md`
-  itself.
+Two boilerplate-style pieces of content are emitted by mechanism
+rather than by the drafting LLM:
+
+- **Data Availability section** — `phase_compliance_gate` checks for
+  its presence and runs an autofix (via `compliance_fix.v1.md`) if
+  missing. Template lives at `reference/data_availability_template.md`
+  with placeholder substitution for project-specific metadata
+  (database name, snapshot date, code-repo URL, public accessions).
+- **AI disclosure paragraph** — emitted from the
+  `AI_DISCLOSURE_TEMPLATE` placeholder consumed by
+  `holistic_draft.v1.md` per SPEC Appendix A.
+
+(Historical note: pre-Stage-1, the pipeline produced per-section
+files `01_methods.md` through `07_data_availability.md` and an
+`assemble_docx.py` post-step concatenated them. That sectional-flow
+output shape is retired.)
 
 ## Orchestrator capabilities (what `paper_writer.sh` must provide)
 
@@ -792,3 +808,100 @@ checkpoint + user prompt to continue. Cost summary in
    ~3000 lines. Larger than adversarial's 2150. May need a "prompt-
    compression" pass before release if individual subagent calls hit
    context-window pressure.
+
+---
+
+## Stage 3 additions (2026-05-17)
+
+Stage 3 Tiers A–K (closed 2026-05-17, see
+[STAGED_IMPROVEMENT_PLAN.md](STAGED_IMPROVEMENT_PLAN.md) for the full
+closure table) added the following runtime artifacts and contracts on
+top of the v0.7.x baseline above.
+
+### New artifacts under `papers/draft_N/`
+
+- **`figures/`** — symlink (or copy fallback) to `<project>/figures/`,
+  auto-staged by `phase_assemble` before invoking the docx renderer
+  (Tier A + Tier J.1). The renderer rejects `..` parent-relative paths,
+  so the symlink is the only way the canonical `figures/X.png`
+  inventory paths resolve. If a *non-empty* `figures/` directory
+  pre-exists in the draft dir (user-managed content), staging is a
+  no-op; if it pre-exists *empty* (extract-phase side effect), it's
+  removed and re-created as the symlink.
+
+### New artifacts under `papers/draft_N/audit/`
+
+- **`review_mode.json`** (Tier K) — records which Tier-3 reviewer ran.
+  Machine-discoverable consumer contract:
+  ```json
+  {
+    "reviewer": "canonical|canonical-failed|fallback|fallback-failed|none",
+    "note": "free-text context",
+    "timestamp": "ISO-8601 UTC"
+  }
+  ```
+
+- **`claim_inventory_validation.json`** gains Stage 3 Tier I additive
+  fields (all pre-existing fields preserved):
+  ```json
+  {
+    "rows_repaired_this_run": <int>,
+    "repaired_notebooks": {"<original>": "<resolved_full_filename>", ...}
+  }
+  ```
+
+- **`optimizer_subtraction_check.json`** (Stage 1 Tier A) — confirms
+  the optimizer phase did not introduce numeric values absent from
+  REPORT.md.
+
+### External-CLI resolution (Tier J + Tier K)
+
+The orchestrator resolves two external CLIs to absolute paths at init,
+eliminating PATH-visibility dependence for nested spawn contexts:
+
+| CLI | Required? | Resolver | Env override |
+|---|---|---|---|
+| `claude` | Yes — halts at init if unresolved | `resolve_claude_bin()` | `BERIL_CLAUDE_BIN` |
+| `beril-adversarial` | No — falls back with loud WARNING | `resolve_adversarial_bin()` | `BERIL_ADVERSARIAL_BIN` |
+
+Resolution order (both): env var → `shutil.which` → well-known
+locations (`~/.local/bin/`, `/opt/homebrew/bin/`, `/usr/local/bin/`;
+plus newest `~/.nvm/versions/node/*/bin/` for `claude`).
+
+### Phase order (post-Stage-2 Tier D reorder)
+
+```
+init → extract → triage → plan → throughline_pick (PAUSE) →
+citation_pool → drafting → review → optimize → supplementary_pool →
+compliance_gate → assemble → assembled
+```
+
+`supplementary_pool` runs AFTER `optimize` (Tier D reorder, 2026-05-11)
+because the optimizer's `citation_reality` dispatch inserts
+`[NEEDS CITATION:]` markers; supplementary_pool resolves them via
+WebSearch.
+
+### Model defaults (post-Stage-3)
+
+| Knob | Default | Drives |
+|---|---|---|
+| `self.model` | `claude-opus-4-6` | plan, triage, optimizer, compliance_fix, supplementary_pool |
+| `self.model_writing` | `claude-opus-4-6` | holistic draft |
+| `config.haiku_model` | `claude-3-haiku-20240307` | Tier-2 light review |
+
+Stage 3 flipped `self.model` from Sonnet 4.5 to Opus 4.6.
+
+### draft.py: project-id fallback (Tier J)
+
+`beril-paper-writer draft <project>` now resolves `<project>` as:
+1. An absolute or relative path if `is_dir()`.
+2. Else `<cwd>/projects/<project>/` (the fallback documented in the
+   `--help` but never implemented before Tier J).
+3. Else fail loud with both attempted paths.
+
+### Bash flow status (paper_writer.sh)
+
+On the retirement track per the 2026-05-17 audit. The Python
+orchestrator (`orchestrator.py`) is the canonical entry point. The
+bash flow is preserved as a safety net during the transition but is
+not on any active call path from post-Stage-3 `draft.py` / `continue_run.py`.

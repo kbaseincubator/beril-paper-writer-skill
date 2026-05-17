@@ -889,8 +889,8 @@ fallback, not the default); higher word-count threshold without
 stripping (rejected: doesn't distinguish signal from noise in
 notebook prose).
 
-**Related:** RELEASE_NOTES_v0_4.md; RELEASE_NOTES_v0_5.md;
-figure_caption.v1.md.
+**Related:** `release-notes/v0_4.md`; `release-notes/v0_5.md`;
+`figure_caption.v1.md`.
 
 ---
 
@@ -987,7 +987,7 @@ Phase 5 iterative citation rounds (5–8 adaptive; bounded supplementary
 pool round when `[NEEDS CITATION]` markers exist) → Phase 6 compliance
 gate (deterministic, build-fails-if-missing) → Phase 7 copy-edit
 (clarity + concision; semantic-invariance post-check) → Phase 8 docx.
-SPEC_v0_8.md is the authoritative spec; M1–M8 are scoped milestones.
+SPEC.md is the authoritative spec; M1–M8 are scoped milestones.
 
 **Rationale.** Three converging signals (per the auto-memory entry
 `project_paper_writer_v0_8_architecture.md`): (1) the per-section
@@ -1010,7 +1010,7 @@ the patches with a stronger upstream pass.
 
 1. **Q1 — discrepancy register: LLM-assisted classification.** Pure
    string-match is too fragile for synonym/paraphrase robustness in
-   hand-authored RESEARCH_PLAN.md text. (SPEC_v0_8 §4.5)
+   hand-authored RESEARCH_PLAN.md text. (SPEC §4.5)
 2. **Q2 — claim_inventory: full coverage; no salience filter.** TSV
    form scales; the holistic prompt's word budget is the natural cut.
    Revisit at v0.8.x if a project's inventory exceeds ~150 claim_ids.
@@ -1052,7 +1052,7 @@ the patches with a stronger upstream pass.
     is the canonical record). (§15)
 11. **Q11 — old V0_8_0_PUNCH_LIST.md disposition: renamed.** Renamed
     to `archive-v0_8_language_quality_punch_list.md` 2026-05-07.
-12. **Q12 — SPEC.md vs SPEC_v0_8.md: coexist through v0.8.x.**
+12. **Q12 — SPEC.md vs SPEC.md: coexist through v0.8.x.**
     Consolidate at v1.0.
 
 **Alternatives considered.** Continuing v0.7.x patch cycle (rejected:
@@ -1089,7 +1089,7 @@ M7 measures actual cost; if v0.8.0 cost lands above 1.3× *and*
 quality dominance is unclear, M7 go/no-go shifts toward keeping
 v0.7.x as default.
 
-**Related:** SPEC_v0_8.md (authoritative spec for all 8 phases);
+**Related:** SPEC.md (authoritative spec for all 8 phases);
 auto-memory `project_paper_writer_v0_8_architecture.md` (decision
 context); auto-memory `project_paper_writer_v0_8_m0.md` (M0 ship
 summary); the prior `archive-v0_8_language_quality_punch_list.md`
@@ -1489,3 +1489,226 @@ prompt (in-place edit, SHA bumps automatically); B1.g shipped retry
 discipline (D-039) that recovers occasional drops but cannot fix
 systematic fabrication that the LLM repeats across attempts —
 allowlists are the layer that addresses repeating errors.
+
+---
+
+## D-041 — 2026-05-12 — Stage 3 Tier A: figure staging in phase_assemble
+
+`assemble_docx.py` resolves image paths against `manuscript.md.parent`
+and rejects any path containing `..` (defensive against path
+traversal). The canonical figures inventory uses paths of the form
+`figures/X.png` (relative). Without staging, those resolve to
+`<draft_dir>/figures/X.png` which doesn't exist; every figure renders
+as `[FIGURE MISSING: ...]`.
+
+Decision: `phase_assemble` symlinks `<project>/figures/` →
+`<draft_dir>/figures/` before invoking the renderer (copy fallback for
+Windows / cross-volume). Idempotent; preserves a user-managed real dir.
+
+Latent failure mode fixed: pre-v0.7.x runs happened to wrap image
+markdown in blockquotes (`> ![...]`), which the renderer silently
+treated as prose — zero warnings, zero embeds. The figure-embed loop
+had never actually shipped working end-to-end.
+
+**Related.** D-042 (prompt-side pinning); D-049 (J.1 refinement —
+replace empty pre-existing dirs).
+
+---
+
+## D-042 — 2026-05-12 — Stage 3 Tier B: holistic_draft image-block form
+
+`holistic_draft.v1.md` had an ambiguous worked example
+(`> **Figure 1.** Caption text...`) that gave the LLM license to wrap
+the entire figure block in a blockquote. The renderer's block-image
+parser only recognizes a line whose entire content is a bare
+`![alt](path)` — wrapping silently demotes to prose.
+
+Decision: rewrite the prompt's image-embed section to pin the
+two-block pattern (bare image + adjacent `**Figure N.** caption`)
+with an explicit anti-pattern callout for the blockquote form.
+
+---
+
+## D-043 — 2026-05-12 — Stage 3 Tier C: citation-pool schema is `entries[]`
+
+`citation_pool.v1.md` writes `{"entries": [...]}`. A Stage 2 rewrite
+of `holistic_draft.v1.md` and `supplementary_citations.v1.md`
+inverted this to `citations[]` — a directionality bug. Latent because
+no `[NEEDS CITATION:]` markers landed on draft_8/9; would fire the
+moment supplementary phase tried to append.
+
+Decision: reverse both prompts to match the canonical `entries[]`
+shape.
+
+---
+
+## D-044 — 2026-05-12 — Stage 3 Tier D: state.tier population from candidates
+
+The Python orchestrator's plan phase emits
+`throughline_candidates.md` including a `**Tier:** STRONG|THIN|EXPLORATORY`
+verdict. The bash flow has always parsed this via
+`paper_writer_helpers extract-tier` and written `state.tier`. The
+Python orchestrator never did, leaving `state.tier = None` on every
+Python-flow draft. Downstream consumers (adversarial reviewer, word-
+budget prompts) default to EXPLORATORY when tier is null regardless
+of actual project rigor — silent degradation.
+
+Decision: at the end of `phase_plan`, call
+`paper_writer_helpers._extract_tier_from_text` (canonical regex,
+same as bash flow) against `throughline_candidates.md` and write
+the result to `state.tier`.
+
+---
+
+## D-045 — 2026-05-12 — Stage 3 Tier G: phase_triage model pin + cost tracking
+
+`phase_triage`'s claim-extraction and discrepancy-audit `claude -p`
+calls had no `--model` flag and bypassed `_run_claude_p_with_cost`
+— the only major LLM calls that did so. An unpinned `claude -p`
+resolves a different default model in a nested Claude Code session
+than from a plain shell. On draft_9 this produced a categorical
+formatting change in `source_notebook` values (bare stems / em-dash
+placeholders / 76% validator clear-rate vs the ~10% steady-state
+band on draft_4–8).
+
+Decision: route both calls through `_run_claude_p_with_cost` with
+`model=self.model`. Fixes the trigger AND closes a cost-tracking
+hole (triage spend was invisible to `state.cost_so_far_usd`).
+
+**Related.** D-046 (prompt amplifier) + D-047 (validator backstop)
+land alongside; mechanism > prompt > backstop, in defense order.
+
+---
+
+## D-046 — 2026-05-12 — Stage 3 Tier H: extract_claims.v1.md exact-filename rule
+
+`extract_claims.v1.md` was thin on `source_notebook` format — one
+example, "if applicable", no exact-filename rule. The Tier G model
+pin alone removes the trigger but a loose prompt invites recurrence
+under future model changes.
+
+Decision: add an explicit format-rule section
+("emit the exact `.ipynb` filename from methods_provenance.md; no
+abbreviation, no parenthetical, no em-dash/N/A placeholder") with
+a worked counter-example table.
+
+---
+
+## D-047 — 2026-05-12 — Stage 3 Tier I: validator repair pass
+
+`validate_claim_inventory.py` previously only CLEARED rows whose
+`source_notebook` didn't resolve to a real file. On reconstructed
+draft_9 input, this cleared 191/250 rows.
+
+Decision: add a conservative *repair* pass keyed on the notebook-ID
+grammar `^NB\d+[a-z]?`. On a successful repair, rewrites
+`source_notebook` to the full real filename and notes the repair in
+the `notes` column (`notebook-repaired: <orig> -> <full>`). Only
+fires on unambiguous matches:
+
+1. Missing-extension recovery (`cleaned + ".ipynb"` is a real file).
+2. Notebook-ID recovery (value's ID matches exactly one real notebook).
+
+Rejects placeholders (`—`, `N/A`, `TBD`), slash-joined refs
+(`NB04b/c`), values naming >1 notebook. On reconstructed draft_9:
+183/191 repaired, 8 correctly stay cleared. Diagnostic JSON gains
+additive fields `rows_repaired_this_run` and `repaired_notebooks`.
+
+---
+
+## D-048 — 2026-05-12 — Stage 3 Tier J: absolute-path resolution for `claude`
+
+`asyncio.create_subprocess_exec("claude", ...)` relies on a PATH
+lookup at spawn time. Observed 2026-05-12: a backgrounded
+`beril-paper-writer` invocation under Claude Code's Bash tool raised
+`FileNotFoundError: 'claude'` while the identical foreground
+invocation succeeded — the nested context's environment did not
+carry the directory where `claude` lives (nvm bin), even though the
+interactive shell did.
+
+Decision: resolve `claude` to an absolute path once at orchestrator
+init via module-level `resolve_claude_bin()`. Resolution order:
+`BERIL_CLAUDE_BIN` env override → `shutil.which` → well-known
+locations. Fails loud at init listing searched paths if unresolvable.
+All four `claude -p` call sites use `self.claude_bin` (absolute) —
+spawn is context-independent.
+
+Adjacent fixes folded into Tier J:
+- `draft.py` implements the documented `projects/<id>/` path fallback
+  (was in `--help` but never coded).
+- `draft.py` catches construction-time `RuntimeError` cleanly with a
+  stillborn-draft-dir hint.
+- `configure.py` calls the same `resolve_claude_bin` the orchestrator
+  uses (previously a bare `shutil.which` that gave false greens when
+  the spawn context's PATH differed).
+
+---
+
+## D-049 — 2026-05-12 — Stage 3 Tier J.1: figure staging — empty-dir override
+
+Tier A deferred to a pre-existing real `figures/` dir assuming
+user-managed content. Live draft_1 revealed an *empty* `figures/` dir
+created as a side effect of
+`extract_figures.py --output-dir <draft_dir>` — making Tier A a no-op
+and producing 14 `WARN: image file not found`.
+
+Decision: defer to a real directory ONLY when it has content.
+If empty, `rmdir` it and create the symlink.
+
+---
+
+## D-050 — 2026-05-12 — Stage 3 default `model` flipped from Sonnet to Opus
+
+`self.model` (orchestrator constructor parameter) defaulted to
+Sonnet 4.5 and drove the load-bearing reasoning phases (plan,
+triage, optimizer, compliance_fix, supplementary_pool) — where the
+consequences of error are highest. Holistic draft was already Opus;
+the silent Sonnet default for scaffolding was backwards.
+
+Decision: flip `self.model` default to `claude-opus-4-6`. Tier-2
+light review stays on Haiku by design. `--model` overrides. Applies
+to bare invocations and to `continue` (which never passed a model
+and always took the constructor default).
+
+Cost trade-off: ~3× Sonnet on the affected phases. Per cycle stance:
+cost is being measured, not optimized.
+
+---
+
+## D-051 — 2026-05-16 — Stage 3 Tier K: beril-adversarial resolution + loud-warn fallback
+
+`phase_review` Tier 3 had a bare-name `["beril-adversarial", ...]`
+spawn — same class of PATH-visibility bug Tier J fixed for `claude`.
+On a live draft, the canonical reviewer silently didn't fire despite
+being on PATH per configure; the manuscript shipped reviewed only by
+the lighter inline fallback, letting through findings the canonical
+reviewer catches (an Eggerthella-vs-Enterocloster binomial conflation
+slipped through).
+
+Decision (mirrors Tier J but with optional semantics):
+
+- Module-level `resolve_adversarial_bin()` returns an absolute path
+  or `None` (NOT raising — adversarial is required-by-default-with-
+  fallback, not hard-required). `BERIL_ADVERSARIAL_BIN` env override.
+- Orchestrator `__init__` logs a LOUD WARNING at init if canonical is
+  missing and `--no-adversarial` not set, so the user knows minutes
+  before phase_review what kind of review they're heading toward.
+- `phase_review` Tier 3 branches three ways:
+  1. canonical via absolute path,
+  2. inline fallback with WARNING when canonical missing,
+  3. inline fallback with INFO when `--no-adversarial` is explicit.
+- `_run_fallback_reviewer()` invokes `fallback_reviewer.v1.md` via
+  the cost-tracking helper; writes `reviews/fallback_review.md`.
+- `_write_review_mode()` records the Tier-3 reviewer outcome in
+  `audit/review_mode.json`. Values: `canonical` / `canonical-failed`
+  / `fallback` / `fallback-failed` / `none`. Machine-discoverable
+  consumer contract for downstream tooling.
+- `--no-adversarial` flag plumbed through BOTH `draft.py` and
+  `continue_run.py` (continue was previously accepting the flag via
+  argparse but never passing it to the orchestrator constructor —
+  silent drop).
+
+Stated end-state is co-install (beril-adversarial as a hard
+dependency of beril-paper-writer-skill); current behavior is
+required-by-default-with-loud-fallback so missing-canonical can't go
+unnoticed but doesn't hard-halt.

@@ -2,7 +2,7 @@
 """M1 §C2 smoke harness for ``claim_inventory.py`` on ibd_phage_targeting.
 
 This is the M1 milestone-gate smoke for the Phase-0 numeric-claim inventory.
-See ``M1_PUNCH_LIST.md`` §C2 + ``SPEC_v0_8.md`` §4.6.
+See ``M1_PUNCH_LIST.md`` §C2 + ``SPEC.md`` §4.6.
 
 Three modes:
 
@@ -505,7 +505,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         prog="m1_claim_inventory_smoke.py",
         description=(
             "M1 §C2 smoke harness for claim_inventory. See "
-            "M1_PUNCH_LIST.md §C2 + SPEC_v0_8.md §4.6."
+            "M1_PUNCH_LIST.md §C2 + SPEC.md §4.6."
         ),
     )
     p.add_argument(

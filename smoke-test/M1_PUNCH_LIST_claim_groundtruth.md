@@ -108,7 +108,7 @@ Recall (matched / total)      : 0.562
 
 ### 3.c Why recall isn't fixable by switching --no-llm → default mode
 
-The B1.c LLM demarcation pass is, by spec (`SPEC_v0_8.md` §4.6 + the
+The B1.c LLM demarcation pass is, by spec (`SPEC.md` §4.6 + the
 prompt at `prompts/claim_demarcate.v1.md`), constrained to:
 
 * Demarcate multi-numeric sentences into one claim per numeric.

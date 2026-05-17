@@ -1,6 +1,6 @@
 # beril-paper-writer — Contribution guide
 
-**Status:** v0.7.1. Living document.
+**Status:** v0.8.0 + Stage 3 (2026-05-17). Living document.
 
 ## What can be contributed
 

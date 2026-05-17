@@ -202,15 +202,22 @@ beril-paper-writer continue projects/my_project/papers/draft_1 \
 /beril-paper-writer-continue projects/my_project/papers/draft_1 --pick TL1
 ```
 
-After you pick, the pipeline runs the full drafting sequence:
-Methods → Results → Discussion → Introduction → Abstract →
-Limitations → Data Availability → citation verification →
-figure/table embedding → adversarial review → rewrite passes →
-final assembly.
+After you pick, the pipeline runs the full drafting sequence
+(post-Stage-3, the holistic-draft era):
 
-This is the long step (~15–40 minutes for standard depth). Progress
-streams to stderr; you can watch it or come back later — state
-persists on disk.
+citation_pool (verified DOI/PMID pool) → holistic draft (single Opus
+pass producing the entire manuscript: Abstract, Introduction, Methods,
+Results, Discussion, References) → tiered review (Tier-1 deterministic,
+Tier-2 Haiku, Tier-3 canonical adversarial via beril-adversarial or
+loud-warn fallback) → subtraction-only optimizer → supplementary
+citations (resolves any `[NEEDS CITATION:]` markers via WebSearch) →
+compliance gate (ICMJE checks with autofix) → assemble (markdown →
+.docx with figures embedded).
+
+This is the long step (~15–40 minutes for standard depth on Opus).
+Progress streams to stderr; you can watch it or come back later —
+state persists on disk in `state.json`. Cost accumulates in
+`state.cost_so_far_usd`.
 
 ---
 
@@ -220,27 +227,36 @@ When the pipeline finishes, your draft is at:
 
 ```
 projects/my_project/papers/draft_1/
-├── manuscript.md           ← full assembled draft (markdown)
-├── manuscript.docx         ← Word document (if assemble ran)
-├── next_actions.md         ← checklist of remaining issues
-├── 01_methods.md           ← individual sections
-├── 02_results.md
-├── 03_discussion.md
-├── 04_introduction.md
-├── 05_abstract.md
-├── 00_throughline.md       ← your chosen throughline + evidence map
-├── references.md           ← numbered reference list
-├── citation_map.md         ← claim → reference index
-├── reframing_log.md        ← deviations from REPORT.md (auditable)
-└── reviews/                ← adversarial review reports
+├── manuscript.md                  ← full assembled draft (single file, markdown)
+├── manuscript.docx                ← Word document (figures embedded)
+├── 00_throughline.md              ← your chosen throughline + evidence map
+├── citation_pool.json             ← verified DOI/PMID pool used by the draft
+├── references.md                  ← rendered bibliography
+├── citation_map.md                ← claim → reference index
+├── methods_provenance.md          ← extracted-from-notebooks methods
+├── claim_inventory.tsv            ← every numeric claim → source notebook
+├── compliance_errors.json         ← ICMJE compliance flags (if any)
+├── figures/                       ← symlink → <project>/figures/ (auto-staged)
+└── audit/
+    ├── adversarial_review.{md,json}    ← Tier 3 canonical review (or fallback_review.md)
+    ├── review_mode.json                ← which reviewer ran (canonical / fallback)
+    ├── claim_inventory_validation.json ← validator output (Stage 3 Tier I)
+    ├── optimizer_subtraction_check.json
+    ├── optimization_applied.md
+    └── (per-phase metadata + stream logs)
 ```
 
-**Start with `next_actions.md`** — it aggregates all remaining
-issues from validators, post-checkers, and the adversarial review
-into a single checklist.
+**Start with `audit/adversarial_review.md`** (or
+`reviews/fallback_review.md` if `audit/review_mode.json` says
+`reviewer: fallback`) — that's the reviewer's structured findings on
+the draft. Then `audit/optimization_applied.md` to see what the
+subtraction-only optimizer changed in response.
 
-**Read `reframing_log.md`** if you want to see where the paper
-writer deviated from your REPORT.md findings (and why).
+(Post-Stage-3 holistic-draft note: there are no per-section
+`01_methods.md`, `02_results.md`, etc. files anymore. The holistic
+drafter produces `manuscript.md` as a single artifact in one Opus
+pass; sectional output was the v0.7.x bash-flow shape and has been
+retired.)
 
 ### Generate a Word document
 

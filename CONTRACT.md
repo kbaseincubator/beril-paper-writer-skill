@@ -230,16 +230,98 @@ The two reviewers produce different output formats:
 
 | Property | Fallback | Canonical |
 |---|---|---|
-| Output path | `reviews/draft_N_review_M.md` | `audit/adversarial_review.{md,json}` |
+| Output path | `reviews/fallback_review.md` (Python flow) / `reviews/draft_N_review_M.md` (legacy bash flow) | `audit/adversarial_review.{md,json}` |
 | Format | Markdown with YAML frontmatter | Markdown + JSON (schema-versioned) |
 | Machine-parseable | No (finding headers only: `**C\d+:`, `**I\d+:`, `**S\d+:`) | Yes (JSON `findings[]` array) |
 | Severity vocab | Critical / Important / Suggested | P0 / P1 / P2 / info |
 | `fallback: true` header | Yes (YAML frontmatter) | No |
-| Rewrite-loop compatible | Yes (paper_writer.sh parses finding headers) | Planned v0.7.0 (paper_writer.sh parses JSON) |
+| Optimizer dispatch compatible | No (no structured JSON to dispatch on; optimizer skips with a `findings missing` warning) | Yes |
 
-The fallback reviewer runs **inside** the rewrite loop (1–3 passes).
-The canonical reviewer runs **after** the rewrite loop as a final
-quality gate. They are complementary, not alternative.
+The post-Stage-3 Python orchestrator (Tier K) selects which reviewer
+runs at Tier 3 of the review cascade — see "review_mode.json consumer
+contract" below.
+
+---
+
+## review_mode.json consumer contract (Stage 3 Tier K, 2026-05-16)
+
+When paper-writer's `phase_review` runs, it writes
+`papers/draft_N/audit/review_mode.json` recording which Tier-3
+reviewer fired. Downstream consumers (other skills, CI checks, manual
+auditors) can rely on this artifact to know what kind of review the
+manuscript carries without parsing the review file itself.
+
+### Schema
+
+```json
+{
+  "reviewer": "canonical|canonical-failed|fallback|fallback-failed|none",
+  "note": "free-text context (reason tag, error summary, etc.)",
+  "timestamp": "ISO-8601 UTC, e.g. 2026-05-16T14:30:00Z"
+}
+```
+
+### `reviewer` field semantics
+
+| Value | Meaning |
+|---|---|
+| `canonical` | beril-adversarial ran successfully; `audit/adversarial_review.{md,json}` exists |
+| `canonical-failed` | beril-adversarial was invoked but exited non-zero; manuscript review may be incomplete; `note` carries the exit-code summary |
+| `fallback` | inline `fallback_reviewer.v1.md` ran; `reviews/fallback_review.md` exists; `note` indicates `reason=adversarial-missing` (canonical was unreachable) or `reason=explicit-opt-out` (`--no-adversarial` flag) |
+| `fallback-failed` | inline fallback was invoked but exited non-zero; manuscript is effectively unreviewed |
+| `none` | the fallback prompt file is missing on disk; manuscript is unreviewed and Tier 3 was silently skipped |
+
+### When to read it
+
+- **Cross-skill consumers** (e.g., a downstream presentation-maker
+  that wants to know whether the manuscript was canonically reviewed
+  before pulling content from it): always check
+  `audit/review_mode.json`. If `reviewer != "canonical"`, the
+  consumer should flag the source manuscript as unverified by the
+  heavy reviewer.
+- **Auditors / operators**: after a run completes, this file tells
+  you in one read whether the canonical reviewer fired without
+  needing to dig through logs.
+- **Stability**: schema additions are additive (new fields may
+  appear; existing fields preserved). The `reviewer` enum may gain
+  new values but the four listed above will remain.
+
+---
+
+## claim_inventory_validation.json additive fields (Stage 3 Tier I, 2026-05-12)
+
+`papers/draft_N/audit/claim_inventory_validation.json` (the post-validator
+for `claim_inventory.tsv`) gained two additive fields in Stage 3 Tier I:
+
+```json
+{
+  "rows_repaired_this_run": <int>,
+  "repaired_notebooks": {
+    "<original_source_notebook_value>": "<resolved_full_filename>",
+    ...
+  }
+}
+```
+
+All pre-existing fields preserved:
+- `total_rows`, `rows_with_source_notebook`, `rows_updated_this_run`,
+  `rows_already_marked_unresolved`, `unique_invalid_notebooks` (the
+  list of values that stayed CLEARED — not repaired).
+
+### Consumer implications
+
+Cross-skill consumers that read `claim_inventory.tsv` for
+notebook-grounding (e.g., presentation-maker's no-paper originate
+path, which vendors paper-writer's `extract_claims.v1.md` + this
+validator):
+
+- A row's `source_notebook` is now potentially **repaired** in place
+  rather than only cleared. Trustworthy provenance is now
+  `non-empty source_notebook AND (notes doesn't start with
+  unresolved-notebook: OR notes starts with notebook-repaired:)`.
+- If consumer logic keyed on the `unresolved-notebook:` note prefix
+  as the "bad" signal, treat `notebook-repaired:` as the
+  "good/recovered" signal — don't lump them.
 
 ---
 
