@@ -99,6 +99,23 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
             "figures with existing audit/figure_caption_<N>.md files."
         ),
     )
+    # Stage 4 Tier S (2026-05-18): pre-disable the P0 gate from the
+    # start. The remediation loop only kicks in via `continue --remediate`
+    # because `draft` is a fresh run; the only useful Tier-S flag here
+    # is the gate-bypass for operators who want a one-shot draft without
+    # any pause.
+    p.add_argument(
+        "--ship-with-p0s",
+        action="store_true",
+        help=(
+            "Pre-disable the P0 gate on this run. The pipeline still "
+            "computes adversarial_review.json and numeric_grounding.json "
+            "but does not pause if P0 findings are present — phase_review "
+            "advances straight through to optimize. Use only when you "
+            "are intentionally running an exploratory or known-degraded "
+            "draft."
+        ),
+    )
     p.set_defaults(func=run)
     return p
 
@@ -167,6 +184,12 @@ def run(args: argparse.Namespace) -> int:
             model=getattr(args, "model", None) or "claude-opus-4-6",
             model_writing=getattr(args, "model_writing", None) or "claude-opus-4-6",
             no_adversarial=getattr(args, "no_adversarial", False),
+            # Stage 4 Tier S: --ship-with-p0s is the only gate-related
+            # flag exposed on `draft`. --remediate has no meaning on a
+            # fresh run (there are no P0s to remediate yet), and
+            # --max-remediate-cycles is policy for the continue path
+            # only.
+            ship_with_p0s=getattr(args, "ship_with_p0s", False),
         )
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)

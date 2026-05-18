@@ -288,6 +288,9 @@ def test_valid_phases_complete() -> None:
     # never existed); added "extract" / "plan" / "supplementary_pool" /
     # "optimize" / "compliance_gate" / "assemble" — each backed by a
     # method on PaperWriterOrchestrator.
+    # Stage 4 Tier S (2026-05-18): added "p0_review" + "remediate" for
+    # the P0 gate + remediation loop. The gate sits between phase_review
+    # and phase_optimize; remediate is one re-draft cycle.
     expected = {
         "init",
         "extract",
@@ -298,6 +301,8 @@ def test_valid_phases_complete() -> None:
         "drafting",
         "supplementary_pool",
         "review",
+        "p0_review",
+        "remediate",
         "optimize",
         "compliance_gate",
         "assemble",

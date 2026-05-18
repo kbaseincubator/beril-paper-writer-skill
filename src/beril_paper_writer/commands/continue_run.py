@@ -112,6 +112,42 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
             "figures with existing audit/figure_caption_<N>.md files."
         ),
     )
+    # Stage 4 Tier S (2026-05-18): P0 gate / remediation flags.
+    p.add_argument(
+        "--remediate",
+        action="store_true",
+        help=(
+            "When paused at phase=p0_review with P0 findings, dispatch "
+            "into one remediation cycle (re-draft via "
+            "remediation_draft.v1.md, then re-run phase_review). "
+            "Bounded by --max-remediate-cycles (default 2). If cycle "
+            "cap is exhausted without eliminating P0s, the pipeline "
+            "pauses at p0_review again with updated proceed options "
+            "in p0_findings.md."
+        ),
+    )
+    p.add_argument(
+        "--ship-with-p0s",
+        action="store_true",
+        help=(
+            "Override the P0 gate: advance to phase_optimize even when "
+            "P0 findings are present. The findings remain in "
+            "audit/adversarial_review.json and audit/"
+            "numeric_grounding.json for posterity; p0_findings.md is "
+            "still written for the audit trail."
+        ),
+    )
+    p.add_argument(
+        "--max-remediate-cycles",
+        type=int,
+        default=2,
+        help=(
+            "Maximum number of remediation cycles per `continue --remediate` "
+            "invocation. Each cycle re-drafts the manuscript and re-runs "
+            "phase_review. Default: 2. Cost-aware operators may want to "
+            "set this to 1 (single attempt) or raise it on a stubborn draft."
+        ),
+    )
     p.set_defaults(func=run)
     return p
 
@@ -337,6 +373,9 @@ def _resume_via_orchestrator(
     draft_dir: Path,
     max_cost_usd: float | None = None,
     no_adversarial: bool = False,
+    remediate: bool = False,
+    ship_with_p0s: bool = False,
+    max_remediate_cycles: int = 2,
 ) -> int:
     import asyncio
     from beril_paper_writer.orchestrator import PaperWriterOrchestrator
@@ -346,10 +385,14 @@ def _resume_via_orchestrator(
     # orchestrator with defaults only, so a user passing
     # `--no-adversarial` to `continue` would have been silently
     # ignored.
+    # Stage 4 Tier S (2026-05-18): plumb the P0 gate flags too.
     orch = PaperWriterOrchestrator(
         draft_dir,
         max_cost_usd=max_cost_usd,
         no_adversarial=no_adversarial,
+        remediate=remediate,
+        ship_with_p0s=ship_with_p0s,
+        max_remediate_cycles=max_remediate_cycles,
     )
     try:
         asyncio.run(orch.run_pipeline())
@@ -450,14 +493,34 @@ def run(args: argparse.Namespace) -> int:
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),
             no_adversarial=getattr(args, "no_adversarial", False),
+            remediate=getattr(args, "remediate", False),
+            ship_with_p0s=getattr(args, "ship_with_p0s", False),
+            max_remediate_cycles=getattr(
+                args, "max_remediate_cycles", 2,
+            ),
         )
 
-    elif st.phase in ("init", "citation_pool", "drafting", "supplementary_pool", "review", "optimize", "rewrite", "compliance_gate", "compliance"):
+    elif st.phase in (
+        "init", "citation_pool", "drafting", "supplementary_pool",
+        "review",
+        # Stage 4 Tier S (2026-05-18): p0_review is a pause point;
+        # `continue` is the only way out (with or without --remediate
+        # / --ship-with-p0s). remediate is the work state that
+        # follows; if a remediation cycle crashed mid-flight,
+        # `continue` re-enters it.
+        "p0_review", "remediate",
+        "optimize", "rewrite", "compliance_gate", "compliance",
+    ):
         # paper_writer.sh handles each of these idempotently.
         return _resume_via_orchestrator(
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),
             no_adversarial=getattr(args, "no_adversarial", False),
+            remediate=getattr(args, "remediate", False),
+            ship_with_p0s=getattr(args, "ship_with_p0s", False),
+            max_remediate_cycles=getattr(
+                args, "max_remediate_cycles", 2,
+            ),
         )
 
     elif st.phase == "assembled":

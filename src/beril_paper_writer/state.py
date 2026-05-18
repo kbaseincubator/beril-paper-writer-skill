@@ -48,6 +48,16 @@ VALID_PHASES = frozenset(
         "drafting",
         "supplementary_pool",
         "review",
+        # Stage 4 Tier S (2026-05-18): P0 gate + remediation loop sit
+        # between `review` and `optimize`. `phase_review` advances into
+        # `p0_review`, which decides (a) advance to optimize when no
+        # P0s, or `--ship-with-p0s` overrides; (b) dispatch into
+        # `remediate` when `--remediate` is set AND cycles remain;
+        # (c) raise PipelineHalted with `p0_findings.md` otherwise.
+        # `remediate` runs one re-draft cycle then advances back to
+        # `review` (the cascade re-runs and the gate re-evaluates).
+        "p0_review",
+        "remediate",
         "optimize",
         "compliance_gate",
         # Stage 1 Tier B: added "assemble" — explicit Phase 8 docx render
@@ -364,6 +374,133 @@ class ManuscriptFile:
 
 
 # --------------------------------------------------------------------------
+# Remediation cycle tracking (Stage 4 Tier S, 2026-05-18)
+# --------------------------------------------------------------------------
+
+# Valid `status` values for RemediationCycle entries.
+#   "in_progress"     — cycle started, manuscript snapshot saved, LLM
+#                       call may or may not have completed; presence
+#                       on disk implies the cycle was launched but
+#                       not yet wrapped (crash recovery: re-attempt).
+#   "completed"       — cycle finished cleanly; manuscript was rewritten;
+#                       costs and p0_after captured.
+#   "aborted-budget"  — circuit breaker fired (max_cost_usd exceeded)
+#                       partway through the cycle.
+#   "aborted-error"   — LLM invocation returned non-zero or another
+#                       fatal error; manuscript may be unchanged from
+#                       pre-cycle iter_N snapshot.
+VALID_REMEDIATION_CYCLE_STATUSES = frozenset(
+    {
+        "in_progress",
+        "completed",
+        "aborted-budget",
+        "aborted-error",
+    }
+)
+
+
+@dataclass
+class RemediationCycle:
+    """One pass through the Stage 4 Tier S P0 remediation loop.
+
+    Created at the start of each cycle by ``phase_remediate``; updated
+    in place when the cycle finishes (or aborts). The list lives on
+    DraftState.remediation_cycles and is append-only — abort entries
+    are retained, never overwritten, so the audit trail captures every
+    attempt.
+
+    Fields:
+      cycle_n          — 1-indexed sequence number. cycle_n == 1 is
+                         the first remediation pass; cycle_n equals
+                         ``len(state.remediation_cycles)`` at entry.
+      ts_start         — ISO 8601 UTC string when the cycle began.
+      ts_end           — ISO 8601 UTC string when status moved to
+                         completed/aborted-*; None while in_progress.
+      drafter_cost_usd — Cost of the remediation_draft.v1 LLM call;
+                         0.0 if envelope didn't parse or the call
+                         hadn't fired yet at abort time.
+      review_cost_usd  — Cost of the SUBSEQUENT phase_review cascade
+                         (Tier 3 canonical adversarial dominates).
+                         Populated lazily by phase_p0_review when it
+                         observes a freshly-completed cycle. None
+                         until the next review pass concludes.
+      p0_before        — Total P0 count across both audit JSONs at
+                         cycle entry. Source of truth for the
+                         "remediation_progress" log line.
+      p0_after         — Total P0 count at the end of the next
+                         phase_review. None until phase_p0_review
+                         backfills it on the subsequent gate
+                         evaluation. A None here on a `completed`
+                         cycle means the next review has not yet
+                         fired.
+      p0_before_by_source / p0_after_by_source —
+                         dict[str, int] keyed on
+                         {"adversarial", "numeric_grounding"}.
+                         Enables per-source convergence tracking
+                         (e.g., spotting if remediation closes
+                         numeric-grounding findings but the
+                         adversarial side stays stuck).
+      manuscript_pre_path — Relative path to manuscript.iter_N.md
+                            (the manuscript BEFORE this cycle's LLM
+                            rewrite). Allows diffing.
+      audit_snapshot_dir  — Relative path to audit/iter_N/ (the
+                            JSON snapshot of the audit findings
+                            that triggered this cycle).
+      status            — One of VALID_REMEDIATION_CYCLE_STATUSES.
+      note              — Free-text note; on abort, captures the
+                          failure mode (e.g., "claude exit 1",
+                          "circuit breaker $5.42 >= $5.00").
+    """
+
+    cycle_n: int
+    ts_start: str
+    ts_end: Optional[str] = None
+    drafter_cost_usd: float = 0.0
+    review_cost_usd: Optional[float] = None
+    p0_before: int = 0
+    p0_after: Optional[int] = None
+    p0_before_by_source: dict[str, int] = field(default_factory=dict)
+    p0_after_by_source: Optional[dict[str, int]] = None
+    manuscript_pre_path: str = ""
+    audit_snapshot_dir: str = ""
+    status: str = "in_progress"
+    note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RemediationCycle:
+        return cls(
+            cycle_n=int(d.get("cycle_n", 0)),
+            ts_start=str(d.get("ts_start", "")),
+            ts_end=d.get("ts_end"),
+            drafter_cost_usd=float(d.get("drafter_cost_usd", 0.0)),
+            review_cost_usd=(
+                float(d["review_cost_usd"])
+                if d.get("review_cost_usd") is not None
+                else None
+            ),
+            p0_before=int(d.get("p0_before", 0)),
+            p0_after=(
+                int(d["p0_after"])
+                if d.get("p0_after") is not None
+                else None
+            ),
+            p0_before_by_source=dict(d.get("p0_before_by_source", {})),
+            p0_after_by_source=(
+                dict(d["p0_after_by_source"])
+                if d.get("p0_after_by_source") is not None
+                else None
+            ),
+            manuscript_pre_path=str(d.get("manuscript_pre_path", "")),
+            audit_snapshot_dir=str(d.get("audit_snapshot_dir", "")),
+            status=str(d.get("status", "in_progress")),
+            note=str(d.get("note", "")),
+        )
+
+
+# --------------------------------------------------------------------------
 # Validator status
 # --------------------------------------------------------------------------
 
@@ -401,6 +538,10 @@ class DraftState:
     analysis_requests: list[AnalysisRequest] = field(default_factory=list)
     iteration: IterationCounters = field(default_factory=IterationCounters)
     validator_status: dict[str, str] = field(default_factory=dict)
+    # Stage 4 Tier S (2026-05-18): one entry per remediation pass through
+    # the P0 gate. Append-only; aborted entries retained for audit. See
+    # RemediationCycle docstring for field semantics.
+    remediation_cycles: list[RemediationCycle] = field(default_factory=list)
     cost_so_far_usd: float = 0.0
     elapsed_seconds: float = 0.0
     last_updated: Optional[str] = None  # ISO 8601 UTC
@@ -423,6 +564,9 @@ class DraftState:
             "analysis_requests": [r.to_dict() for r in self.analysis_requests],
             "iteration": self.iteration.to_dict(),
             "validator_status": dict(self.validator_status),
+            "remediation_cycles": [
+                c.to_dict() for c in self.remediation_cycles
+            ],
             "cost_so_far_usd": self.cost_so_far_usd,
             "elapsed_seconds": self.elapsed_seconds,
             "last_updated": self.last_updated,
@@ -459,6 +603,10 @@ class DraftState:
             ],
             iteration=IterationCounters.from_dict(d.get("iteration", {})),
             validator_status=dict(d.get("validator_status", {})),
+            remediation_cycles=[
+                RemediationCycle.from_dict(c)
+                for c in d.get("remediation_cycles", [])
+            ],
             cost_so_far_usd=float(d.get("cost_so_far_usd", 0.0)),
             elapsed_seconds=float(d.get("elapsed_seconds", 0.0)),
             last_updated=d.get("last_updated"),

@@ -16,7 +16,13 @@ from typing import Optional
 
 from beril_paper_writer.config import config
 
-from beril_paper_writer.state import DraftState, VALID_PHASES, load_state, save_state
+from beril_paper_writer.state import (
+    DraftState,
+    VALID_PHASES,
+    hash_file,
+    load_state,
+    save_state,
+)
 
 # Robust logging configuration
 logging.basicConfig(
@@ -299,12 +305,29 @@ class PaperWriterOrchestrator:
         model: str = "claude-opus-4-6",
         model_writing: str = "claude-opus-4-6",
         no_adversarial: bool = False,
+        # Stage 4 Tier S (2026-05-18): P0 gate flags. Default behaviour
+        # is "gate active, no remediation, no override" — so a fresh
+        # `draft` run that surfaces P0s will pause at p0_review with
+        # the operator's options recorded in p0_findings.md.
+        remediate: bool = False,
+        ship_with_p0s: bool = False,
+        max_remediate_cycles: int = 2,
     ):
         self.draft_dir = draft_dir
         self.project_dir = draft_dir.parent.parent
         self.max_cost_usd = max_cost_usd
         self.model = model
         self.model_writing = model_writing
+        # Stage 4 Tier S: gate flags. ``remediate`` is consumed by
+        # ``phase_p0_review`` to decide whether to dispatch into
+        # ``phase_remediate``; ``ship_with_p0s`` short-circuits the
+        # gate to advance to optimize despite P0s; ``max_remediate_cycles``
+        # caps the loop. None of these need to live in state.json — the
+        # cap is per-invocation policy, and the two booleans describe
+        # operator intent for *this* run, not durable history.
+        self.remediate = remediate
+        self.ship_with_p0s = ship_with_p0s
+        self.max_remediate_cycles = max(0, int(max_remediate_cycles))
         # Stage 3 Tier J: resolve `claude` to an absolute path up front,
         # before any state I/O, so a missing CLI fails loud at init
         # rather than as a bare FileNotFoundError mid-pipeline. Also
@@ -406,8 +429,37 @@ class PaperWriterOrchestrator:
             # supplementary_pool ran BEFORE the optimizer ever produced
             # markers, so it always reported "No [NEEDS CITATION] markers
             # found. Skipping." (observed in draft_4).
-            if self.state.phase == "review":
-                await self.phase_review()
+            # Stage 4 Tier S (2026-05-18): P0 gate + remediation loop.
+            # The review → p0_review → remediate triad is cyclic:
+            # remediate advances back to review so the cascade
+            # re-runs; the gate is re-evaluated on each pass through.
+            # Bounded by max_remediate_cycles + a small safety margin
+            # so an unexpected state-machine bug cannot wedge us in an
+            # infinite loop. The gate raises PipelineHalted on the
+            # pause branches, so under normal operation this loop is
+            # short — at most 2*max_remediate_cycles + 2 iterations.
+            review_loop_budget = (self.max_remediate_cycles + 1) * 3 + 2
+            while review_loop_budget > 0 and self.state.phase in (
+                "review", "p0_review", "remediate",
+            ):
+                review_loop_budget -= 1
+                if self.state.phase == "review":
+                    await self.phase_review()
+                elif self.state.phase == "p0_review":
+                    await self.phase_p0_review()
+                elif self.state.phase == "remediate":
+                    await self.phase_remediate()
+            if review_loop_budget <= 0:
+                # Surface a loud signal — this is not supposed to happen.
+                logger.error(
+                    "Stage 4 Tier S review-loop budget exhausted in "
+                    f"state {self.state.phase!r}. Aborting pipeline "
+                    "to avoid an infinite loop; inspect state.json + "
+                    "audit/."
+                )
+                raise PipelineHalted(
+                    "review-loop budget exhausted; see logs"
+                )
             if self.state.phase == "optimize":
                 await self.phase_optimize()
             if self.state.phase == "supplementary_pool":
@@ -1458,6 +1510,19 @@ with the citation key in the manuscript.
                 self.adversarial_bin, "review", "--type", "paper",
                 str(self.draft_dir),
             ]
+            # Stage 4 Tier S-9a (2026-05-18): capture subprocess start time
+            # so we can verify the adversarial output file was actually
+            # rewritten. Empirical motivation: the first live test of
+            # Tier S on draft_1 surfaced a case where the adversarial CLI
+            # ran for 8m37s wall-clock, exited 0, and DID NOT TOUCH
+            # audit/adversarial_review.json. We had no way to detect
+            # this from rc alone. The gate then evaluated against stale
+            # findings, producing a misleading p0_after metric. We don't
+            # yet know whether the root cause is in the adversarial CLI
+            # or in our invocation pattern — this defensive check fires
+            # regardless of root cause.
+            adv_json_path = self.draft_dir / "audit" / "adversarial_review.json"
+            subprocess_start = time.time()
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.draft_dir),
@@ -1466,11 +1531,18 @@ with the citation key in the manuscript.
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            # Stage 4 Tier S-9b (2026-05-18): always log adversarial's
+            # stdout/stderr (truncated), not only on rc!=0. Without this
+            # the CLI's diagnostic output is silently discarded — fatal
+            # when the CLI exits 0 but misbehaves. Truncation matches
+            # the rc!=0 branch.
+            stdout_text = stdout.decode("utf-8", errors="ignore")
+            stderr_text = stderr.decode("utf-8", errors="ignore")
             if proc.returncode != 0:
                 logger.error(
                     f"Adversarial review failed (rc={proc.returncode}):\n"
-                    f"STDOUT: {stdout.decode('utf-8', errors='ignore')[:2000]}\n"
-                    f"STDERR: {stderr.decode('utf-8', errors='ignore')[:2000]}"
+                    f"STDOUT: {stdout_text[:2000]}\n"
+                    f"STDERR: {stderr_text[:2000]}"
                 )
                 # Record the failure mode so downstream / audit knows.
                 self._write_review_mode(
@@ -1478,9 +1550,39 @@ with the citation key in the manuscript.
                     note=f"beril-adversarial exited {proc.returncode}; see logs",
                 )
             else:
-                self._write_review_mode(reviewer="canonical")
+                # Always echo stdout/stderr at INFO so we can diagnose
+                # exit-0-but-misbehaved cases. ``or '<empty>'`` so the
+                # log line isn't an awkward trailing colon.
+                logger.info(
+                    f"Adversarial review completed (rc=0):\n"
+                    f"STDOUT: {stdout_text[:2000] or '<empty>'}\n"
+                    f"STDERR: {stderr_text[:2000] or '<empty>'}"
+                )
+                # Tier S-9a defensive check: did the CLI actually write?
+                wrote_ok = self._check_adversarial_output_fresh(
+                    adv_json_path=adv_json_path,
+                    subprocess_start=subprocess_start,
+                )
+                if wrote_ok:
+                    self._write_review_mode(reviewer="canonical")
+                else:
+                    self._write_review_mode(
+                        reviewer="canonical-silent-fail",
+                        note=(
+                            "beril-adversarial exited 0 but did not "
+                            "rewrite audit/adversarial_review.json; "
+                            "gate will evaluate against stale findings "
+                            "if any. See orchestrator logs for "
+                            "adversarial stdout/stderr."
+                        ),
+                    )
 
-        self.advance_phase("optimize")
+        # Stage 4 Tier S (2026-05-18): advance to the P0 gate instead
+        # of jumping straight to optimize. The gate reads both
+        # audit/adversarial_review.json (this phase's Tier-3 output)
+        # and audit/numeric_grounding.json (Tier 1's deterministic
+        # output) and decides whether the pipeline can proceed.
+        self.advance_phase("p0_review")
 
     async def _run_fallback_reviewer(self, *, reason: str) -> None:
         """Stage 3 Tier K: invoke the inline fallback reviewer.
@@ -1551,6 +1653,56 @@ with the citation key in the manuscript.
             "on this manuscript."
         )
 
+    def _check_adversarial_output_fresh(
+        self,
+        *,
+        adv_json_path: Path,
+        subprocess_start: float,
+    ) -> bool:
+        """Stage 4 Tier S-9a (2026-05-18): verify the adversarial CLI's
+        output file was actually rewritten during the subprocess's
+        lifetime.
+
+        Returns True iff ``adv_json_path`` exists AND its mtime is
+        >= ``subprocess_start`` (with a 1-second slop to account for
+        filesystem timestamp resolution). Returns False otherwise,
+        and logs WARNING so the operator notices.
+
+        The check exists because the adversarial CLI is observed
+        (live test 2026-05-18 on draft_1) to exit 0 without writing
+        in at least one path. rc alone is not a sufficient
+        completion signal; the file's mtime is the contract we
+        actually depend on.
+
+        The check does NOT distinguish root cause (CLI bug vs our
+        invocation pattern vs inner claude -p issue). It only
+        surfaces the failure to the operator.
+        """
+        if not adv_json_path.is_file():
+            logger.warning(
+                f"Tier 3 contract check: adversarial output {adv_json_path} "
+                "does not exist after the CLI exited 0. The gate will "
+                "see no adversarial findings; this is a silent failure."
+            )
+            return False
+        mtime = adv_json_path.stat().st_mtime
+        if mtime + 1.0 < subprocess_start:
+            from datetime import datetime, timezone
+            mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            start_iso = datetime.fromtimestamp(
+                subprocess_start, tz=timezone.utc,
+            ).isoformat()
+            logger.warning(
+                f"Tier 3 contract check: adversarial output "
+                f"{adv_json_path} has mtime {mtime_iso}, which "
+                f"PREDATES the subprocess start ({start_iso}). The "
+                "adversarial CLI exited 0 but did not rewrite its "
+                "output file. The gate will evaluate against STALE "
+                "findings — proceed with caution."
+            )
+            return False
+        return True
+
     def _write_review_mode(
         self, *, reviewer: str, note: str = "",
     ) -> None:
@@ -1558,11 +1710,14 @@ with the citation key in the manuscript.
         run state is machine-discoverable in audit/.
 
         Values for `reviewer`:
-          - "canonical"        — beril-adversarial succeeded
-          - "canonical-failed" — beril-adversarial exited non-zero
-          - "fallback"         — inline fallback_reviewer.v1 used
-          - "fallback-failed"  — inline fallback also failed
-          - "none"             — Tier-3 skipped entirely
+          - "canonical"             — beril-adversarial succeeded
+          - "canonical-failed"      — beril-adversarial exited non-zero
+          - "canonical-silent-fail" — adversarial exited 0 but did not
+                                       rewrite adversarial_review.json
+                                       (Stage 4 Tier S-9a)
+          - "fallback"              — inline fallback_reviewer.v1 used
+          - "fallback-failed"       — inline fallback also failed
+          - "none"                  — Tier-3 skipped entirely
         """
         import json
         audit_dir = self.draft_dir / "audit"
@@ -1576,6 +1731,493 @@ with the citation key in the manuscript.
         out.write_text(
             json.dumps(payload, indent=2), encoding="utf-8",
         )
+
+    # -----------------------------------------------------------------
+    # Stage 4 Tier S (2026-05-18) — P0 gate + remediation loop
+    # -----------------------------------------------------------------
+    #
+    # phase_p0_review is the gate. It runs after phase_review's Tier
+    # 1+2+3 cascade and decides:
+    #
+    #   total P0 == 0                      → advance to optimize
+    #   P0 > 0 + --ship-with-p0s           → log warning, advance to optimize
+    #   P0 > 0 + --remediate + cycles left → dispatch into phase_remediate
+    #   P0 > 0 + --remediate + cycles done → pause again (cap exhausted)
+    #   P0 > 0 + neither flag              → pause (write p0_findings.md)
+    #
+    # phase_remediate runs ONE cycle:
+    #   - snapshot audit/ → audit/iter_<N>/
+    #   - copy manuscript.md → manuscript.iter_<N>.md
+    #   - append in-progress RemediationCycle entry
+    #   - invoke remediation_draft.v1 via claude -p
+    #   - run a fabrication post-check mirroring phase_optimize's
+    #   - update RemediationCycle (status, costs, ts_end)
+    #   - advance to "review" so the cascade re-runs and the gate
+    #     re-evaluates on the next pass
+    #
+    # Manuscript-edit detection on resume: when phase_p0_review observes
+    # that manuscript.md's sha256 differs from the value recorded in
+    # state.manuscript_files (i.e., the operator hand-edited the file
+    # while paused), it routes back to "review" — the gate's
+    # re-evaluation must happen against fresh review output.
+
+    def _count_p0_for_current_audit(self):
+        """Count P0 findings currently sitting in audit/. Delegates to
+        the pure-function helper in skill.tools.p0_gate so the gate
+        and the renderer share a single counter."""
+        from beril_paper_writer.skill.tools.p0_gate import (
+            count_p0_findings,
+        )
+        return count_p0_findings(self.draft_dir / "audit")
+
+    def _manuscript_sha256(self) -> Optional[str]:
+        """Return the current sha256 of manuscript.md, or None if
+        the file does not exist. Used by phase_p0_review to detect
+        operator hand-edits between pauses."""
+        manuscript = self.draft_dir / "manuscript.md"
+        if not manuscript.is_file():
+            return None
+        return hash_file(manuscript)
+
+    def _record_manuscript_hash(self, sha: str) -> None:
+        """Store/update the manuscript.md entry in
+        state.manuscript_files. This is the reference point the gate
+        compares against on the next entry to detect operator
+        hand-edits."""
+        target_rel = "manuscript.md"
+        for mf in self.state.manuscript_files:
+            if mf.path == target_rel:
+                mf.sha256 = sha
+                mf.writer_generated = True
+                mf.user_edited = False
+                save_state(self.draft_dir, self.state)
+                return
+        from beril_paper_writer.state import ManuscriptFile
+        self.state.manuscript_files.append(
+            ManuscriptFile(
+                path=target_rel,
+                sha256=sha,
+                writer_generated=True,
+                user_edited=False,
+            )
+        )
+        save_state(self.draft_dir, self.state)
+
+    def _manuscript_edited_since_recorded(self) -> bool:
+        """True iff manuscript.md sha256 differs from the value
+        recorded in state.manuscript_files. False if (a) the file
+        doesn't exist, or (b) no prior recorded hash exists."""
+        current = self._manuscript_sha256()
+        if current is None:
+            return False
+        for mf in self.state.manuscript_files:
+            if mf.path == "manuscript.md":
+                return mf.sha256 != current
+        # No recorded hash — first time through; not an "edit".
+        return False
+
+    async def phase_p0_review(self):
+        """Stage 4 Tier S gate. Decides advance / pause / dispatch."""
+        from beril_paper_writer.skill.tools.p0_gate import (
+            render_p0_findings_md,
+        )
+
+        # Manual-edit detection: if the manuscript was hand-edited
+        # while paused at p0_review, route back through review so the
+        # cascade re-runs on the edited manuscript. The recorded
+        # baseline is set on the FIRST entry to p0_review (below) and
+        # refreshed on each remediation cycle.
+        if self._manuscript_edited_since_recorded():
+            logger.warning(
+                "phase_p0_review: manuscript.md sha256 differs from "
+                "the value recorded after the prior review. "
+                "Re-running phase_review on the edited manuscript "
+                "before re-evaluating the P0 gate."
+            )
+            # Record the new baseline so we don't ping-pong if the
+            # subsequent review writes a manuscript-modifying tier
+            # (Tier 1 does not modify, Tier 2 light-review does not,
+            # Tier 3 does not — only the optimizer + remediate do).
+            current = self._manuscript_sha256()
+            if current:
+                self._record_manuscript_hash(current)
+            self.advance_phase("review")
+            return
+
+        # Record/refresh baseline on each gate entry. This pins the
+        # "what the gate just saw" hash so the next manual-edit check
+        # is meaningful.
+        current = self._manuscript_sha256()
+        if current:
+            self._record_manuscript_hash(current)
+
+        # Backfill p0_after on the most recent completed remediation
+        # cycle, if any. That cycle's review_cost is also captured
+        # against the prior gate entry's cost_so_far_usd delta —
+        # tracked indirectly because each Claude call already
+        # increments state.cost_so_far_usd in _run_claude_p_with_cost.
+        summary = self._count_p0_for_current_audit()
+        self._backfill_remediation_cycle_p0_after(summary)
+
+        # Decision tree.
+        if summary.total == 0:
+            logger.info(
+                "P0 gate: 0 P0 findings; advancing to optimize."
+            )
+            self.advance_phase("optimize")
+            return
+
+        cycles_used = len(self.state.remediation_cycles)
+        cycles_exhausted = cycles_used >= self.max_remediate_cycles
+
+        if self.ship_with_p0s:
+            logger.warning(
+                f"P0 gate: {summary.total} P0 finding(s) present, "
+                "but --ship-with-p0s flag set; advancing to optimize "
+                "anyway. Findings remain in audit/ for posterity."
+            )
+            # Still write the findings.md so the operator has the
+            # record of what they shipped past.
+            self._write_p0_findings_md(summary, cycles_exhausted=False)
+            self.advance_phase("optimize")
+            return
+
+        if self.remediate and not cycles_exhausted:
+            logger.info(
+                f"P0 gate: {summary.total} P0 finding(s); "
+                f"--remediate set and {cycles_used}/"
+                f"{self.max_remediate_cycles} cycles used. "
+                "Dispatching to phase_remediate."
+            )
+            self.advance_phase("remediate")
+            return
+
+        # Pause path. Write p0_findings.md and raise PipelineHalted.
+        self._write_p0_findings_md(
+            summary, cycles_exhausted=cycles_exhausted,
+        )
+        msg = (
+            f"P0 gate: {summary.total} P0 finding(s) present. "
+            f"See {self.draft_dir / 'p0_findings.md'} for proceed "
+            "options."
+        )
+        if cycles_exhausted and self.remediate:
+            msg = (
+                f"P0 gate: cycle cap ({self.max_remediate_cycles}) "
+                f"reached with {summary.total} P0(s) remaining. "
+                f"See {self.draft_dir / 'p0_findings.md'} for "
+                "proceed options."
+            )
+        logger.warning(msg)
+        raise PipelineHalted(msg)
+
+    def _write_p0_findings_md(
+        self, summary, *, cycles_exhausted: bool,
+    ) -> None:
+        from beril_paper_writer.skill.tools.p0_gate import (
+            render_p0_findings_md,
+        )
+        md = render_p0_findings_md(
+            summary,
+            draft_dir=self.draft_dir,
+            cycles_used=len(self.state.remediation_cycles),
+            max_cycles=self.max_remediate_cycles,
+            cycles_exhausted=cycles_exhausted,
+        )
+        (self.draft_dir / "p0_findings.md").write_text(
+            md, encoding="utf-8",
+        )
+
+    def _backfill_remediation_cycle_p0_after(self, summary) -> None:
+        """When phase_p0_review fires after a completed remediation
+        cycle, backfill that cycle's p0_after / p0_after_by_source
+        fields. This is the only point in the pipeline where those
+        fields can be populated correctly, because they describe the
+        POST-cycle review state."""
+        if not self.state.remediation_cycles:
+            return
+        last = self.state.remediation_cycles[-1]
+        if last.status != "completed":
+            return
+        if last.p0_after is not None:
+            return
+        last.p0_after = summary.total
+        last.p0_after_by_source = dict(summary.per_source)
+        save_state(self.draft_dir, self.state)
+        logger.info(
+            f"Remediation cycle {last.cycle_n}: "
+            f"p0_before={last.p0_before} → p0_after={last.p0_after}"
+        )
+
+    async def phase_remediate(self):
+        """One remediation pass through the holistic-rewrite path.
+
+        Snapshot the audit/ files (so we have a record of which
+        findings drove this cycle), copy manuscript.md to
+        manuscript.iter_<N>.md (so we can diff/revert), append an
+        in_progress RemediationCycle entry, invoke the remediation
+        drafter, run the numeric-fabrication post-check, mark the
+        cycle complete (or aborted), and advance to ``review`` so
+        the cascade re-runs.
+
+        On any LLM error, the cycle entry is marked
+        ``aborted-error``; the manuscript will be whatever the
+        drafter left on disk (could be unchanged if the drafter
+        never wrote, could be partially-edited). The operator can
+        recover by diffing against ``manuscript.iter_<N>.md``.
+        """
+        import shutil
+        import json as _json
+        import time as _time
+        from datetime import datetime, timezone
+        from beril_paper_writer.state import RemediationCycle
+
+        cycle_n = len(self.state.remediation_cycles) + 1
+        ts_start = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        # Snapshot the gate input. count_p0_findings is non-destructive
+        # so we capture per-source counts for the cycle entry.
+        summary = self._count_p0_for_current_audit()
+        p0_before = summary.total
+        p0_before_by_source = dict(summary.per_source)
+
+        # iter_N file paths.
+        manuscript_pre_rel = f"manuscript.iter_{cycle_n}.md"
+        audit_snapshot_rel = f"audit/iter_{cycle_n}"
+        manuscript_pre_path = self.draft_dir / manuscript_pre_rel
+        audit_snapshot_path = self.draft_dir / audit_snapshot_rel
+        audit_dir = self.draft_dir / "audit"
+
+        # Snapshot manuscript + audit.
+        manuscript_path = self.draft_dir / "manuscript.md"
+        if not manuscript_path.is_file():
+            logger.error(
+                f"phase_remediate: manuscript.md missing at "
+                f"{manuscript_path}; cannot remediate. Advancing to "
+                "review (the cascade will surface this)."
+            )
+            self.advance_phase("review")
+            return
+
+        shutil.copy2(manuscript_path, manuscript_pre_path)
+        audit_snapshot_path.mkdir(parents=True, exist_ok=True)
+        for name in ("adversarial_review.json", "numeric_grounding.json"):
+            src = audit_dir / name
+            if src.is_file():
+                shutil.copy2(src, audit_snapshot_path / name)
+
+        # Materialise the combined P0 findings JSON the remediation
+        # prompt consumes. Live next to the snapshot for traceability.
+        findings_path = audit_snapshot_path / "p0_findings.json"
+        findings_path.write_text(
+            _json.dumps(summary.to_dict(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        # Append in-progress cycle entry. Persist BEFORE the LLM call
+        # so a crash leaves the audit trail intact.
+        cycle = RemediationCycle(
+            cycle_n=cycle_n,
+            ts_start=ts_start,
+            ts_end=None,
+            drafter_cost_usd=0.0,
+            review_cost_usd=None,
+            p0_before=p0_before,
+            p0_after=None,
+            p0_before_by_source=p0_before_by_source,
+            p0_after_by_source=None,
+            manuscript_pre_path=manuscript_pre_rel,
+            audit_snapshot_dir=audit_snapshot_rel,
+            status="in_progress",
+            note="",
+        )
+        self.state.remediation_cycles.append(cycle)
+        save_state(self.draft_dir, self.state)
+
+        # Build the remediation prompt invocation.
+        prompt_path = (
+            Path(__file__).parent / "skill" / "prompts"
+            / "remediation_draft.v1.md"
+        )
+        if not prompt_path.is_file():
+            cycle.status = "aborted-error"
+            cycle.note = (
+                f"remediation_draft.v1.md missing at {prompt_path}"
+            )
+            cycle.ts_end = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            save_state(self.draft_dir, self.state)
+            logger.error(
+                f"phase_remediate: prompt missing at {prompt_path}; "
+                "advancing to review without remediation."
+            )
+            self.advance_phase("review")
+            return
+
+        log_path = audit_dir / f"remediation_log_iter_{cycle_n}.md"
+        failures_path = audit_dir / f"remediation_failures_iter_{cycle_n}.md"
+
+        user_prompt = (
+            f"Apply Stage 4 Tier S P0 remediation per the system prompt.\n"
+            f"- ASSEMBLED_PATH: {manuscript_path}\n"
+            f"- P0_FINDINGS_PATH: {findings_path}\n"
+            f"- REPORT_PATH: {self.project_dir / 'REPORT.md'}\n"
+            f"- CLAIM_INVENTORY_PATH: {self.draft_dir / 'claim_inventory.tsv'}\n"
+            f"- CITATION_POOL_PATH: {self.draft_dir / 'citation_pool.json'}\n"
+            f"- THROUGHLINE_PATH: {self.draft_dir / '00_throughline.md'}\n"
+            f"- REMEDIATION_LOG_PATH: {log_path}\n"
+            f"- REMEDIATION_FAILURES_PATH: {failures_path}\n"
+            f"\nThis is remediation cycle {cycle_n} of "
+            f"{self.max_remediate_cycles}. {p0_before} P0 finding(s) "
+            "are pending. Apply subtraction-and-hedging discipline; "
+            "fabricate nothing."
+        )
+
+        # Snapshot text for the post-check, so we can detect fabrications.
+        pre_text = manuscript_path.read_text(encoding="utf-8")
+
+        try:
+            rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
+                phase_label=f"phase_remediate.iter_{cycle_n}",
+                system_prompt_text=prompt_path.read_text(encoding="utf-8"),
+                user_prompt=user_prompt,
+                model=self.model_writing,
+                allowed_tools="Read,Write,Edit,Grep,Glob",
+            )
+        except TokenLimitExceeded as exc:
+            cycle.status = "aborted-budget"
+            cycle.note = str(exc)
+            cycle.ts_end = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            save_state(self.draft_dir, self.state)
+            logger.error(
+                f"phase_remediate iter {cycle_n} aborted by circuit "
+                f"breaker: {exc}"
+            )
+            # Re-raise so run_pipeline halts cleanly.
+            raise
+
+        cycle.drafter_cost_usd = float(cost or 0.0)
+        ts_end = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        cycle.ts_end = ts_end
+
+        if rc != 0:
+            cycle.status = "aborted-error"
+            cycle.note = (
+                f"remediation_draft.v1 exit {rc}; stderr head: "
+                f"{stderr[:300]!r}"
+            )
+            save_state(self.draft_dir, self.state)
+            logger.error(
+                f"phase_remediate iter {cycle_n} failed: "
+                f"rc={rc}\nstdout head: {stdout[:300]}\n"
+                f"stderr head: {stderr[:300]}"
+            )
+            # Advance to review anyway — the cascade will re-evaluate
+            # and surface the unchanged P0s; the next gate entry will
+            # pause again.
+            self.advance_phase("review")
+            return
+
+        # Post-check: did the drafter invent any new numerics?
+        self._post_check_remediation_fabrication(
+            pre_text=pre_text, cycle_n=cycle_n,
+        )
+
+        cycle.status = "completed"
+        save_state(self.draft_dir, self.state)
+        logger.info(
+            f"phase_remediate iter {cycle_n} complete: "
+            f"cost=${cycle.drafter_cost_usd:.4f}; "
+            "advancing to review for re-evaluation."
+        )
+        # Re-record the manuscript hash so the manual-edit detector
+        # treats the rewrite as our doing, not the operator's.
+        new_sha = self._manuscript_sha256()
+        if new_sha:
+            self._record_manuscript_hash(new_sha)
+        self.advance_phase("review")
+
+    def _post_check_remediation_fabrication(
+        self, *, pre_text: str, cycle_n: int,
+    ) -> None:
+        """Mirror of _post_check_optimizer_subtraction, scoped to the
+        remediation drafter's output. Any numeric in the post-rewrite
+        manuscript that wasn't in pre AND isn't in REPORT.md is a
+        suspect fabrication. Surfaced in audit/ for the operator;
+        does NOT auto-revert (the operator decides)."""
+        import re
+        import json as _json
+
+        assembled_path = self.draft_dir / "manuscript.md"
+        report_path = self.project_dir / "REPORT.md"
+        audit_dir = self.draft_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+
+        if not assembled_path.is_file():
+            return
+        post_text = assembled_path.read_text(encoding="utf-8")
+        report_text = (
+            report_path.read_text(encoding="utf-8")
+            if report_path.is_file() else ""
+        )
+
+        numeric_re = re.compile(r"\b\d+(?:\.\d+)?\b")
+        pre_numerics = set(numeric_re.findall(pre_text))
+        post_numerics = set(numeric_re.findall(post_text))
+        new_numerics = post_numerics - pre_numerics
+
+        suspect = sorted(
+            n for n in new_numerics
+            if n not in report_text and len(n) >= 3
+        )
+
+        diagnostic = {
+            "phase": "remediate",
+            "cycle_n": cycle_n,
+            "new_numerics_count": len(new_numerics),
+            "suspect_count": len(suspect),
+            "suspect": suspect[:50],
+            "note": (
+                "Numerics present in post-remediation manuscript but "
+                "not in pre-remediation manuscript and not in "
+                "REPORT.md. Likely fabrications. The remediation "
+                "drafter is subtraction-and-hedging only; new "
+                "numerics suggest discipline failure."
+            ),
+        }
+        out = audit_dir / f"remediation_fabrication_check_iter_{cycle_n}.json"
+        out.write_text(_json.dumps(diagnostic, indent=2), encoding="utf-8")
+
+        if suspect:
+            logger.warning(
+                f"phase_remediate iter {cycle_n} post-check: "
+                f"{len(suspect)} suspect new numerics may be "
+                f"fabricated. First few: {suspect[:5]}. See {out}."
+            )
+        else:
+            logger.info(
+                f"phase_remediate iter {cycle_n} post-check passed: "
+                "no suspect new numerics."
+            )
 
     async def phase_optimize(self):
         logger.info("Running selective optimizers (M4)...")
