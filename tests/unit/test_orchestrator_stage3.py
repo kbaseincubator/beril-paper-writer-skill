@@ -678,3 +678,157 @@ def test_finalize_render_handles_malformed_pool_gracefully(
     msgs = " ".join(r.message for r in caplog.records)
     assert "failed to load pool" in msgs
     assert not (orch.draft_dir / "references.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 Tier T-2: _run_tier1_deterministic_checks (numeric grounding)
+#
+# These tests pin the orchestrator's wiring of check_numeric_grounding
+# at phase_review Tier 1. The grounding logic itself is covered in
+# test_check_numeric_grounding.py — these only verify the orchestrator
+# helper writes audit/numeric_grounding.json and logs appropriately.
+# ---------------------------------------------------------------------------
+
+
+def _write_minimal_inventory(draft_dir: Path, claims: list[str]) -> None:
+    """Minimal claim_inventory.tsv at the canonical path."""
+    header = (
+        "claim_id\tclaim_text\tsource_notebook\tsource_cell\t"
+        "figure_or_table\teffect_size_present\tci_present\t"
+        "pvalue_present\tnotes\n"
+    )
+    rows = "\n".join(
+        f"C-{i:03d}\t{txt}\tNB00.ipynb\t\t\tno\tno\tno\t"
+        for i, txt in enumerate(claims, start=1)
+    )
+    (draft_dir / "claim_inventory.tsv").write_text(
+        header + rows + "\n", encoding="utf-8",
+    )
+
+
+def test_tier1_writes_audit_json_with_grounded_and_ungrounded(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """Happy path: grounded numbers via Tier A, ungrounded numbers
+    surface as P0 findings in audit/numeric_grounding.json."""
+    _write_minimal_inventory(orch.draft_dir, ["AUC = 0.847 on held-out"])
+    (orch.project_dir / "REPORT.md").write_text(
+        "## Findings\n\nAUC = 0.847 on held-out set.\n",
+        encoding="utf-8",
+    )
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Results\n\nHeld-out AUC = 0.847 (grounded); rerun AUC = 0.999 (not).\n",
+        encoding="utf-8",
+    )
+
+    orch._run_tier1_deterministic_checks()
+
+    out = json.loads(
+        (orch.draft_dir / "audit" / "numeric_grounding.json").read_text()
+    )
+    assert out["schema_version"] == "v1"
+    assert out["tool"] == "check_numeric_grounding"
+    # 0.847 must ground at Tier A; 0.999 must be ungrounded.
+    assert out["totals"]["grounded_tier_a_inventory"] >= 1
+    assert out["totals"]["ungrounded"] >= 1
+    ungrounded_norms = {f["normalized_value"] for f in out["findings"]}
+    assert "0.999" in ungrounded_norms
+
+
+def test_tier1_logs_warning_when_ungrounded_present(
+    orch: PaperWriterOrchestrator,
+    caplog,
+) -> None:
+    """The orchestrator must log at WARNING level when ungrounded > 0
+    so the user notices without opening the JSON."""
+    _write_minimal_inventory(orch.draft_dir, [])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Results\n\nThe held-out AUC = 0.777.\n", encoding="utf-8",
+    )
+    import logging
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        orch._run_tier1_deterministic_checks()
+    warn_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("UNGROUNDED" in m for m in warn_msgs)
+
+
+def test_tier1_logs_info_when_all_grounded(
+    orch: PaperWriterOrchestrator,
+    caplog,
+) -> None:
+    """All-grounded case logs at INFO level (not WARNING) so green
+    runs don't pollute the warning channel."""
+    _write_minimal_inventory(orch.draft_dir, ["AUC = 0.847 on held-out"])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Results\n\nThe held-out AUC = 0.847.\n", encoding="utf-8",
+    )
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+        orch._run_tier1_deterministic_checks()
+    # No WARNING about UNGROUNDED.
+    warns = [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING and "UNGROUNDED" in r.message
+    ]
+    assert warns == []
+
+
+def test_tier1_handles_missing_manuscript_gracefully(
+    orch: PaperWriterOrchestrator,
+    caplog,
+) -> None:
+    """Missing manuscript.md → WARNING + early return. Pipeline must
+    continue. No audit JSON written (no input to ground against)."""
+    # No manuscript.md.
+    import logging
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        orch._run_tier1_deterministic_checks()
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "manuscript.md missing" in msgs
+    assert not (orch.draft_dir / "audit" / "numeric_grounding.json").is_file()
+
+
+def test_tier1_handles_missing_inventory_with_note(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """Missing claim_inventory.tsv → Tier A disabled, recorded in the
+    audit JSON's notes. Pipeline must still run; Tier B may still
+    ground via REPORT.md."""
+    (orch.project_dir / "REPORT.md").write_text(
+        "## Findings\n\nAUC = 0.847.\n", encoding="utf-8",
+    )
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Results\n\nThe held-out AUC = 0.847.\n", encoding="utf-8",
+    )
+    # NO claim_inventory.tsv.
+
+    orch._run_tier1_deterministic_checks()
+
+    out = json.loads(
+        (orch.draft_dir / "audit" / "numeric_grounding.json").read_text()
+    )
+    notes_text = " ".join(out["notes"])
+    assert "claim_inventory" in notes_text
+    # 0.847 should still ground via REPORT.md (Tier B).
+    assert out["totals"]["grounded_tier_b_report_md"] >= 1
+
+
+def test_tier1_count_of_ungrounded_caught(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """The headline regression case: 105 of 137 is a count_of claim
+    that must NOT be eaten by the trivial-noun-phrase allowlist.
+    This pins the bug fix at orchestrator level."""
+    _write_minimal_inventory(orch.draft_dir, [])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Results\n\nAcross sub-studies, 105 of 137 pairs were significant.\n",
+        encoding="utf-8",
+    )
+
+    orch._run_tier1_deterministic_checks()
+
+    out = json.loads(
+        (orch.draft_dir / "audit" / "numeric_grounding.json").read_text()
+    )
+    ungrounded_classes = {f["match_class"] for f in out["findings"]}
+    assert "count_of" in ungrounded_classes

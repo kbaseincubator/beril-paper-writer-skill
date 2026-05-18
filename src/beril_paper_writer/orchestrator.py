@@ -1253,11 +1253,138 @@ with the citation key in the manuscript.
             f"Files rewritten: {sorted(paths.keys())}."
         )
 
+    def _run_tier1_deterministic_checks(self) -> None:
+        """Stage 4 Tier T-2 (2026-05-17): the deterministic Tier-1 check
+        cascade. Currently exercises a single check (numeric grounding
+        via check_numeric_grounding); other deterministic post-checkers
+        in the ``check_*`` family can be hung off this helper as they
+        gain orchestrator wiring.
+
+        Numeric grounding runs the ``check_numeric_grounding.run_grounding``
+        pure function against the assembled ``manuscript.md``, against
+        the Phase-0 ``claim_inventory.tsv`` (Tier A) and the project's
+        ``REPORT.md`` (Tier B). Output: ``audit/numeric_grounding.json``
+        with the standard schema_version="v1" envelope. Strict-mode
+        severity: every ungrounded number is P0.
+
+        Failure modes are advisory: a missing manuscript, missing
+        inventory, or malformed input logs a WARNING and returns —
+        the pipeline continues into Tier 2 (Haiku) and Tier 3
+        (canonical adversarial). The Tier-3 reviewer is the
+        higher-cost fallback for everything Tier 1 doesn't catch
+        (semantic misuse, register drift, register-correct fabrications
+        whose number happens to exist elsewhere in REPORT).
+        """
+        # Late import for the same reasons _finalize_citation_render
+        # uses late imports (heavy dataclasses dependency graph at
+        # the orchestrator's critical-path startup).
+        from beril_paper_writer.skill.tools import (
+            check_numeric_grounding as cng,
+        )
+        from beril_paper_writer.skill.tools.check_numeric_grounding import (
+            GroundingReport,
+        )
+        import json as _json
+        from dataclasses import asdict as _asdict
+
+        manuscript_path = self.draft_dir / "manuscript.md"
+        if not manuscript_path.is_file():
+            logger.warning(
+                f"Stage 4 Tier T-2: manuscript.md missing at "
+                f"{manuscript_path}; Tier 1 numeric-grounding check "
+                "skipped."
+            )
+            return
+
+        inventory_path = self.draft_dir / "claim_inventory.tsv"
+        report_path = self.project_dir / "REPORT.md"
+
+        try:
+            manuscript_text = manuscript_path.read_text(encoding="utf-8")
+            inventory_claim_texts = cng.load_inventory_claim_texts(
+                inventory_path,
+            )
+            inventory_normalized = cng.build_inventory_normalized_set(
+                inventory_claim_texts,
+            )
+            report_normalized = cng.build_report_normalized_set(
+                report_path if report_path.is_file() else None,
+            )
+            findings, allowlisted, totals = cng.run_grounding(
+                manuscript_text,
+                inventory_normalized,
+                report_normalized,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                f"Stage 4 Tier T-2: numeric-grounding check failed: "
+                f"{exc!r}. Continuing into Tier 2."
+            )
+            return
+
+        notes: list[str] = []
+        if not inventory_path.is_file():
+            notes.append(
+                "claim_inventory.tsv missing — Tier A grounding "
+                "disabled. Run phase_triage to produce it."
+            )
+        if not report_path.is_file():
+            notes.append(
+                "REPORT.md not found via project_dir — Tier B "
+                "grounding disabled."
+            )
+
+        report = GroundingReport(
+            schema_version=cng.SCHEMA_VERSION,
+            tool="check_numeric_grounding",
+            tool_version=cng.TOOL_VERSION,
+            draft_dir=str(self.draft_dir),
+            manuscript_path=str(manuscript_path),
+            inventory_path=str(inventory_path),
+            report_path=str(report_path) if report_path.is_file() else None,
+            totals=totals,
+            findings=[f.to_dict() for f in findings],
+            allowlisted=[a.to_dict() for a in allowlisted],
+            notes=notes,
+        )
+
+        audit_dir = self.draft_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        out_path = audit_dir / "numeric_grounding.json"
+        out_path.write_text(
+            _json.dumps(_asdict(report), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        # Logging level keys off whether any findings landed.
+        # Ungrounded > 0 is the gate signal for Stage 4 Tier S (P0
+        # remediation loop, to-be-implemented); for Tier T-2 today we
+        # surface as WARNING but advance.
+        summary = (
+            f"Stage 4 Tier T-2 (numeric grounding): "
+            f"{totals['numeric_matches_in_manuscript']} matches; "
+            f"{totals['grounded_tier_a_inventory']} grounded(Tier A); "
+            f"{totals['grounded_tier_b_report_md']} grounded(Tier B); "
+            f"{totals['allowlisted']} allowlisted; "
+            f"{totals['ungrounded']} UNGROUNDED → {out_path}"
+        )
+        if totals["ungrounded"] > 0:
+            logger.warning(summary)
+            # Surface up to 5 ungrounded findings inline so the
+            # operator notices without opening the JSON.
+            for f in findings[:5]:
+                logger.warning(
+                    f"  ungrounded: {f.section} para {f.paragraph} "
+                    f"({f.match_class}): {f.matched_text!r}"
+                )
+        else:
+            logger.info(summary)
+
     async def phase_review(self):
         logger.info("Running tiered review cascade (M3)...")
         # Tier 1: Deterministic
-        logger.info("Tier 1: Deterministic checks pass.")
-        
+        self._run_tier1_deterministic_checks()
+
         # Tier 2: Haiku Light
         logger.info(f"Tier 2: Haiku Light review using {config.haiku_model}")
         prompt_path = Path(__file__).parent / "skill" / "prompts" / "haiku_review.v1.md"
