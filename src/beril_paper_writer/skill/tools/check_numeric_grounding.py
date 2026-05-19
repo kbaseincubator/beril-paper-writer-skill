@@ -283,16 +283,55 @@ def normalize_numeric(matched_text: str) -> str:
 
 
 def build_normalized_set(text: str) -> set[str]:
-    """Run ``extract_numeric_matches`` over ``text`` and return the set
-    of normalized numeric payloads. Used to index the
-    claim_inventory.tsv claim_texts and REPORT.md prose for
-    grounding lookups."""
-    matches = extract_numeric_matches(text)
+    """Return the set of normalized numeric payloads from ``text``.
+
+    Used to index the claim_inventory.tsv claim_texts and REPORT.md
+    prose for grounding lookups. Uses a GENERIC numeric extractor
+    (every ``\\d+`` token after comma-stripping) rather than the
+    claim-shaped ``extract_numeric_matches`` because the source side
+    needs to find ALL numbers regardless of surrounding linguistic
+    shape — a number in a table cell, a number in dense prose without
+    ``n=`` or ``X of Y`` keywords, etc. must still ground a
+    claim-shaped match on the manuscript side.
+
+    Stage 7 Patch 2 (2026-05-18): switched from extract_numeric_matches
+    (claim-shaped) to a generic regex extractor after D1
+    (conservation_vs_fitness) surfaced false-positive ungrounded
+    numerics whose source values DID appear in REPORT.md but were in
+    prose shapes the claim-shaped regexes didn't catch (e.g.,
+    "27,693 putative essential genes identified (18.6% of 148,826
+    ... 33 organisms; range 12.9-28.9%)" — only "18.6%" was
+    extracted as a claim by the prior implementation, even though
+    27693, 148826, 33, 12.9, 28.9 are all present in the prose).
+
+    Tradeoff: tiny ints (0–9) in REPORT can now ground unrelated
+    tiny claims in the manuscript (e.g., "Phase 2" in REPORT
+    grounds a "2 x" claim in the manuscript). Accepted for v1; v1.1
+    will add context-aware matching against claim_inventory.tsv's
+    ``claim_text`` column (fuzzy match on the surrounding sentence).
+
+    Mirrors normalize_numeric's normalization rules: strip commas,
+    drop leading "+", normalize "-0" / "-0.0" → "0".
+    """
+    cleaned = text.replace(",", "")
     out: set[str] = set()
-    for m in matches:
-        norm = normalize_numeric(m.matched_text)
-        if norm:
-            out.add(norm)
+    for m in _NUMERIC_PAYLOAD_RE.finditer(cleaned):
+        raw = m.group(0).lower()
+        if raw.startswith("+"):
+            raw = raw[1:]
+        if raw in ("-0", "-0.0"):
+            raw = "0"
+        out.add(raw)
+        # Range-dash carve-out: when the regex matches "-28.9" inside
+        # a range like "12.9-28.9", the leading dash is regex-consumed
+        # as a sign, but semantically it's a range separator. Add the
+        # unsigned form too so the manuscript's "28.9%" grounds.
+        # Cost: source set now stores both signed and unsigned forms
+        # for every negative match — but Tier T is value-presence-
+        # not sign-correctness, so this is correct behavior. Sign-
+        # misuse detection is the Tier 3 adversarial reviewer's job.
+        if raw.startswith("-") and len(raw) > 1:
+            out.add(raw[1:])
     return out
 
 

@@ -572,3 +572,144 @@ class TestCLI:
         assert "REPORT.md" in notes_text
         # 0.847 must be ungrounded (nothing in either source).
         assert out["totals"]["ungrounded"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Stage 7 Patch 2 (2026-05-18) — generic source-side extractor
+#
+# D1 (conservation_vs_fitness/draft_1) surfaced that the prior
+# build_normalized_set used the claim-shaped extract_numeric_matches
+# on REPORT.md, missing numbers that lived in dense prose without
+# `n=` or `X of Y` keywords. The patch switches to a generic
+# `\d+(?:\.\d+)?` regex so every number on the source side is
+# indexed. Plus a range-dash carve-out for "12.9-28.9%" patterns.
+# ---------------------------------------------------------------------------
+
+
+class TestPatch2GenericSourceExtractor:
+    """The new build_normalized_set must capture numbers regardless of
+    surrounding linguistic shape — the source side's job is value
+    presence, not claim recognition."""
+
+    def test_picks_up_numbers_in_dense_prose_without_claim_keywords(self):
+        """The actual D1 failure case: a sentence with multiple numbers
+        in prose without `n=`, `X of Y`, or other claim keywords. The
+        claim-shaped extractor missed these; the generic one should
+        catch all of them."""
+        text = (
+            "27,693 putative essential genes identified (18.6% of "
+            "148,826 protein-coding genes across 33 organisms; "
+            "range 12.9-28.9% per organism)"
+        )
+        norm = cng.build_normalized_set(text)
+        for n in ["27693", "18.6", "148826", "33", "12.9", "28.9"]:
+            assert n in norm, f"{n!r} should be in generic-extracted source set"
+
+    def test_handles_range_dashes_via_unsigned_carveout(self):
+        """A range '12.9-28.9%' must contribute BOTH 12.9 and 28.9 to
+        the source set. The regex matches '-28.9' (sign-prefixed); the
+        carve-out adds '28.9' as an unsigned alias."""
+        text = "Per-organism essentiality range 12.9-28.9% across the cohort."
+        norm = cng.build_normalized_set(text)
+        assert "12.9" in norm
+        assert "28.9" in norm
+        # Both signed and unsigned forms present for the second value.
+        assert "-28.9" in norm
+
+    def test_picks_up_table_cell_numbers(self):
+        """Numbers in markdown table cells must be extractable. Tier T
+        previously missed these because the claim-shaped regexes
+        require specific surrounding tokens."""
+        text = (
+            "| Essential-core | 19,128 | 22.7% | 44.7% |\n"
+            "| Essential-unmapped | 1,259 | 18.2% | 44.7% |\n"
+        )
+        norm = cng.build_normalized_set(text)
+        for n in ["19128", "22.7", "44.7", "1259", "18.2"]:
+            assert n in norm, f"{n!r} missing from table-cell extraction"
+
+    def test_strips_commas_consistently(self):
+        """'1,259' must normalise to '1259' in the source set, matching
+        how manuscript-side normalize_numeric handles it."""
+        text = "Range from 1,259 to 124,744 across the cohort."
+        norm = cng.build_normalized_set(text)
+        assert "1259" in norm
+        assert "124744" in norm
+
+    def test_preserves_negative_numbers_in_addition_to_unsigned(self):
+        """A legitimate negative number like Cliff's delta '-0.05' must
+        be preserved as '-0.05' AND also stored as '0.05' (so a
+        manuscript that quotes '0.05' grounds; the Tier 3 reviewer
+        catches sign-misuse cases via context)."""
+        text = "Cliff's delta = -0.05 (small effect)."
+        norm = cng.build_normalized_set(text)
+        assert "-0.05" in norm
+        assert "0.05" in norm
+
+    def test_handles_scientific_notation(self):
+        """p-values in 1e-N form must extract correctly. Note: regex
+        lowercases the exponent marker via the unified normalisation."""
+        text = "p < 1.5e-6 versus baseline 4E-04 condition."
+        norm = cng.build_normalized_set(text)
+        assert "1.5e-6" in norm
+        assert "4e-04" in norm
+
+    def test_dash_separated_range_grounds_via_both_endpoints(self):
+        """End-to-end: a manuscript claim '28.9%' against a REPORT
+        containing 'range 12.9-28.9%' must ground via Tier B."""
+        manuscript = "## Results\n\nPer-organism essentiality reaches 28.9%.\n"
+        report = "Essentiality range is 12.9-28.9% across organisms."
+        inv_norm: set[str] = set()
+        rep_norm = cng.build_normalized_set(report)
+        findings, _, totals = cng.run_grounding(
+            manuscript, inv_norm, rep_norm,
+        )
+        assert totals["ungrounded"] == 0, (
+            f"28.9% should ground against the range endpoint; "
+            f"got findings: {[f.matched_text for f in findings]}"
+        )
+
+    def test_compound_x_of_y_grounds_when_first_number_in_source(self):
+        """Manuscript 'X of Y' compound matches normalize to just X
+        (first number); if X appears in REPORT, the claim grounds.
+        This validates the patch on the headline D1 failure case
+        '27,693 of 148,826'."""
+        manuscript = (
+            "## Methods\n\nThe study covered 27,693 of 148,826 genes.\n"
+        )
+        report = "27,693 putative essential genes were identified."
+        inv_norm: set[str] = set()
+        rep_norm = cng.build_normalized_set(report)
+        findings, _, totals = cng.run_grounding(
+            manuscript, inv_norm, rep_norm,
+        )
+        assert totals["ungrounded"] == 0
+
+    def test_genuinely_fabricated_number_still_flagged(self):
+        """Critical: the looser source extractor must NOT make all
+        fabrications ground by accident. '70%' that's nowhere in
+        REPORT must stay ungrounded."""
+        manuscript = (
+            "## Introduction\n\nWe expected 70% conservation per "
+            "organism but the cohort showed less.\n"
+        )
+        report = (
+            "Essentiality ranges 12.9-28.9% across organisms; median "
+            "odds ratio 1.56 (range 0.83-3.21)."
+        )
+        inv_norm: set[str] = set()
+        rep_norm = cng.build_normalized_set(report)
+        findings, _, totals = cng.run_grounding(
+            manuscript, inv_norm, rep_norm,
+        )
+        # 70 should be ungrounded; nothing else from the manuscript
+        # is a numeric claim (rough check).
+        unrounded_values = {f.matched_text for f in findings}
+        assert any("70" in v for v in unrounded_values), (
+            f"genuine fabrication '70%' should stay ungrounded; "
+            f"findings: {unrounded_values}"
+        )
+
+    def test_empty_source_yields_empty_set(self):
+        """Edge case: empty source returns empty set, no errors."""
+        assert cng.build_normalized_set("") == set()
