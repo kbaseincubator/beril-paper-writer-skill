@@ -137,6 +137,36 @@ class TestExtractNumericsAllowlist:
         assert "2024" not in nums
         assert "2026" not in nums
 
+    def test_strips_thousand_separator_commas_in_compound_numbers(self):
+        """Patch 1b follow-up: '177,863' must be tokenised as one
+        number '177863', not as two ('177' + '863'). Without this,
+        the source side's comma-stripped normalisation ('177863' in
+        REPORT) wouldn't match the candidate side's '177' and '863'
+        — every compound number in the candidates would be a
+        false-positive ungrounded finding."""
+        body = (
+            "## Candidate TL1: Statement.\n\n"
+            "177,863 gene-to-cluster links across the cohort.\n"
+        )
+        results = extract_numerics_from_candidate(body)
+        nums = [r[0] for r in results]
+        # The compound number should appear as a single token.
+        assert "177863" in nums
+        # And the spurious split parts must NOT appear.
+        assert "177" not in nums
+        assert "863" not in nums
+
+    def test_strips_multiple_comma_groups(self):
+        """Bigger numbers with multiple comma groups (e.g., 1,234,567)
+        must collapse to a single token."""
+        body = "## Candidate TL1: Foo.\n\nWe processed 1,234,567 records.\n"
+        results = extract_numerics_from_candidate(body)
+        nums = [r[0] for r in results]
+        assert "1234567" in nums
+        # No false-positive 1/234/567 splits.
+        assert "234" not in nums
+        assert "567" not in nums
+
     def test_allowlists_statistical_thresholds(self):
         """'q < 0.05', 'alpha = 0.10', 'p < 0.001' are statistical
         constants, not data claims."""

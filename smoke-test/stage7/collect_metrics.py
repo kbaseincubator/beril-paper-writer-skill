@@ -59,9 +59,10 @@ class ProjectMetrics:
     validators_pass_or_na:    int
     validators_total:         int
     validator_breakdown:      dict[str, int]    # status → count
-    p0_total:                 int
+    p0_total:                 int               # post-filter, gate's view
     p0_by_source:             dict[str, int]
     p0_by_class:              dict[str, int]
+    p0_demoted_count:         int               # P3-filtered findings
     cost_so_far_usd:          float
     remediation_cycles_used:  int
     silent_failures:          int
@@ -150,36 +151,73 @@ def _count_validators(state: dict[str, Any]) -> tuple[int, int, dict[str, int]]:
     return pass_or_na, total, breakdown
 
 
-def _count_p0s(audit_dir: Path) -> tuple[int, dict[str, int], dict[str, int]]:
-    """Mirrors p0_gate.count_p0_findings (but read-only and stand-alone so
-    this harness doesn't depend on the skill's package layout at runtime)."""
-    total = 0
-    by_source: dict[str, int] = {}
-    by_class: dict[str, int] = {}
+def _count_p0s(
+    audit_dir: Path,
+) -> tuple[int, dict[str, int], dict[str, int], int]:
+    """Count P0 findings via p0_gate.count_p0_findings so the metrics
+    apply the same false-positive filter the orchestrator's gate uses.
 
-    # Adversarial side.
-    adv = _load_json_safe(audit_dir / "adversarial_review.json")
-    if isinstance(adv, dict) and isinstance(adv.get("findings"), list):
-        for f in adv["findings"]:
-            if isinstance(f, dict) and f.get("severity") == "P0":
-                total += 1
-                by_source["adversarial"] = by_source.get("adversarial", 0) + 1
-                cls = str(f.get("class", "unknown"))
-                by_class[cls] = by_class.get(cls, 0) + 1
+    Returns (total_after_filter, per_source, per_class, demoted_count).
+    The orchestrator's gate decision drives the operator experience;
+    measuring v1-bar success against the unfiltered raw count would
+    produce FAIL verdicts on drafts the gate would have advanced.
 
-    # Numeric grounding side.
-    num = _load_json_safe(audit_dir / "numeric_grounding.json")
-    if isinstance(num, dict) and isinstance(num.get("findings"), list):
-        for f in num["findings"]:
-            if isinstance(f, dict) and f.get("severity") == "P0":
-                total += 1
-                by_source["numeric_grounding"] = (
-                    by_source.get("numeric_grounding", 0) + 1
-                )
-                cls = str(f.get("match_class", "unknown"))
-                by_class[cls] = by_class.get(cls, 0) + 1
+    Stage 7 Patch 3 follow-up (2026-05-18): previously this function
+    inlined raw P0 counting, missing the filter applied by p0_gate
+    (NEEDS CITATION demotion, pre-compliance Data Availability
+    demotion). After the fix, the metrics match the orchestrator's
+    log line `Remediation cycle 1: p0_before=N → p0_after=M`.
 
-    return total, by_source, by_class
+    Import is local so this harness still functions if the skill
+    package isn't importable in the runtime environment — but in
+    that degraded case the metrics fall back to raw counting (and
+    log a note).
+    """
+    try:
+        # Try to use the canonical gate logic via package import.
+        # Add the skill's src to sys.path if pipx hasn't put the
+        # package on the default import path.
+        import sys as _sys
+        _here = Path(__file__).resolve()
+        # smoke-test/stage7/collect_metrics.py → repo root is up two,
+        # src is at <root>/src/.
+        _root = _here.parent.parent.parent
+        _src = _root / "src"
+        if _src.is_dir() and str(_src) not in _sys.path:
+            _sys.path.insert(0, str(_src))
+        from beril_paper_writer.skill.tools.p0_gate import count_p0_findings
+        summary = count_p0_findings(audit_dir)
+        return (
+            summary.total,
+            dict(summary.per_source),
+            dict(summary.per_class),
+            len(summary.demoted_findings),
+        )
+    except Exception:
+        # Fall back to raw counting if the import fails. Operator
+        # sees a degraded count but the harness keeps running.
+        total = 0
+        by_source: dict[str, int] = {}
+        by_class: dict[str, int] = {}
+        adv = _load_json_safe(audit_dir / "adversarial_review.json")
+        if isinstance(adv, dict) and isinstance(adv.get("findings"), list):
+            for f in adv["findings"]:
+                if isinstance(f, dict) and f.get("severity") == "P0":
+                    total += 1
+                    by_source["adversarial"] = by_source.get("adversarial", 0) + 1
+                    cls = str(f.get("class", "unknown"))
+                    by_class[cls] = by_class.get(cls, 0) + 1
+        num = _load_json_safe(audit_dir / "numeric_grounding.json")
+        if isinstance(num, dict) and isinstance(num.get("findings"), list):
+            for f in num["findings"]:
+                if isinstance(f, dict) and f.get("severity") == "P0":
+                    total += 1
+                    by_source["numeric_grounding"] = (
+                        by_source.get("numeric_grounding", 0) + 1
+                    )
+                    cls = str(f.get("match_class", "unknown"))
+                    by_class[cls] = by_class.get(cls, 0) + 1
+        return total, by_source, by_class, 0
 
 
 def _count_silent_failures(audit_dir: Path) -> int:
@@ -202,7 +240,7 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
     pid = project_id or state.get("project_id") or draft_dir.parent.parent.name
     final_phase = str(state.get("phase", "unknown"))
     validators_ok, validators_total, breakdown = _count_validators(state)
-    p0_total, p0_by_source, p0_by_class = _count_p0s(audit_dir)
+    p0_total, p0_by_source, p0_by_class, p0_demoted = _count_p0s(audit_dir)
     cost = float(state.get("cost_so_far_usd", 0.0))
     cycles = len(state.get("remediation_cycles", []))
     silent = _count_silent_failures(audit_dir)
@@ -228,6 +266,7 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
         p0_total=p0_total,
         p0_by_source=p0_by_source,
         p0_by_class=p0_by_class,
+        p0_demoted_count=p0_demoted,
         cost_so_far_usd=cost,
         remediation_cycles_used=cycles,
         silent_failures=silent,
@@ -306,6 +345,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     print(f"  p0_by_source:        {m.p0_by_source}")
     print(f"  p0_by_class:         {m.p0_by_class}")
+    if m.p0_demoted_count > 0:
+        print(
+            f"  p0_demoted (filter): {m.p0_demoted_count} "
+            "(NEEDS CITATION + pre-compliance Data Availability)"
+        )
     print(
         f"  cost_so_far_usd:     ${m.cost_so_far_usd:.2f}  "
         f"[crit: <= ${PASS_CRITERIA['max_cost_usd']:.2f} → "

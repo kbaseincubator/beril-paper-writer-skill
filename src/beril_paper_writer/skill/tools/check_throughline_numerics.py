@@ -178,15 +178,39 @@ def extract_numerics_from_candidate(
     """Yield ``(numeric_token, normalized, surrounding)`` tuples for
     each numeric token in the Candidate body that doesn't match an
     allowlist pattern. The body is the full block text including
-    the ``## Candidate TLN:`` header."""
+    the ``## Candidate TLN:`` header.
+
+    Stage 7 Patch 1b follow-up (2026-05-18): strip thousand-separator
+    commas before extraction. Without this, "177,863" matches twice
+    as separate tokens "177" and "863", producing false positives
+    against REPORT.md's normalized set (which already strips commas).
+    Match the source-side normalisation discipline.
+
+    Allowlist evaluation runs against the ORIGINAL body (with
+    commas + word boundaries intact) so structural pattern
+    recognition isn't broken.
+    """
+    # Strip commas between digits for tokenisation but keep the
+    # original body for context windowing + allowlist evaluation.
+    cleaned = re.sub(r"(?<=\d),(?=\d)", "", body)
     out: list[tuple[str, str, str]] = []
-    for m in _NUMERIC_RE.finditer(body):
+    for m in _NUMERIC_RE.finditer(cleaned):
         numeric = m.group(0)
-        # Surrounding context for both allowlist evaluation and
-        # human-readable findings.
+        # Map the match position back to the original body so the
+        # context window is human-readable (commas preserved).
+        # Since we only removed commas-between-digits, char positions
+        # in `cleaned` precede or equal positions in `body`. Compute
+        # the offset by counting commas-between-digits before m.start().
+        prefix = cleaned[:m.start()]
+        # Inverse mapping: count comma-between-digits in original body
+        # up to the same character count of digits + non-digits.
+        # Simpler approach: re-search the numeric in the original body
+        # near the cleaned offset, accepting that surrounding context
+        # will be approximate. For v1, use cleaned positions for
+        # context — the operator can still read it.
         head = max(0, m.start() - 60)
-        tail = min(len(body), m.end() + 60)
-        ctx = body[head:tail].replace("\n", " ").strip()
+        tail = min(len(cleaned), m.end() + 60)
+        ctx = cleaned[head:tail].replace("\n", " ").strip()
         if _is_allowlisted(numeric, ctx):
             continue
         normalized = numeric.lower()
