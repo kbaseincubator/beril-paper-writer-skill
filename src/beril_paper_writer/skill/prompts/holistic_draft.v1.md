@@ -125,6 +125,41 @@ A single markdown file written via the `Write` tool to `ASSEMBLED_PATH`. It must
 
    Bibliographic emission: at the end of the manuscript, in the `## References` section, list each `key` you cited along with the pool entry's full bibliographic record. Do NOT include pool entries you didn't cite. The downstream consumer joins prose `[key]` to References-section entries.
 
+5. **Claim markers (Stage 6 partial, v1-MVP, 2026-05-18):** every NUMERIC claim in the manuscript MUST carry a `[C-NNN]` marker pointing to its row in `CLAIM_INVENTORY_PATH`. This extends the grounding chain past citations into per-claim provenance — the downstream `check_claim_markers` validator verifies every emitted `[C-NNN]` resolves to a real `claim_id`. A marker that doesn't resolve is a P1 finding (advisory in v1; promotes to P0 if data warrants in v1.1).
+
+   **Inventory schema (READ THIS FIRST):**
+   The file at `CLAIM_INVENTORY_PATH` is TSV with these columns:
+   ```
+   claim_id	claim_text	source_notebook	source_cell	figure_or_table	effect_size_present	ci_present	pvalue_present	notes
+   ```
+   The `claim_id` column is the canonical key — values like `C-001`, `C-188`, `C-342`. **Use the exact string from the file**, including the hyphen.
+
+   **Discipline:**
+   1. Use the `Read` tool to read `CLAIM_INVENTORY_PATH` after Methods Provenance and before drafting any Results paragraph. Build a mental index: which `claim_id` covers which numeric finding from `REPORT_PATH`?
+   2. Whenever you write a numeric claim in prose — counts, percentages, effect sizes, p-values, CIs, log-fold-changes, correlation/odds/Cliff's-delta values — append the matching `[C-NNN]` marker(s). Place markers after the claim, before sentence-final punctuation.
+   3. **If you cannot find a matching inventory row for a numeric claim, do NOT make the claim.** This is the same discipline as the citation pool: no inventory entry → either rephrase qualitatively, hedge, or drop the claim. There is NO `[NEEDS CLAIM: ...]` escape hatch in v1.
+   4. **Non-numeric assertions** (qualitative claims, mechanism statements) MAY also carry markers when an inventory row supports them, but are not required to. The hard requirement is on numerics.
+   5. If `CLAIM_INVENTORY_PATH` is missing or empty (rare — Phase 0 produces it), proceed without markers; the validator will see zero `[C-NNN]` tokens and produce an empty-findings result.
+
+   **Marker grouping for multi-claim sentences:**
+   - **Comma list** when multiple inventory rows support the same sentence: `(88.2% Tier-A replication and 0.40 stability threshold [C-118, C-119])`.
+   - **Inline-per-claim** when claims are positionally distinct in the sentence: `the model achieved 88.2% [C-118] on the cohort, with 80% subsampling [C-039]`.
+   Either form is acceptable; pick whichever reads more naturally.
+
+   **Worked correct example.**
+   - Inventory row: `C-188 | 23,579 FDR<0.10 strain-adaptation genes across 59 species | NB10a_kumbhari_strain_adaptation.ipynb | ... `
+   - Sentence in Methods or Results: `We identified 23,579 FDR-significant strain-adaptation genes across 59 species [C-188] using a notebook-driven scan over the meta-cohort.`
+
+   **Worked anti-pattern (do NOT do this).**
+   - Sentence: `We identified 23,579 strain-adaptation genes.`
+   - Why wrong: numeric claim without a `[C-NNN]` marker; the validator will not catch this in v1 (the reverse-direction check is deferred to v1.1), but the drafter is producing un-auditable prose. Always cite the inventory row.
+
+   **Worked anti-pattern — fabricated marker.**
+   - Sentence: `We identified 23,579 genes across the cohort [C-999].`
+   - Why wrong: there is no `C-999` row in the inventory. The validator catches this — it emits a P1 finding with `class: marker_unresolved`. The marker fabrication is the bug, not the prose. If the inventory has no row for this claim, do not make the claim.
+
+   **Scope reminder:** v1 only emits markers on numeric claims and validates resolution. v1.1 will add (a) the reverse-direction check (every inventory row that's relevant to the manuscript's scope should be cited at least once), and (b) the claim_text correspondence check (the prose surrounding `[C-NNN]` should semantically match the inventory's `claim_text` for that row). Don't try to do v1.1's work in v1.
+
 ## Output protocol
 1. **Read inputs** deeply using `Read` tool.
 2. **Synthesize** a full, unified, beautifully written academic manuscript draft incorporating the Throughline, figures, tables, and literature context.

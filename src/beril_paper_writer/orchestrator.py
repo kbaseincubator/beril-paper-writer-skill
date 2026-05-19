@@ -1066,9 +1066,26 @@ Please draft the entire manuscript.
             raise RuntimeError("Holistic drafting failed.")
 
         logger.info(f"Holistic drafting completed in {time.time() - start:.2f}s")
-        
+
         # Post-draft audits (interactive check)
         await self._audit_discrepancies_interactive()
+
+        # Stage 4 Tier R-6 (2026-05-18): render references.md /
+        # citation_map.md / bibliography.bib NOW, before phase_review
+        # fires. The Tier 3 canonical adversarial reviewer hard-fails
+        # rc=2 if references.md is missing — empirically confirmed on
+        # ibd_phage_targeting/draft_2's fresh Stage 6 partial smoke
+        # (2026-05-18). Tier R-2 had only wired the render into
+        # phase_supplementary_pool, which runs AFTER phase_review, so
+        # fresh drafts (without a prior pipeline pass having produced
+        # references.md) lost the entire adversarial signal.
+        #
+        # The render is idempotent: phase_supplementary_pool runs it
+        # again after [NEEDS CITATION] resolution. First call writes
+        # references.md based on whatever's in citation_pool.json at
+        # drafting-time; second call updates with any resolved
+        # citations. No-op on missing pool (advisory).
+        self._finalize_citation_render()
 
         # Stage 2 Tier D: drafting → review (was: → supplementary_pool).
         # supplementary_pool now runs after optimize so it can resolve
@@ -1428,6 +1445,96 @@ with the citation key in the manuscript.
                 logger.warning(
                     f"  ungrounded: {f.section} para {f.paragraph} "
                     f"({f.match_class}): {f.matched_text!r}"
+                )
+        else:
+            logger.info(summary)
+
+        # Stage 6 partial (v1-MVP, 2026-05-18): claim-marker resolution
+        # check. Runs alongside numeric grounding; advisory (P1).
+        self._run_claim_marker_check()
+
+    def _run_claim_marker_check(self) -> None:
+        """Stage 6 partial: verify every [C-NNN] marker in manuscript.md
+        resolves to a claim_id in claim_inventory.tsv.
+
+        Failure mode is P1 (advisory) in v1 — does not gate the P0
+        review. Promotes to P0 in v1.1 if multi-project data shows
+        the failure mode worth gating on. Pattern mirrors the numeric
+        grounding wiring above: pure-function helper at
+        ``check_claim_markers.run_marker_check``, writes
+        ``audit/claim_marker_check.json`` with schema
+        ``claim-marker-check.v1``.
+        """
+        from beril_paper_writer.skill.tools import (
+            check_claim_markers as ccm,
+        )
+        import json as _json
+        from dataclasses import asdict as _asdict
+
+        manuscript_path = self.draft_dir / "manuscript.md"
+        if not manuscript_path.is_file():
+            logger.warning(
+                f"Stage 6 partial: manuscript.md missing at "
+                f"{manuscript_path}; claim-marker check skipped."
+            )
+            return
+
+        inventory_path = self.draft_dir / "claim_inventory.tsv"
+        try:
+            manuscript_text = manuscript_path.read_text(encoding="utf-8")
+            inventory_ids = ccm.load_inventory_claim_ids(inventory_path)
+            findings, totals = ccm.run_marker_check(
+                manuscript_text, inventory_ids,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                f"Stage 6 partial: claim-marker check failed: "
+                f"{exc!r}. Continuing into Tier 2."
+            )
+            return
+
+        notes: list[str] = []
+        if not inventory_path.is_file():
+            notes.append(
+                "claim_inventory.tsv missing — every emitted marker "
+                "will flag unresolved."
+            )
+
+        report = ccm.MarkerCheckReport(
+            schema_version=ccm.SCHEMA_VERSION,
+            tool="check_claim_markers",
+            tool_version=ccm.TOOL_VERSION,
+            draft_dir=str(self.draft_dir),
+            manuscript_path=str(manuscript_path),
+            inventory_path=(
+                str(inventory_path) if inventory_path.is_file() else None
+            ),
+            totals=totals,
+            findings=[f.to_dict() for f in findings],
+            notes=notes,
+        )
+
+        audit_dir = self.draft_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        out_path = audit_dir / "claim_marker_check.json"
+        out_path.write_text(
+            _json.dumps(_asdict(report), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        summary = (
+            f"Stage 6 partial (claim markers): "
+            f"{totals['markers_in_manuscript']} markers "
+            f"({totals['unique_markers_in_manuscript']} unique); "
+            f"{totals['cited_and_resolved']} resolved; "
+            f"{totals['cited_but_unresolved']} UNRESOLVED → {out_path}"
+        )
+        if totals["cited_but_unresolved"] > 0:
+            logger.warning(summary)
+            for f in findings[:5]:
+                logger.warning(
+                    f"  unresolved: {f.marker} in {f.section} "
+                    f"para {f.paragraph}: {f.surrounding[:80]!r}"
                 )
         else:
             logger.info(summary)
