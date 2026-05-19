@@ -49,6 +49,12 @@ class P0Finding:
     The renderer and the orchestrator's remediation prompt builder
     both consume this shape; centralising the normalisation keeps
     the gate code agnostic of producer schema drift.
+
+    Stage 7 Patch 3 (2026-05-18): added ``filter_reason`` so the
+    gate can demote false-positive findings without losing the
+    audit trail. ``None`` means the finding is a real P0; a set
+    value means the finding has been demoted (does not count
+    toward the gate total but stays visible in the rendered view).
     """
 
     source: str          # SOURCE_ADVERSARIAL | SOURCE_NUMERIC
@@ -60,9 +66,10 @@ class P0Finding:
     fix_target: str      # adversarial 'fix_target' | "" for numeric
     fix_hint: str        # adversarial 'fix_hint' | constructed for numeric
     quote: str           # paragraph_quote | matched_text
+    filter_reason: Optional[str] = None  # P3: false-positive demotion tag
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "source": self.source,
             "finding_id": self.finding_id,
             "finding_class": self.finding_class,
@@ -73,6 +80,9 @@ class P0Finding:
             "fix_hint": self.fix_hint,
             "quote": self.quote,
         }
+        if self.filter_reason is not None:
+            out["filter_reason"] = self.filter_reason
+        return out
 
 
 @dataclass
@@ -84,16 +94,26 @@ class P0Summary:
     the ``total`` field, and the renderer materialises the
     human-readable view from ``findings``.
 
-    ``per_source`` and ``per_class`` are summary counts. ``notes``
-    captures partial-input conditions (missing JSON files, malformed
-    payloads) so the renderer can warn the operator that the gate
-    decision was made under degraded telemetry.
+    ``per_source`` and ``per_class`` are summary counts reflecting
+    only the non-demoted findings (the ones that count toward the
+    gate decision). ``notes`` captures partial-input conditions
+    (missing JSON files, malformed payloads).
+
+    Stage 7 Patch 3 (2026-05-18): added ``demoted_findings`` so
+    the gate can preserve the audit trail for false-positives it
+    filtered out (e.g., adversarial-flagged ``[NEEDS CITATION:]``
+    placeholders that are intentional intermediate-state markers,
+    or pre-compliance_gate ``missing_section`` findings about Data
+    Availability that compliance_gate will autofix). The demoted
+    findings carry their ``filter_reason`` so the renderer + audit
+    trail show why they were filtered.
     """
 
     total: int = 0
     per_source: dict[str, int] = field(default_factory=dict)
     per_class: dict[str, int] = field(default_factory=dict)
     findings: list[P0Finding] = field(default_factory=list)
+    demoted_findings: list[P0Finding] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,6 +122,9 @@ class P0Summary:
             "per_source": dict(self.per_source),
             "per_class": dict(self.per_class),
             "findings": [f.to_dict() for f in self.findings],
+            "demoted_findings": [
+                f.to_dict() for f in self.demoted_findings
+            ],
             "notes": list(self.notes),
         }
 
@@ -234,15 +257,125 @@ def _normalise_numeric(payload: Any) -> tuple[list[P0Finding], list[str]]:
     return findings, notes
 
 
+# Filter reason tags. These are the only values that show up as
+# `filter_reason` on demoted P0Findings; renderer / audit consumers
+# can pattern-match against them.
+FILTER_NEEDS_CITATION_PLACEHOLDER = "needs-citation-placeholder"
+FILTER_PRE_COMPLIANCE_MISSING_SECTION = "pre-compliance-missing-section"
+
+# Section labels that compliance_gate autofixes. Adversarial findings
+# of class `missing_section` that mention any of these in description
+# OR fix_target are demoted on the assumption that compliance_gate
+# (which runs after the P0 gate) will populate them. If the same
+# finding appears AFTER compliance_gate ran, the gate sees real defect.
+# (v1 simplification: we always demote at gate-evaluation time since
+#  the gate only fires pre-compliance. v1.1 could pass state.phase
+#  through and reverse-promote post-compliance.)
+_COMPLIANCE_AUTOFIX_SECTIONS = (
+    "Data Availability",
+    "Code Availability",
+    "data availability",
+    "code availability",
+)
+
+
+def _apply_false_positive_filters(
+    findings: list[P0Finding],
+) -> tuple[list[P0Finding], list[P0Finding], list[str]]:
+    """Stage 7 Patch 3 (2026-05-18): demote known false-positive
+    adversarial findings without losing them from the audit trail.
+
+    Two rules in v1:
+
+    1. ``citation_reality`` + manuscript quote / description contains
+       ``[NEEDS CITATION:`` → demote. These are intentional pre-
+       supplementary-pool markers awaiting WebSearch resolution. The
+       adversarial reviewer (which knows nothing about pipeline phase
+       state) sees them as fabricated citations; they are not.
+
+    2. ``missing_section`` + finding text mentions Data Availability
+       or Code Availability → demote. These are autofixed by
+       compliance_gate, which runs AFTER the P0 gate in the v0.8
+       pipeline order. Flagging them as P0 at gate-evaluation time
+       pre-empts compliance_gate's intended behaviour.
+
+    Returns ``(kept, demoted, filter_notes)``. Filter notes summarise
+    what was filtered for the rendered audit trail.
+    """
+    kept: list[P0Finding] = []
+    demoted: list[P0Finding] = []
+    notes: list[str] = []
+
+    n_needs_citation = 0
+    n_missing_section = 0
+
+    for f in findings:
+        # Rule 1: NEEDS CITATION placeholder false-positive.
+        # Check both description AND quote — the adversarial schema
+        # is inconsistent about which field carries the manuscript text.
+        if (
+            f.source == SOURCE_ADVERSARIAL
+            and f.finding_class == "citation_reality"
+            and (
+                "[NEEDS CITATION" in f.description
+                or "[NEEDS CITATION" in f.quote
+            )
+        ):
+            f.filter_reason = FILTER_NEEDS_CITATION_PLACEHOLDER
+            demoted.append(f)
+            n_needs_citation += 1
+            continue
+
+        # Rule 2: pre-compliance-gate missing Data/Code Availability.
+        if (
+            f.source == SOURCE_ADVERSARIAL
+            and f.finding_class == "missing_section"
+            and any(
+                tag in f.description or tag in f.fix_target
+                for tag in _COMPLIANCE_AUTOFIX_SECTIONS
+            )
+        ):
+            f.filter_reason = FILTER_PRE_COMPLIANCE_MISSING_SECTION
+            demoted.append(f)
+            n_missing_section += 1
+            continue
+
+        kept.append(f)
+
+    if n_needs_citation > 0:
+        notes.append(
+            f"filter_applied: demoted {n_needs_citation} citation_reality "
+            "finding(s) flagging [NEEDS CITATION:] placeholders — these "
+            "are intentional pre-supplementary-pool markers. See "
+            "demoted_findings."
+        )
+    if n_missing_section > 0:
+        notes.append(
+            f"filter_applied: demoted {n_missing_section} missing_section "
+            "finding(s) about Data Availability / Code Availability — "
+            "compliance_gate autofixes these post-gate. See "
+            "demoted_findings."
+        )
+
+    return kept, demoted, notes
+
+
 def count_p0_findings(audit_dir: Path) -> P0Summary:
     """Read both audit JSONs from ``audit_dir`` and return a P0Summary.
 
     Never raises. Missing or malformed inputs reduce signal but do
     not block the gate from making a decision — partial-input notes
     are surfaced via ``P0Summary.notes`` and rendered to the operator.
+
+    Stage 7 Patch 3 (2026-05-18): after normalising findings from
+    both producers, apply false-positive filters and split into
+    ``findings`` (real P0s that drive the gate) and
+    ``demoted_findings`` (filtered-out but preserved for audit).
     """
     summary = P0Summary()
     audit_dir = Path(audit_dir)
+
+    raw_findings: list[P0Finding] = []
 
     adv_payload, adv_note = _load_json_safe(
         audit_dir / "adversarial_review.json"
@@ -251,7 +384,7 @@ def count_p0_findings(audit_dir: Path) -> P0Summary:
         summary.notes.append(adv_note)
     if adv_payload is not None:
         adv_findings, adv_inner_notes = _normalise_adversarial(adv_payload)
-        summary.findings.extend(adv_findings)
+        raw_findings.extend(adv_findings)
         summary.notes.extend(adv_inner_notes)
 
     num_payload, num_note = _load_json_safe(
@@ -261,10 +394,18 @@ def count_p0_findings(audit_dir: Path) -> P0Summary:
         summary.notes.append(num_note)
     if num_payload is not None:
         num_findings, num_inner_notes = _normalise_numeric(num_payload)
-        summary.findings.extend(num_findings)
+        raw_findings.extend(num_findings)
         summary.notes.extend(num_inner_notes)
 
-    # Aggregate counts.
+    # Apply false-positive filters (P3). kept drives the gate; demoted
+    # stays visible in the rendered audit.
+    kept, demoted, filter_notes = _apply_false_positive_filters(raw_findings)
+    summary.findings = kept
+    summary.demoted_findings = demoted
+    summary.notes.extend(filter_notes)
+
+    # Aggregate counts — only over kept findings (the ones that
+    # actually count toward the gate decision).
     summary.total = len(summary.findings)
     for f in summary.findings:
         summary.per_source[f.source] = summary.per_source.get(f.source, 0) + 1
@@ -420,6 +561,37 @@ def render_p0_findings_md(
             f"   ```\n"
         )
     lines.append("")
+
+    # Stage 7 Patch 3: filtered (informational) findings — these
+    # don't count toward the gate but the operator should see them.
+    # Surface BEFORE the load-bearing findings section so the audit
+    # trail is reviewed first.
+    if summary.demoted_findings:
+        lines.append("## Filtered findings (not counted in P0 total)\n")
+        lines.append(
+            "These adversarial findings were demoted by the gate's "
+            "false-positive filter. They are recorded here for "
+            "audit-trail completeness. Each carries a "
+            "`filter_reason` documenting why it was demoted.\n"
+        )
+        ordered_demoted = sorted(
+            summary.demoted_findings,
+            key=lambda f: (f.source, f.finding_id),
+        )
+        for f in ordered_demoted:
+            lines.append(
+                f"### {f.finding_id} — {f.finding_class} "
+                f"({f.source}) — filter: {f.filter_reason}\n"
+            )
+            lines.append(f"- **Location:** {f.location}")
+            lines.append(
+                f"- **Issue (demoted):** {_truncate(f.description)}"
+            )
+            if f.quote:
+                lines.append(
+                    f"- **Quote:** `{_truncate(f.quote, n=200)}`"
+                )
+            lines.append("")
 
     # Per-finding detail. Stable ordering: adversarial first, then
     # numeric_grounding, each sorted by finding_id so the file is

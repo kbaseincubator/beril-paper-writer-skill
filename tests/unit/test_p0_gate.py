@@ -433,6 +433,265 @@ def test_render_zero_findings_states_no_p0s() -> None:
     assert "--ship-with-p0s" not in md
 
 
+# ---------------------------------------------------------------------------
+# Stage 7 Patch 3 (2026-05-18) — false-positive filtering
+#
+# Two filter rules in v1:
+#   1. citation_reality + [NEEDS CITATION: in description/quote → demote
+#   2. missing_section + Data/Code Availability text → demote
+# Demoted findings stay in P0Summary.demoted_findings (audit trail
+# preserved) but don't count toward summary.total (the gate signal).
+# ---------------------------------------------------------------------------
+
+
+def test_filter_demotes_needs_citation_placeholder_in_description(
+    tmp_path: Path,
+) -> None:
+    """The headline D1 failure: adversarial flags `[NEEDS CITATION:...]`
+    placeholders as P0 citation_reality. These are intentional pre-
+    supplementary-pool markers — the gate must demote them."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001",
+            "class": "citation_reality",
+            "severity": "P0",
+            "issue": (
+                "Literal unresolved citation placeholder "
+                "'[NEEDS CITATION: minimal Mycoplasma genome design]' "
+                "appears in the manuscript text."
+            ),
+        },
+        {
+            "id": "F002",
+            "class": "citation_reality",
+            "severity": "P0",
+            "issue": "Real fabrication issue without the marker",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 1  # only F002 counts
+    assert len(summary.demoted_findings) == 1
+    assert summary.demoted_findings[0].finding_id == "F001"
+    assert (
+        summary.demoted_findings[0].filter_reason
+        == "needs-citation-placeholder"
+    )
+
+
+def test_filter_demotes_needs_citation_placeholder_in_quote(
+    tmp_path: Path,
+) -> None:
+    """The marker may live in paragraph_quote instead of issue text.
+    Both fields are checked."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001",
+            "class": "citation_reality",
+            "severity": "P0",
+            "issue": "Citation flagged.",
+            "paragraph_quote": "...the EcoActive phage cocktail [NEEDS CITATION: EcoActive AIEC clinical-trial cocktail]...",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 0
+    assert len(summary.demoted_findings) == 1
+
+
+def test_filter_demotes_missing_data_availability_section(
+    tmp_path: Path,
+) -> None:
+    """compliance_gate writes Data Availability post-gate. Adversarial
+    findings flagging the section as missing AT GATE TIME must be
+    demoted — compliance_gate will autofix."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001",
+            "class": "missing_section",
+            "severity": "P0",
+            "issue": (
+                "The manuscript contains no Data Availability "
+                "statement and no Code Availability statement."
+            ),
+            "fix_target": "Data Availability",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 0
+    assert len(summary.demoted_findings) == 1
+    assert (
+        summary.demoted_findings[0].filter_reason
+        == "pre-compliance-missing-section"
+    )
+
+
+def test_filter_does_not_demote_other_missing_section_findings(
+    tmp_path: Path,
+) -> None:
+    """missing_section findings about other sections (e.g., Limitations,
+    Methods) must NOT be filtered — compliance_gate doesn't write those."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001",
+            "class": "missing_section",
+            "severity": "P0",
+            "issue": "The Limitations subsection is absent.",
+            "fix_target": "Limitations",
+        },
+        {
+            "id": "F002",
+            "class": "missing_section",
+            "severity": "P0",
+            "issue": "Methods has no statistical-tests subsection.",
+            "fix_target": "Methods §statistics",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 2  # both stay
+    assert len(summary.demoted_findings) == 0
+
+
+def test_filter_records_notes_summarising_demotions(
+    tmp_path: Path,
+) -> None:
+    """The summary.notes must include `filter_applied:` lines documenting
+    what was demoted so the operator sees the audit trail in
+    p0_findings.md."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001", "class": "citation_reality", "severity": "P0",
+            "issue": "[NEEDS CITATION: foo]",
+        },
+        {
+            "id": "F002", "class": "missing_section", "severity": "P0",
+            "issue": "Missing Data Availability statement.",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    notes_text = " ".join(summary.notes)
+    assert "filter_applied" in notes_text
+    assert "citation_reality" in notes_text
+    assert "missing_section" in notes_text
+
+
+def test_filter_to_dict_preserves_filter_reason(tmp_path: Path) -> None:
+    """to_dict() on a demoted finding must include filter_reason so
+    the audit JSON is round-trippable and downstream consumers (e.g.,
+    a future v1.1 reverse-promotion check) can detect filtered items."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001", "class": "citation_reality", "severity": "P0",
+            "issue": "[NEEDS CITATION: x]",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    raw = summary.to_dict()
+    assert raw["total"] == 0
+    assert len(raw["demoted_findings"]) == 1
+    assert raw["demoted_findings"][0]["filter_reason"] == "needs-citation-placeholder"
+    # Non-demoted findings don't carry the field.
+    assert raw["findings"] == []
+
+
+def test_filter_per_source_and_per_class_count_kept_only(
+    tmp_path: Path,
+) -> None:
+    """per_source and per_class must reflect only non-demoted findings
+    since they drive operator-facing decisions."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {  # Demoted
+            "id": "F001", "class": "citation_reality", "severity": "P0",
+            "issue": "[NEEDS CITATION: foo]",
+        },
+        {  # Demoted
+            "id": "F002", "class": "missing_section", "severity": "P0",
+            "issue": "Data Availability statement missing.",
+        },
+        {  # Kept
+            "id": "F003", "class": "register_drift", "severity": "P0",
+            "issue": "informal language",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 1
+    assert summary.per_source == {SOURCE_ADVERSARIAL: 1}
+    assert summary.per_class == {"register_drift": 1}
+
+
+def test_filter_does_not_affect_numeric_grounding_findings(
+    tmp_path: Path,
+) -> None:
+    """Filters are adversarial-only — numeric grounding findings are
+    deterministic and must always count."""
+    audit = tmp_path / "audit"
+    _write_numeric(audit, [
+        {
+            "matched_text": "70%", "match_class": "percentage",
+            "section": "Results", "paragraph": 1, "severity": "P0",
+            "rationale": "fabrication",
+        },
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 1
+    assert summary.per_source == {SOURCE_NUMERIC: 1}
+    assert len(summary.demoted_findings) == 0
+
+
+def test_filter_handles_mixed_real_and_false_positives_from_d1(
+    tmp_path: Path,
+) -> None:
+    """Regression test based on the real D1 audit shape: 4 adversarial
+    P0s (1 NEEDS-CITATION false-positive + 1 Data-Availability false-
+    positive + 2 real report_drifts) + 5 numeric P0s. Expected post-
+    filter: 2 adversarial + 5 numeric = 7 kept, 2 demoted."""
+    audit = tmp_path / "audit"
+    _write_adversarial(audit, [
+        {
+            "id": "F001", "class": "citation_reality", "severity": "P0",
+            "issue": "Literal '[NEEDS CITATION: minimal genome]' appears in text",
+        },
+        {
+            "id": "F002", "class": "missing_section", "severity": "P0",
+            "issue": "No Data Availability or Code Availability statement.",
+            "fix_target": "Data Availability",
+        },
+        {
+            "id": "F003", "class": "report_drift", "severity": "P0",
+            "issue": "Throughline says 58.1% but REPORT says 44.7%.",
+        },
+        {
+            "id": "F004", "class": "report_drift", "severity": "P0",
+            "issue": "reframing_log.md does not exist.",
+        },
+    ])
+    _write_numeric(audit, [
+        {"matched_text": "27,693 of 148,826", "match_class": "count_of",
+         "section": "Methods", "paragraph": 7, "severity": "P0", "rationale": "ungrounded"},
+        {"matched_text": "12.9%", "match_class": "percentage",
+         "section": "Methods", "paragraph": 7, "severity": "P0", "rationale": "ungrounded"},
+        {"matched_text": "2 x", "match_class": "ratio_with_unit",
+         "section": "Methods", "paragraph": 11, "severity": "P0", "rationale": "ungrounded"},
+        {"matched_text": "12.9%", "match_class": "percentage",
+         "section": "Results", "paragraph": 9, "severity": "P0", "rationale": "ungrounded"},
+        {"matched_text": "33 of 48", "match_class": "count_of",
+         "section": "Discussion", "paragraph": 7, "severity": "P0", "rationale": "ungrounded"},
+    ])
+    summary = count_p0_findings(audit)
+    assert summary.total == 7
+    assert len(summary.demoted_findings) == 2
+    # Real ones kept.
+    kept_ids = {f.finding_id for f in summary.findings if f.source == SOURCE_ADVERSARIAL}
+    assert kept_ids == {"F003", "F004"}
+    # Numeric all kept.
+    assert summary.per_source[SOURCE_NUMERIC] == 5
+
+
 def test_render_surfaces_telemetry_notes() -> None:
     """When the gate ran in degraded mode, the markdown surfaces the
     notes so the operator can audit why."""
