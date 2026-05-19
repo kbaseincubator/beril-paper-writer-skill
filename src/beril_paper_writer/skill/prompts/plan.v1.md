@@ -557,3 +557,30 @@ choice:
 4. **Triage is rubric-driven.** STRONG / THIN / EXPLORATORY
    verdicts name the specific evidence-strength criteria met or
    missed. Vibes-triage is unaccountable and forbidden.
+5. **Every numeric in a candidate must be sourced verbatim from
+   REPORT.md or `claim_inventory.tsv` (when present).** Stage 7
+   Patch 1 (2026-05-18) discipline. The plan phase has been caught
+   inventing numbers ("58.1% hypothetical" in a candidate when
+   REPORT.md says "44.7% hypothetical" — observed on
+   `conservation_vs_fitness` D1, 2026-05-18). When a number is
+   load-bearing in a sub-claim:
+
+   * **Verify** by `Grep` / `Read` against `REPORT_PATH` or
+     `CLAIM_INVENTORY_PATH` BEFORE writing it into the evidence-map
+     row.
+   * **Quote** the source phrase verbatim in the row's `Source`
+     column when possible — e.g., `REPORT.md §"Essential Genes
+     Are Enriched in Core Clusters", quote: "86.1% core vs 81.2%"`.
+   * **Hedge qualitatively** rather than invent — if the source has
+     "an enrichment" but no specific percentage, write "modest
+     enrichment" not "5% enrichment".
+   * **Derived numerics** (e.g., "4.9 pp difference" computed from
+     86.1% − 81.2%) must include both source numbers in the row so
+     the derivation is auditable. Don't quote the derived number
+     alone.
+
+   A downstream deterministic validator (`check_throughline_numerics.py`,
+   wired into `phase_plan`) extracts numerics from each emitted
+   candidate and verifies them against REPORT.md. Unverified numerics
+   are flagged P0 and halt the plan phase — you cannot ship a
+   candidate with an invented number.

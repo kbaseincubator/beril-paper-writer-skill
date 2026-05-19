@@ -762,7 +762,109 @@ Also make sure to create the .handoff.json file!
         # state.tier=None for the rest of the pipeline.
         self._classify_tier_from_candidates()
 
+        # Stage 7 Patch 1b (2026-05-18): run the throughline-numerics
+        # validator. Advisory in v1 — surfaces fabrications as
+        # WARNINGS so the operator sees them before picking, but
+        # does NOT halt plan phase (recall on legitimate notebook-
+        # sourced numerics is too low to halt-loud in v1; v1.1
+        # promotes to halt once indexing improves).
+        self._run_throughline_numeric_check()
+
         self.advance_phase("throughline_pick")
+
+    def _run_throughline_numeric_check(self) -> None:
+        """Stage 7 Patch 1b — deterministic check that numerics in
+        throughline_candidates.md are sourced from REPORT.md or
+        claim_inventory.tsv. Surfaces fabrications as WARNINGS;
+        does not halt plan phase in v1."""
+        from beril_paper_writer.skill.tools import (
+            check_throughline_numerics as ctn,
+        )
+        import json as _json
+        from dataclasses import asdict as _asdict
+
+        candidates_path = self.draft_dir / "throughline_candidates.md"
+        if not candidates_path.is_file():
+            logger.warning(
+                f"Patch 1b: throughline_candidates.md missing at "
+                f"{candidates_path}; numeric check skipped."
+            )
+            return
+
+        report_path = self.project_dir / "REPORT.md"
+        inventory_path = self.draft_dir / "claim_inventory.tsv"
+
+        try:
+            candidates_text = candidates_path.read_text(encoding="utf-8")
+            report_norm = ctn.load_report_normalized_set(
+                report_path if report_path.is_file() else None,
+            )
+            inv_norm = ctn.load_inventory_normalized_set(
+                inventory_path if inventory_path.is_file() else None,
+            )
+            findings, totals = ctn.run_throughline_check(
+                candidates_text, report_norm, inv_norm,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                f"Patch 1b: throughline numeric check failed: "
+                f"{exc!r}. Continuing into throughline_pick."
+            )
+            return
+
+        notes: list[str] = []
+        if not inventory_path.is_file():
+            notes.append(
+                "claim_inventory.tsv not yet present — verified against "
+                "REPORT.md only."
+            )
+
+        report = ctn.ThroughlineCheckReport(
+            schema_version=ctn.SCHEMA_VERSION,
+            tool="check_throughline_numerics",
+            tool_version=ctn.TOOL_VERSION,
+            candidates_path=str(candidates_path),
+            report_path=str(report_path) if report_path.is_file() else None,
+            inventory_path=(
+                str(inventory_path) if inventory_path.is_file() else None
+            ),
+            totals=totals,
+            findings=[f.to_dict() for f in findings],
+            notes=notes,
+        )
+
+        audit_dir = self.draft_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        out_path = audit_dir / "throughline_numeric_check.json"
+        out_path.write_text(
+            _json.dumps(_asdict(report), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        summary = (
+            f"Patch 1b (throughline numerics): "
+            f"{totals['candidates_parsed']} candidates; "
+            f"{totals['numerics_in_candidates']} numerics; "
+            f"{totals['grounded']} grounded; "
+            f"{totals['ungrounded']} UNGROUNDED → {out_path}"
+        )
+        if totals["ungrounded"] > 0:
+            logger.warning(summary)
+            # Surface up to 5 ungrounded findings inline so the operator
+            # notices before picking. The slash-command UX surfaces the
+            # JSON path too for full review.
+            for f in findings[:5]:
+                logger.warning(
+                    f"  ungrounded: {f.candidate_id} {f.numeric!r} "
+                    f"in {f.surrounding[:80]!r}"
+                )
+            if totals["ungrounded"] > 5:
+                logger.warning(
+                    f"  ...and {totals['ungrounded'] - 5} more — see "
+                    f"{out_path}"
+                )
+        else:
+            logger.info(summary)
 
     async def phase_citation_pool(self):
         logger.info("Running citation pool construction...")
