@@ -832,3 +832,121 @@ def test_tier1_count_of_ungrounded_caught(
     )
     ungrounded_classes = {f["match_class"] for f in out["findings"]}
     assert "count_of" in ungrounded_classes
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 Tier R-6: early references.md render in phase_drafting
+#
+# The Tier R commit message claimed "adversarial reviewer tolerates
+# missing files." Live test of ibd_phage_targeting/draft_2 on
+# 2026-05-18 falsified that claim — adversarial exited rc=2 with
+# "required input missing: references.md" because phase_review fires
+# BEFORE phase_supplementary_pool's _finalize_citation_render. Tier R-6
+# wires a first-render call into the end of phase_drafting so Tier 3
+# has references.md available when it runs.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_render_double_call_is_idempotent_on_clean_pool(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """Calling _finalize_citation_render twice with the same manuscript
+    must produce stable output. This is the Tier R-6 invariant: the
+    end-of-phase_drafting call AND the end-of-phase_supplementary_pool
+    call both run on the same pool when no [NEEDS CITATION] markers
+    were inserted; the result must be unchanged."""
+    _write_citation_pool(orch.draft_dir, ["Smith2020", "Jones2021"])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nFirst cite [Smith2020].\n\n"
+        "## Results\n\nSecond cite [Jones2021].\n",
+        encoding="utf-8",
+    )
+
+    # First render (simulating end of phase_drafting).
+    orch._finalize_citation_render()
+    refs_first = (orch.draft_dir / "references.md").read_text()
+    cmap_first = (orch.draft_dir / "citation_map.md").read_text()
+    pool_first = (orch.draft_dir / "citation_pool.json").read_text()
+
+    # Second render (simulating end of phase_supplementary_pool with
+    # no resolved [NEEDS CITATION] markers in this scenario).
+    orch._finalize_citation_render()
+    refs_second = (orch.draft_dir / "references.md").read_text()
+    cmap_second = (orch.draft_dir / "citation_map.md").read_text()
+    pool_second = (orch.draft_dir / "citation_pool.json").read_text()
+
+    assert refs_first == refs_second, \
+        "double-render must produce byte-identical references.md"
+    assert cmap_first == cmap_second, \
+        "double-render must produce byte-identical citation_map.md"
+    assert pool_first == pool_second, \
+        "double-render must produce byte-identical citation_pool.json"
+
+
+def test_finalize_render_picks_up_new_keys_on_second_call(
+    orch: PaperWriterOrchestrator,
+) -> None:
+    """When the manuscript gains a new [Key] between the two render
+    calls (simulating phase_supplementary_pool resolving a
+    [NEEDS CITATION] marker), the second render must include it in
+    the rendered references.md. This is the Tier R-6 forward-compat
+    test: the double-render contract must absorb new citations."""
+    # Pool has both keys, but the manuscript only initially cites one.
+    _write_citation_pool(orch.draft_dir, ["Smith2020", "Jones2021"])
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nCite [Smith2020].\n",
+        encoding="utf-8",
+    )
+
+    # First render — only Smith2020 cited in prose.
+    orch._finalize_citation_render()
+    refs_first = (orch.draft_dir / "references.md").read_text()
+    pool_first = json.loads(
+        (orch.draft_dir / "citation_pool.json").read_text()
+    )
+    assert "Smith2020" in pool_first["citation_map"]
+    assert "Jones2021" not in pool_first["citation_map"]
+
+    # Simulate phase_supplementary_pool adding a [Jones2021] in prose.
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nCite [Smith2020].\n\n"
+        "## Results\n\nResolved [Jones2021].\n",
+        encoding="utf-8",
+    )
+
+    # Second render — must pick up Jones2021.
+    orch._finalize_citation_render()
+    pool_second = json.loads(
+        (orch.draft_dir / "citation_pool.json").read_text()
+    )
+    refs_second = (orch.draft_dir / "references.md").read_text()
+    assert "Jones2021" in pool_second["citation_map"], \
+        "second render must absorb the new key"
+    assert "Jones2021" in refs_second, \
+        "references.md must contain a Jones2021 row after re-render"
+    assert refs_second != refs_first, \
+        "references.md must change between renders when prose changes"
+
+
+def test_finalize_render_no_op_on_missing_pool_doesnt_break_phase_drafting(
+    orch: PaperWriterOrchestrator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If citation_pool.json is missing at end of phase_drafting,
+    _finalize_citation_render logs WARNING and returns. Pipeline
+    continues. This protects fresh runs where citation_pool didn't
+    yet exist (e.g., a partial pipeline state on resume)."""
+    (orch.draft_dir / "manuscript.md").write_text(
+        "## Methods\n\nCite [Smith2020].\n",
+        encoding="utf-8",
+    )
+    # Note: citation_pool.json deliberately absent.
+
+    with caplog.at_level("WARNING", logger="orchestrator"):
+        orch._finalize_citation_render()
+
+    # No crash. references.md not created.
+    assert not (orch.draft_dir / "references.md").is_file()
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "pool file" in msgs.lower()
+    assert "not present" in msgs.lower()
