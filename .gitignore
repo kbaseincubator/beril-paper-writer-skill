@@ -52,3 +52,4 @@ papers/cost-log.jsonl
 
 # Ruff cache
 .ruff_cache/
+smoke-test/stage7/runs/

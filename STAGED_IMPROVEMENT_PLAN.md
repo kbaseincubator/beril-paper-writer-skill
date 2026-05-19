@@ -527,15 +527,138 @@ claim_inventory → methods_provenance bridge; `source_test` column;
 bidirectional consistency check. Per M1_M2_CONTRACT_DRAFT.md
 sections 2–5.
 
-### Stage 7 — Multi-project validation (~1 week)
-*(originally Stage 6)*
+### Stage 7 — Multi-project validation (~3 weeks elapsed, ~$70-110 LLM)
+*(originally Stage 6; expanded into the v1-MVP path 2026-05-18)*
 
-**Trigger:** Stages 1–6 ship.
+**Trigger:** Stage 4 closed 2026-05-18 (Tier R + T + S shipped).
+Stages 5 + 6 deferred to v1.1 per Adam 2026-05-18; only the
+partial-Stage-6 work (`[Cxxx]` markers in prose + marker
+validator) ships as part of v1-MVP.
 
-**Goal:** validate that the pipeline holds across the 60+ BERDL
-projects, not just `ibd_phage_targeting`. Per
-M1_M2_CONTRACT_DRAFT.md §6. Dev (5) / holdout (5) / wild
-(~50) split.
+**Goal:** validate that the pipeline holds across BERDL projects
+beyond the two STRONG-tier 100KB+ outliers we've tested
+(functional_dark_matter, ibd_phage_targeting). The MVP scope is
+**6 projects (3 dev + 3 holdout)**, not the full 5/5/~50 split —
+wild-set goes to v1.1.
+
+#### v1-MVP success criteria (locked 2026-05-18 by Adam)
+
+Encoded in `smoke-test/stage7/collect_metrics.py`:
+
+```python
+PASS_CRITERIA = {
+    "reached_assembled":       True,
+    "min_validators_pass_or_na": 8,
+    "max_p0_findings":         5,
+    "max_cost_usd":            10.0,
+}
+```
+
+**SHIP v1** when 3/3 holdout projects meet all four criteria.
+
+#### Locked project set (v0.8.x snapshot of the BERDL catalog)
+
+Selected for diversity across scientific shape × REPORT size ×
+estimated tier. Both fdm and ibd are EXCLUDED — they are 100KB+
+outliers, not representative. Source: `project_set.tsv`.
+
+| Set | Project | REPORT KB | NBs | Shape | Tier estimate |
+|---|---|---|---|---|---|
+| dev | conservation_vs_fitness | 11 | 4 | conservation/fitness comparative | THIN |
+| dev | amr_pangenome_atlas | 20 | 7 | pangenome atlas | STRONG-leaning |
+| dev | phb_granule_ecology | 38 | 6 | ecology | STRONG |
+| holdout | respiratory_chain_wiring | 14 | 5 | biochemistry mechanistic | THIN-STRONG |
+| holdout | adp1_triple_essentiality | 52 | 5 | single-organism deep dive | STRONG |
+| holdout | metal_specificity | 18 | 4 | metals mechanism | STRONG-leaning |
+
+#### Phase plan
+
+**A — Pre-flight (DONE 2026-05-18, no LLM).** Harness built under
+`smoke-test/stage7/`:
+- `project_set.tsv` — single source of truth for the 6 projects.
+- `run_project.sh` — unattended driver: `draft → continue --pick TL1
+  → continue --remediate --max-remediate-cycles 1`. Auto-detects
+  pre-Tier-S installs and refuses. Tees full output to
+  `smoke-test/stage7/runs/<project>_<ts>.log`.
+- `collect_metrics.py` — per-draft metrics dataclass with auto-
+  discovery. Encodes PASS_CRITERIA. Read-only against state.json
+  + audit/.
+- `aggregate.py` — multi-project results table → `smoke-test/
+  stage7/results/stage7_results_<ts>.md` with v1 ship/no-ship
+  decision baked in.
+
+**B — Stage 6 partial: `[Cxxx]` markers in prose (3-4 days, ~$10-15
+LLM).** PENDING.
+- Update `holistic_draft.v1.md` to emit `[Cxxx]` markers inline
+  after each quantitative claim and each assertion-shaped
+  sentence. Pointers resolve to `claim_inventory.tsv.claim_id`.
+- New validator `tools/check_claim_markers.py`. Pattern mirrors
+  `check_numeric_grounding.py`. Schema: `claim-marker-check.v1`.
+  Severity: **P1 in v1** (advisory; doesn't gate). Promote to P0
+  in v1.1 if data warrants.
+- Wire into `phase_review` Tier 1.
+- ~15 unit tests + 1 smoke test on `ibd_phage_targeting/draft_2`.
+- Defers: methods_provenance bridge + `source_test` column +
+  bidirectional consistency check — all v1.1.
+
+**C — Dev runs (1-2 weeks, ~$30-60 LLM).** PENDING.
+- Run D1 (conservation_vs_fitness) → D2 (amr_pangenome_atlas) →
+  D3 (phb_granule_ecology).
+- **Patching rule** (locked 2026-05-18 by Adam): patch only
+  *systematic* failures (prompt misunderstands a tier, validator
+  has wrong assumption about project shape). Project-specific
+  quirks → document as known limit in README; no patch.
+- Stabilize: re-run D1+D2 with patches after D3, confirm no
+  regressions on baselines (fdm + ibd).
+- **Gate to phase D:** total dev spend < $80; ≤ 5 patches across
+  the 3 projects. Higher → pause and reconsider.
+
+**D — Holdout runs (2-3 days, ~$30 LLM).** PENDING.
+- Run H1+H2+H3 BLIND. No patching during this phase. Patches
+  discovered here become v1.1 punch list.
+- **v1 ship gate:** 3/3 holdout pass → ship v1. 2/3 → post-mortem,
+  Adam decides ship vs hold. ≤1/3 → don't ship v1.
+
+**E — Documentation hardening (4-8h, no LLM).** PENDING.
+- RELEASE_NOTES.md — write the v1 story (Stage 1 → Stage 4 →
+  partial-6 → 7).
+- README.md — what the skill does, doesn't do, install steps,
+  operator workflow. Document the cumulative `--max-cost-usd`
+  semantic.
+- SPEC.md + LAYOUT.md + DECISIONS.md — audit current state vs
+  code; pin v1 contract.
+- Slash-command markdowns — audit for v0.7+ drift (carryover
+  from Stage 2 Tier F backlog).
+- Tier S-10 UX nit: surface `cost_so_far_usd` in `p0_findings.md`.
+  ~20 LOC + 1 test.
+
+**F — Ship v1 (0 work).** Tag v1.0.0; update augmentation-stream-
+plan.md; begin drafting stream-level architectural retrospective.
+
+#### Risk register
+
+| # | Risk | Probability | Mitigation |
+|---|---|---|---|
+| 1 | THIN/EXPLORATORY tier reveals prompt assumes STRONG-tier rigor | High | Iteration in C; document tier behavior in patch log |
+| 2 | `--mode=report` path is broken (untested in current pipeline) | Med-high | Explicit dev run with `--mode=report` if any dev project triages to EXPLORATORY; patch in C if broken |
+| 3 | Holdout reveals an unfixable generalization gap | Medium | Defer to v1.1; ship v1 with documented limit |
+| 4 | Adversarial CLI silent-failure reproduces during stage 7 | Medium | Tier S-9 backstop fires; if frequent, file beril-adversarial bug with logs |
+| 5 | Cost ceiling ($10/draft) breached on complex projects | Medium | May indicate the architecture isn't right for that shape; defer to v1.1 |
+| 6 | Patches in C cause regressions on fdm + ibd baselines | Low | Smoke-test against both after each patch |
+| 7 | Stage 6 `[Cxxx]` marker emission rate too low under Opus | Medium | Iterate B-phase prompt; if it doesn't take, drop Stage 6 from v1 |
+
+#### Deferred to v1.1 (explicit non-goals for v1-MVP)
+
+- **Full Stage 6:** claim_inventory → methods_provenance bridge,
+  `source_test` column, bidirectional consistency check. Only
+  the `[Cxxx]` markers + marker validator ship in v1.
+- **Stage 5:** per-class optimizer dispatch. Tier S largely
+  subsumed it.
+- Multi-cycle remediation convergence study.
+- Per-invocation `--max-cost-usd` flag rework (cumulative
+  semantic surprises operators).
+- Wild-set validation (~50 projects).
+- Multi-cycle remediation patterns.
 
 ---
 

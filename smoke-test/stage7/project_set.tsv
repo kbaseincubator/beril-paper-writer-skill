@@ -1,0 +1,7 @@
+set	project_id	report_kb	notebooks	shape	tier_estimate	notes
+dev	conservation_vs_fitness	11	4	conservation_fitness_comparative	THIN	smallest dev project; fastest iteration
+dev	amr_pangenome_atlas	20	7	pangenome_atlas	STRONG-leaning	median size; AMR domain untested
+dev	phb_granule_ecology	38	6	ecology	STRONG	largest dev project; ecology shape distinct from microbiome-disease
+holdout	respiratory_chain_wiring	14	5	biochemistry_mechanistic	THIN-STRONG	small + mechanistic; different shape from dev set
+holdout	adp1_triple_essentiality	52	5	single_organism_deep_dive	STRONG	largest holdout; ADP1 organism focus
+holdout	metal_specificity	18	4	metals_mechanism	STRONG-leaning	medium; mechanism-shape; distinct from atlas-shape D2
