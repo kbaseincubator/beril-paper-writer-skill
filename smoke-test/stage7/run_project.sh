@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Stage 7 v1-MVP validation harness — single-project driver.
 #
-# Drives beril-paper-writer end-to-end on one BERDL project:
+# Drives beril-paper-writer on one BERDL project to the v1-MVP
+# measurement point (no-auto-remediate, per Adam's 2026-05-19
+# decision):
 #   1. `beril-paper-writer draft <project>` → pause at throughline_pick
-#   2. `beril-paper-writer continue <draft_dir> --pick TL1` → pause at p0_review
-#   3. `beril-paper-writer continue <draft_dir> --remediate --max-remediate-cycles 1`
-#   4. Wait for terminal phase (assembled / paused-at-p0-review-with-cap-exhausted)
+#   2. `beril-paper-writer continue <draft_dir> --pick TL1`
+#      → pause at p0_review (the measurement point) OR assembled
+#        (rare; only when zero P0s)
+#   3. STOP. The operator decides whether to invoke remediation
+#      themselves based on p0_findings.md; the harness does not.
 #
 # All output (stdout+stderr) is teed to a per-run log under runs/. Exit code:
-#   0  reached assembled OR paused-at-p0-review-after-remediation (operator-decidable)
+#   0  reached p0_review OR assembled — measurement is meaningful
 #   1  setup error (project not found, no CLI on PATH, etc.)
 #   2  pipeline hard-fail (LLM error, crash, etc.)
 #
@@ -143,25 +147,32 @@ print(json.loads(p.read_text()).get('phase', 'unknown'))
 echo
 echo "phase after step 2: $CURRENT_PHASE"
 
-# Possible terminal phases at this point:
-#   p0_review  — gate paused us; proceed to step 3 (remediate)
-#   assembled  — no P0s; pipeline finished on its own
+# v1-MVP measurement model (locked 2026-05-19): the harness ALWAYS
+# pauses at first p0_review. Adversarial-reviewer sampling variance
+# (Stage 7 dev runs forensic, V1_X_BACKLOG.md #37: 40-80% stable
+# core + 1-5 new findings per run; D3 case found 3 entirely new P0s
+# after the drafter changed 1 word in 71KB of manuscript) means
+# auto-remediation introduces noise on already-good drafts. The
+# operator decides whether to remediate per project — invoking
+# `beril-paper-writer continue <draft_dir> --remediate` themselves
+# when the p0_findings.md content warrants.
+#
+# Phase D verdict is based on the first-cut quality at the p0_review
+# pause: did the drafter produce an operator-shippable starting point?
+# Bar is enforced in collect_metrics.py.
+#
+# Possible terminal phases here:
+#   p0_review  — gate paused; this is the v1-MVP measurement point
+#   assembled  — no P0s, pipeline auto-finished (rare); also a pass
 #   anything else — unexpected; flag for diagnosis
 if [[ "$CURRENT_PHASE" == "assembled" ]]; then
   echo
-  echo "note: pipeline finished without entering remediation (no P0 findings)"
-  echo "skipping step 3."
+  echo "note: pipeline finished without any P0s — no remediation needed."
 elif [[ "$CURRENT_PHASE" == "p0_review" ]]; then
   echo
-  echo "--- step 3: beril-paper-writer continue $DRAFT_DIR --remediate --max-remediate-cycles 1 ---"
-  if ! beril-paper-writer continue "$DRAFT_DIR" --remediate --max-remediate-cycles 1; then
-    RC=$?
-    # PipelineHalted at cycles-exhausted is OK (sys.exit 0 per continue_run.py
-    # under run_pipeline's try/except PipelineHalted). A non-zero here is a
-    # genuine error.
-    echo "error: continue --remediate exited $RC" >&2
-    # Don't hard-fail; let the metrics collector make the call.
-  fi
+  echo "Pipeline paused at p0_review (the v1-MVP measurement point)."
+  echo "To run operator-driven remediation, invoke:"
+  echo "  beril-paper-writer continue $DRAFT_DIR --remediate --max-remediate-cycles N"
 else
   echo
   echo "warning: continue --pick TL1 left phase at $CURRENT_PHASE (expected p0_review or assembled)"

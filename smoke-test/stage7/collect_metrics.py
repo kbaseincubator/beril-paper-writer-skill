@@ -1,22 +1,50 @@
 """Stage 7 v1-MVP — per-draft metrics collector.
 
 Reads a paper-writer draft directory's state.json + audit artifacts and
-emits the metrics needed to evaluate the v1-MVP success criteria:
+emits the metrics needed to evaluate the v1-MVP success criteria.
 
-    reached_assembled        — phase == "assembled"
-    validators_pass_or_na    — count of validators marked "pass" or
-                               "not-applicable" in state.validator_status
-    p0_count                 — total P0 findings across adversarial +
-                               numeric_grounding (post-remediation)
-    cost_so_far_usd          — cumulative LLM spend
-    silent_failures          — count of canonical-silent-fail review_modes
-                               observed (Tier S-9a signal)
-
-Success bar (locked 2026-05-18 by Adam):
-    reaches_assembled        = True
+Success bar (locked 2026-05-18 by Adam, STAGED_IMPROVEMENT_PLAN.md):
+    reached_assembled        = True
     validators_pass_or_na   >= 8
-    p0_count                <= 5
+    p0_count                <= 5  (combined adversarial + numeric_grounding)
     cost_so_far_usd         <= 10.0
+
+v1-bar v2a (2026-05-20) ships ONLY orthogonal pieces and leaves the
+locked bar unchanged:
+
+    1. First-cut measurement via audit/iter_1/ snapshot. When a draft
+       has been remediated, the bar evaluates the pre-remediation
+       state, not the post-remediation state. Under the no-auto-
+       remediate harness (Adam's 2026-05-19 decision) most drafts
+       will not have iter_1/; audit/ IS first-cut. iter_1/ remains
+       the right read for historical remediated drafts and for any
+       project the operator manually remediates.
+
+    2. INCONCLUSIVE verdict for malformed adversarial JSON. When the
+       adversarial reviewer emits unescaped inner quotes (known
+       failure mode per feedback_llm_json_unfixable_in_parser.md),
+       strict json.loads returns 0 P0s — which would FALSELY pass
+       the bar on the partial Tier-T-only count. We detect parse
+       failure and label INCONCLUSIVE so the verdict is honest.
+
+    3. Cost-first-cut subtraction. When iter_1/ snapshot is in play,
+       cost_so_far_usd is rolled back by the remediation drafter +
+       review costs to attribute spend correctly. See #43 in
+       V1_X_BACKLOG.md — review_cost_usd is currently unpopulated by
+       the producer; the subtraction handles it via `or 0.0` for
+       forward compatibility.
+
+    4. New diagnostic fields (adversarial_p0_count, tier_t_ungrounded_count,
+       claim_markers_*, adversarial_json_parseable) collected from
+       disk and reported, but NOT in crit_all. These feed v2b's
+       upcoming bar revision after #41 (Tier T extractor false-
+       positive fix) ships clean numbers.
+
+v2b will replace PASS_CRITERIA wholesale once #41 + the same-manuscript
+double-review measurement (#37 lever 4) are resolved. Under the no-
+auto-remediate harness `reached_assembled = True` cannot be satisfied
+without operator-driven remediation; that's the semantic mismatch v2b
+addresses. v2a stays faithful to what was locked 2026-05-18.
 
 Usage:
     python collect_metrics.py <draft_dir>
@@ -40,54 +68,107 @@ from typing import Any, Optional
 # unambiguous. Edit ONE place if Adam's decision shifts.
 # --------------------------------------------------------------------------
 
+# v1-bar v2a (2026-05-20): unchanged from the locked plan
+# (STAGED_IMPROVEMENT_PLAN.md, 2026-05-18). v2b will revise after
+# #41 + #37-lever-4 land.
+#
+# NOTE: under the no-auto-remediate harness (Adam's 2026-05-19
+# decision) the pipeline pauses at p0_review and the locked
+# `reached_assembled = True` cannot be satisfied without operator-
+# driven remediation. v2a evaluates faithfully to the locked bar;
+# expect every no-auto-remediate run to FAIL on this criterion until
+# v2b updates the measurement-point semantic.
 PASS_CRITERIA = {
-    "reached_assembled":       True,
+    "reached_assembled":         True,
     "min_validators_pass_or_na": 8,
-    "max_p0_findings":         5,
-    "max_cost_usd":            10.0,
+    "max_p0_findings":           5,
+    "max_cost_usd":              10.0,
 }
 
 
 @dataclass
 class ProjectMetrics:
-    """One project's metrics as collected from disk artifacts."""
+    """One project's metrics as collected from disk artifacts.
 
-    project_id:               str
-    draft_dir:                str
-    final_phase:              str
-    reached_assembled:        bool
-    validators_pass_or_na:    int
-    validators_total:         int
-    validator_breakdown:      dict[str, int]    # status → count
-    p0_total:                 int               # post-filter, gate's view
-    p0_by_source:             dict[str, int]
-    p0_by_class:              dict[str, int]
-    p0_demoted_count:         int               # P3-filtered findings
-    cost_so_far_usd:          float
-    remediation_cycles_used:  int
-    silent_failures:          int
-    notes:                    list[str] = field(default_factory=list)
+    Includes both the locked-bar fields and the v1-bar v2a diagnostic
+    fields. Only the locked-bar fields enter crit_all evaluation; the
+    diagnostics are reported but not gating.
+    """
 
-    # Pass/fail booleans against PASS_CRITERIA.
-    crit_reached_assembled:   bool = False
-    crit_validators_ok:       bool = False
-    crit_p0_ok:               bool = False
-    crit_cost_ok:             bool = False
-    crit_all:                 bool = False
+    # Identity / phase.
+    project_id:                     str
+    draft_dir:                      str
+    final_phase:                    str
+
+    # Locked bar inputs.
+    reached_assembled:              bool
+    validators_pass_or_na:          int
+    validators_total:               int
+    validator_breakdown:            dict[str, int]
+    p0_total:                       int            # adv + Tier T combined
+    p0_by_source:                   dict[str, int]
+    p0_by_class:                    dict[str, int]
+    p0_demoted_count:               int
+    cost_so_far_usd:                float          # first-cut adjusted
+    remediation_cycles_used:        int
+    silent_failures:                int
+
+    # v2a diagnostic fields (NOT in crit_all; feed v2b bar revision).
+    reached_p0_review_or_assembled: bool = False   # measurement-point check
+    adversarial_p0_count:           int = 0
+    tier_t_ungrounded_count:        int = 0
+    claim_markers_total:            int = 0
+    claim_markers_unique:           int = 0
+    claim_markers_resolved:         int = 0
+    claim_markers_resolved_pct:     float = 0.0
+    adversarial_json_parseable:     bool = True
+
+    notes:                          list[str] = field(default_factory=list)
+
+    # Pass/fail booleans against the LOCKED PASS_CRITERIA.
+    crit_reached_assembled:    bool = False
+    crit_validators_ok:        bool = False
+    crit_p0_ok:                bool = False
+    crit_cost_ok:              bool = False
+    crit_all:                  bool = False
+    overall_label:             str = "FAIL"   # PASS | FAIL | INCONCLUSIVE
 
     def evaluate(self) -> None:
-        self.crit_reached_assembled = self.reached_assembled == PASS_CRITERIA["reached_assembled"]
+        """Evaluate the locked 4-criteria bar.
+
+        INCONCLUSIVE handling: when adversarial JSON is unparseable,
+        p0_total under-counts (Tier T alone is countable). If the
+        partial count would otherwise PASS the bar, the verdict is
+        INCONCLUSIVE — we can't claim PASS without measurable
+        adversarial findings. If the partial count already exceeds
+        the threshold, FAIL is still defensible (we know it fails).
+        """
+        self.crit_reached_assembled = (
+            self.reached_assembled == PASS_CRITERIA["reached_assembled"]
+        )
         self.crit_validators_ok = (
             self.validators_pass_or_na >= PASS_CRITERIA["min_validators_pass_or_na"]
         )
         self.crit_p0_ok = self.p0_total <= PASS_CRITERIA["max_p0_findings"]
-        self.crit_cost_ok = self.cost_so_far_usd <= PASS_CRITERIA["max_cost_usd"]
+        self.crit_cost_ok = (
+            self.cost_so_far_usd <= PASS_CRITERIA["max_cost_usd"]
+        )
         self.crit_all = all([
             self.crit_reached_assembled,
             self.crit_validators_ok,
             self.crit_p0_ok,
             self.crit_cost_ok,
         ])
+
+        if not self.adversarial_json_parseable and self.crit_p0_ok:
+            # Adversarial unparseable; partial count looks OK but is
+            # incomplete. Cannot claim PASS.
+            self.overall_label = "INCONCLUSIVE"
+            self.crit_all = False
+        elif self.crit_all:
+            self.overall_label = "PASS"
+        else:
+            self.overall_label = "FAIL"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -228,6 +309,24 @@ def _count_silent_failures(audit_dir: Path) -> int:
     return 0
 
 
+def _collect_claim_marker_stats(
+    audit_dir: Path,
+) -> tuple[int, int, int, float]:
+    """Read claim_marker_check.json. Returns (total_markers,
+    unique_markers, resolved_unique, resolved_pct). Returns zeros
+    when the file is absent (claim markers were a Phase B feature;
+    pre-Phase-B drafts won't have this artifact)."""
+    data = _load_json_safe(audit_dir / "claim_marker_check.json")
+    if not isinstance(data, dict):
+        return 0, 0, 0, 0.0
+    totals = data.get("totals") or {}
+    total = int(totals.get("markers_in_manuscript", 0))
+    unique = int(totals.get("unique_markers_in_manuscript", 0))
+    resolved = int(totals.get("cited_and_resolved", 0))
+    pct = (100.0 * resolved / unique) if unique > 0 else 100.0
+    return total, unique, resolved, pct
+
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -240,20 +339,110 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
     pid = project_id or state.get("project_id") or draft_dir.parent.parent.name
     final_phase = str(state.get("phase", "unknown"))
     validators_ok, validators_total, breakdown = _count_validators(state)
-    p0_total, p0_by_source, p0_by_class, p0_demoted = _count_p0s(audit_dir)
-    cost = float(state.get("cost_so_far_usd", 0.0))
-    cycles = len(state.get("remediation_cycles", []))
+
+    # v1-bar v2a: measure the FIRST-CUT state when the draft has been
+    # remediated. audit/iter_1/ holds the snapshot of audit JSONs at
+    # the first P0 gate pause — that's the first-cut quality we want
+    # to measure. If iter_1/ doesn't exist (no remediation has run
+    # yet), audit/ IS the first-cut state. Under the no-auto-
+    # remediate harness (Adam's 2026-05-19 decision), drafts naturally
+    # have audit/ as first-cut (iter_1/ never created).
+    iter1_dir = audit_dir / "iter_1"
+    if iter1_dir.is_dir() and (iter1_dir / "adversarial_review.json").is_file():
+        # Remediated draft — measure pre-remediation state via snapshot.
+        measurement_dir = iter1_dir
+        # Cost at first-cut = total - remediation drafter + review spend.
+        # review_cost_usd is currently unpopulated by the producer
+        # (V1_X_BACKLOG.md #43); the `or 0.0` makes this forward-
+        # compatible when the producer fix lands.
+        cycles_data = state.get("remediation_cycles", [])
+        remediation_spend = sum(
+            float(c.get("drafter_cost_usd", 0.0) or 0.0)
+            + float(c.get("review_cost_usd", 0.0) or 0.0)
+            for c in cycles_data
+        )
+        cost_first_cut = float(state.get("cost_so_far_usd", 0.0)) - remediation_spend
+    else:
+        measurement_dir = audit_dir
+        cost_first_cut = float(state.get("cost_so_far_usd", 0.0))
+
+    p0_total, p0_by_source, p0_by_class, p0_demoted = _count_p0s(measurement_dir)
+
+    # Empirical (D3 2026-05-19): adversarial reviewer occasionally
+    # emits malformed JSON (unescaped inner quotes per
+    # feedback_llm_json_unfixable_in_parser.md). Strict json.loads
+    # fails → the strict-count path in p0_gate returns 0 adversarial
+    # P0s, which would FALSELY pass a project whose true first-cut
+    # adversarial output contained P0s. Detect parse failure and
+    # surface as INCONCLUSIVE at evaluate().
+    adv_json_parseable = True
+    adv_json_path = measurement_dir / "adversarial_review.json"
+    if adv_json_path.is_file():
+        try:
+            json.loads(adv_json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            adv_json_parseable = False
+        except OSError:
+            adv_json_parseable = False
+    else:
+        adv_json_parseable = False  # missing entirely is also inconclusive
+
+    # v2a diagnostic split — collected but not gating.
+    adv_p0 = int(p0_by_source.get("adversarial", 0))
+    tier_t_p0 = int(p0_by_source.get("numeric_grounding", 0))
+
+    # Claim marker stats — prefer measurement_dir, fall back to audit/.
+    # iter_1/ snapshots from pre-Phase-B drafts may not carry the
+    # claim_marker_check.json artifact.
+    cm_path_candidates = [
+        measurement_dir / "claim_marker_check.json",
+        audit_dir / "claim_marker_check.json",
+    ]
+    cm_dir_for_stats = next(
+        (p.parent for p in cm_path_candidates if p.is_file()),
+        audit_dir,
+    )
+    cm_total, cm_unique, cm_resolved, cm_pct = _collect_claim_marker_stats(
+        cm_dir_for_stats,
+    )
+
+    cycles_count = len(state.get("remediation_cycles", []))
     silent = _count_silent_failures(audit_dir)
 
+    reached_measurement_point = final_phase in {
+        "p0_review", "remediate", "optimize", "supplementary_pool",
+        "compliance_gate", "assemble", "assembled",
+    }
+
     notes: list[str] = []
-    if final_phase not in {"assembled", "p0_review", "compliance_gate"}:
-        notes.append(f"unexpected terminal phase: {final_phase}")
+    if not reached_measurement_point:
+        notes.append(
+            f"pipeline did not reach p0_review: stopped at {final_phase!r}"
+        )
     if silent > 0:
         notes.append(
             "adversarial silent-failure observed; gate may have evaluated stale audit"
         )
-    if validators_total == 0:
-        notes.append("no validators ran (state.validator_status is empty)")
+    if validators_total == 0 and final_phase != "assembled":
+        notes.append(
+            "no validators ran — expected when paused at p0_review pre-assemble; "
+            "the locked bar's min_validators_pass_or_na=8 cannot be satisfied "
+            "in this state (v2b resolves the harness/bar semantic mismatch)"
+        )
+    if cycles_count > 0:
+        notes.append(
+            f"draft has been remediated ({cycles_count} cycle(s)); v1-bar measures "
+            f"FIRST-CUT state from audit/iter_1/ snapshot. To see "
+            f"post-remediation state, inspect audit/ directly."
+        )
+    if not adv_json_parseable:
+        notes.append(
+            "adversarial_review.json at the measurement point is MALFORMED "
+            "(unescaped inner quotes per known LLM failure mode). p0_total "
+            "is UNRELIABLE — Tier T findings are counted but adversarial "
+            "P0s cannot be enumerated. Verdict labeled INCONCLUSIVE rather "
+            "than PASS."
+        )
 
     m = ProjectMetrics(
         project_id=pid,
@@ -267,9 +456,17 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
         p0_by_source=p0_by_source,
         p0_by_class=p0_by_class,
         p0_demoted_count=p0_demoted,
-        cost_so_far_usd=cost,
-        remediation_cycles_used=cycles,
+        cost_so_far_usd=cost_first_cut,
+        remediation_cycles_used=cycles_count,
         silent_failures=silent,
+        reached_p0_review_or_assembled=reached_measurement_point,
+        adversarial_p0_count=adv_p0,
+        tier_t_ungrounded_count=tier_t_p0,
+        claim_markers_total=cm_total,
+        claim_markers_unique=cm_unique,
+        claim_markers_resolved=cm_resolved,
+        claim_markers_resolved_pct=cm_pct,
+        adversarial_json_parseable=adv_json_parseable,
         notes=notes,
     )
     m.evaluate()
@@ -320,48 +517,75 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.json:
         print(json.dumps(m.to_dict(), indent=2))
-        return 0 if m.crit_all else 2
+        if m.crit_all:
+            return 0
+        return 3 if m.overall_label == "INCONCLUSIVE" else 2
 
-    # Human-readable.
-    status_glyph = "PASS" if m.crit_all else "FAIL"
-    print(f"=== {m.project_id} — {status_glyph} ===")
-    print(f"  draft_dir:           {m.draft_dir}")
-    print(f"  final_phase:         {m.final_phase}")
+    # Human-readable (v1-bar v2a).
+    print(f"=== {m.project_id} — {m.overall_label} ===")
+    print(f"  draft_dir:   {m.draft_dir}")
+    print(f"  final_phase: {m.final_phase}")
+    print()
+    print("  locked bar (STAGED_IMPROVEMENT_PLAN.md 2026-05-18):")
     print(
-        f"  reached_assembled:   {m.reached_assembled}  "
+        f"    reached_assembled:    {m.reached_assembled}  "
         f"[crit: {'OK' if m.crit_reached_assembled else 'FAIL'}]"
     )
     print(
-        f"  validators_pass+NA:  {m.validators_pass_or_na} / "
+        f"    validators_pass+NA:   {m.validators_pass_or_na} / "
         f"{m.validators_total}  "
         f"[crit: >= {PASS_CRITERIA['min_validators_pass_or_na']} → "
         f"{'OK' if m.crit_validators_ok else 'FAIL'}]"
     )
-    print(f"  validator breakdown: {m.validator_breakdown}")
-    print(
-        f"  p0_total:            {m.p0_total}  "
-        f"[crit: <= {PASS_CRITERIA['max_p0_findings']} → "
-        f"{'OK' if m.crit_p0_ok else 'FAIL'}]"
-    )
-    print(f"  p0_by_source:        {m.p0_by_source}")
-    print(f"  p0_by_class:         {m.p0_by_class}")
-    if m.p0_demoted_count > 0:
+    if not m.adversarial_json_parseable:
         print(
-            f"  p0_demoted (filter): {m.p0_demoted_count} "
-            "(NEEDS CITATION + pre-compliance Data Availability)"
+            f"    p0_total:             {m.p0_total} (Tier T only; adversarial "
+            f"UNPARSEABLE)  [crit: <= {PASS_CRITERIA['max_p0_findings']} → "
+            f"{'OK' if m.crit_p0_ok else 'FAIL'} (partial)]"
+        )
+    else:
+        print(
+            f"    p0_total:             {m.p0_total}  "
+            f"[crit: <= {PASS_CRITERIA['max_p0_findings']} → "
+            f"{'OK' if m.crit_p0_ok else 'FAIL'}]"
         )
     print(
-        f"  cost_so_far_usd:     ${m.cost_so_far_usd:.2f}  "
+        f"    cost_so_far_usd:      ${m.cost_so_far_usd:.2f}  "
         f"[crit: <= ${PASS_CRITERIA['max_cost_usd']:.2f} → "
         f"{'OK' if m.crit_cost_ok else 'FAIL'}]"
     )
-    print(f"  remediation_cycles:  {m.remediation_cycles_used}")
-    print(f"  silent_failures:     {m.silent_failures}")
+    print()
+    print("  v2a diagnostic detail (not in bar):")
+    print(
+        f"    reached_measurement_point: {m.reached_p0_review_or_assembled} "
+        f"(p0_review|...|assembled)"
+    )
+    print(f"    adversarial_P0:            {m.adversarial_p0_count}"
+          + ("  (UNRELIABLE — JSON malformed)" if not m.adversarial_json_parseable else ""))
+    print(f"    Tier T ungrounded:         {m.tier_t_ungrounded_count}")
+    print(
+        f"    claim markers:             {m.claim_markers_resolved}/"
+        f"{m.claim_markers_unique} resolved "
+        f"({m.claim_markers_resolved_pct:.1f}%)"
+    )
+    print(f"    p0_by_source:              {m.p0_by_source}")
+    print(f"    p0_by_class:               {m.p0_by_class}")
+    if m.p0_demoted_count > 0:
+        print(
+            f"    p0_demoted:                {m.p0_demoted_count} "
+            "(NEEDS CITATION + pre-compliance Data Availability filtered)"
+        )
+    print(f"    validator_breakdown:       {m.validator_breakdown}")
+    print(f"    remediation_cycles:        {m.remediation_cycles_used}")
+    print(f"    silent_failures:           {m.silent_failures}")
     if m.notes:
+        print()
         print("  notes:")
         for n in m.notes:
             print(f"    - {n}")
-    return 0 if m.crit_all else 2
+    if m.crit_all:
+        return 0
+    return 3 if m.overall_label == "INCONCLUSIVE" else 2
 
 
 if __name__ == "__main__":
