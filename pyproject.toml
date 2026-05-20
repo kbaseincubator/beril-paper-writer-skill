@@ -171,6 +171,14 @@ exclude = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers"
+# Make tests find the src-layout package without requiring an
+# editable install. A fresh `pytest` from the repo root now works
+# without any prior `pip install -e .` step. Diagnosed 2026-05-20
+# after Adam's Anaconda-pip / homebrew-pytest interpreter mismatch
+# revealed the test suite wasn't self-bootstrapping; the editable
+# install is still the right move for running the CLI, but the
+# test suite should not depend on it.
+pythonpath = ["src"]
 markers = [
     "integration: marks tests that hit live LLM CLIs (deselect with '-m \"not integration\"')",
     "slow: marks tests that take >5s",
