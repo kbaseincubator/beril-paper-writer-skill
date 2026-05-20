@@ -1998,3 +1998,89 @@ class TestB1hAllowlistsInUserPrompt:
             "allowlist must appear before INPUTS so the LLM sees the "
             "menu before the per-row work"
         )
+
+
+# ---------------------------------------------------------------------------
+# D-052 (#41) — SCIENTIFIC_NOTATION_RE + N_COUNT_RE comma support
+# ---------------------------------------------------------------------------
+
+
+class TestD052ScientificNotationClass:
+    """`scientific_notation` class registered at the TOP of
+    PATTERN_CLASSES so longer-span sci-notation matches win
+    subsumption against `ratio_with_unit`'s mantissa-only partial."""
+
+    def test_scientific_notation_re_matches_typical_forms(self):
+        """The regex catches X.Y x 10^N with ASCII x, capital X,
+        Unicode ×, and `*` multiplication chars."""
+        from beril_paper_writer.skill.tools.claim_inventory import (
+            SCIENTIFIC_NOTATION_RE,
+        )
+        for text in [
+            "1.5 x 10^-43",
+            "1.1 X 10^-130",
+            "2.5 × 10^8",
+            "3.0 * 10^9",
+            "7.7 x 10^12",  # positive exponent
+        ]:
+            assert SCIENTIFIC_NOTATION_RE.search(text), (
+                f"SCIENTIFIC_NOTATION_RE must match {text!r}"
+            )
+
+    def test_pattern_classes_lists_scientific_notation_first(self):
+        """Position is critical: subsumption keeps the longer-span
+        match; identical-span ties go to the first class. Either
+        way, scientific_notation MUST appear before ratio_with_unit
+        in PATTERN_CLASSES."""
+        from beril_paper_writer.skill.tools.claim_inventory import (
+            PATTERN_CLASSES,
+        )
+        names = [name for name, _ in PATTERN_CLASSES]
+        sci_idx = names.index("scientific_notation")
+        rwu_idx = names.index("ratio_with_unit")
+        assert sci_idx < rwu_idx, (
+            f"scientific_notation (idx={sci_idx}) must appear BEFORE "
+            f"ratio_with_unit (idx={rwu_idx}) in PATTERN_CLASSES; "
+            f"otherwise `1.5 x 10^-43` resolves as `ratio_with_unit` "
+            f"'1.5 x' and the exponent is lost. Current order: {names}"
+        )
+
+    def test_extract_numeric_matches_uses_sci_notation_class_for_sci_form(self):
+        """End-to-end: the manuscript form `1.5 x 10^-43` resolves to
+        match_class='scientific_notation' (not 'ratio_with_unit'),
+        via subsumption picking the longer match."""
+        from beril_paper_writer.skill.tools.claim_inventory import (
+            extract_numeric_matches,
+        )
+        text = "Spearman rho = 0.302, p = 1.5 x 10^-43 controlling for size."
+        matches = extract_numeric_matches(text)
+        sci_matches = [m for m in matches if m.match_class == "scientific_notation"]
+        assert len(sci_matches) == 1, (
+            f"Expected exactly one scientific_notation match; "
+            f"got {[(m.match_class, m.matched_text) for m in matches]}"
+        )
+        assert sci_matches[0].matched_text == "1.5 x 10^-43"
+
+
+class TestD052NCountCommaSupport:
+    """N_COUNT_RE extended to match thousand-separator commas, so
+    `n = 22,751` is captured whole, not truncated to `n = 22` at
+    the comma word-boundary."""
+
+    def test_n_count_matches_simple_integer(self):
+        """Backward compatibility: no-comma form still matches."""
+        from beril_paper_writer.skill.tools.claim_inventory import N_COUNT_RE
+        text = "Sample size n = 343 patients."
+        matches = [m.group(0) for m in N_COUNT_RE.finditer(text)]
+        assert matches == ["n = 343"]
+
+    def test_n_count_matches_with_thousand_separator(self):
+        """New behavior: `n=22,751` matches full, not truncated to
+        `n=22`. Closes D1's spurious `n = 22` ungrounded finding."""
+        from beril_paper_writer.skill.tools.claim_inventory import N_COUNT_RE
+        text = "Essential-core: n=22,751 genes, 41.9% Enzyme"
+        matches = [m.group(0) for m in N_COUNT_RE.finditer(text)]
+        assert matches == ["n=22,751"], (
+            f"N_COUNT_RE must capture the full `n=22,751` not just "
+            f"`n=22`; got {matches}"
+        )

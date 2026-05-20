@@ -1712,3 +1712,105 @@ Stated end-state is co-install (beril-adversarial as a hard
 dependency of beril-paper-writer-skill); current behavior is
 required-by-default-with-loud-fallback so missing-canonical can't go
 unnoticed but doesn't hard-halt.
+
+## D-052 — 2026-05-20 — Tier T extractor: scientific notation, K-suffix, trailing-zero normalization (#41)
+
+Stage 7 dev runs surfaced systematic false-positive ungrounded
+findings on D1/D2/D3 (V1_X_BACKLOG.md #41). Forensic reading of
+the `audit/iter_1/numeric_grounding.json` against
+`claim_inventory.tsv` + `REPORT.md`:
+
+- D2 amr_pangenome_atlas — 12 of 14 ungrounded are scientific-
+  notation mantissa-only matches. Manuscript `p = 1.1 x 10^-130
+  [C-006]`; inventory C-006 `Wilcoxon p=1.1e-130`. Same value,
+  same marker, different surface form.
+- D3 phb_granule_ecology — 3 of 3 ungrounded are scientific-
+  notation + K-suffix (`83,000` vs inventory's `83K`).
+- D1 conservation_vs_fitness — 4 of 6 ungrounded are extractor
+  artifacts: `n=22` truncated from `n=22,751` via comma-boundary
+  (`N_COUNT_RE`'s `\b` at the comma); `82` vs `82.0` trailing-
+  zero precision mismatch on C-006.
+
+Root cause: `_NUMERIC_PAYLOAD_RE = [-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?`
+requires an `[eE]` exponent marker. Manuscript `1.1 x 10^-130`
+tokenizes as three numbers (`1.1`, `10`, `-130`); inventory
+`1.1e-130` tokenizes as one. They never equal as normalized
+strings. Compounding: `build_normalized_set` does not normalize
+K/M/G/T suffixes; set lookup is exact-string with no trailing-zero
+tolerance.
+
+Decision: four sub-fixes in `check_numeric_grounding.py` +
+`claim_inventory.py`. Approved choices (per
+2026-05-20 in-chat sign-off; Q1=new class, Q2=source-side only,
+Q3=`%.10g`-based canonical form, Q4=bundle comma fix):
+
+1. **Scientific notation as a new match class.** Add
+   `SCIENTIFIC_NOTATION_RE = \b\d+(?:\.\d+)?\s*[xX×*]\s*10\^?[-+]?\d+`
+   to `claim_inventory.py`'s `CLASS_PATTERNS` at the TOP of the
+   priority tuple so it claims the full pattern before
+   `RATIO_WITH_UNIT_RE` (which currently includes `x` as a unit
+   alias) can grab the mantissa-only partial. Add
+   `"scientific_notation"` to `CLAIM_SHAPED_CLASSES` in
+   `check_numeric_grounding.py` so it bypasses the trivial-
+   noun-phrase suppressor. New class is neutral on flag-aggregation
+   maps (does not set `effect_size_present` etc.).
+
+2. **K/M/G/T SI-suffix expansion on the SOURCE side only.** New
+   `_expand_si_suffixes(text)` helper. Applied to inventory +
+   REPORT in `build_normalized_set`. Lookahead
+   `(?=\s|$|[^\w])` guards against `1.5MHz`-class collisions
+   (next char being a word char fails the lookahead). Manuscript-
+   side untouched — drafters in formal scientific writing use
+   expanded forms; expanding on manuscript side creates new
+   false-positive surface.
+
+3. **Trailing-zero canonicalization via `%.10g`.** New
+   `_canonical_float_str(value)` helper. Uses Python's `format(v,
+   '.10g')` with post-strip of leading exponent zeros via
+   `re.sub(r"e([+-])0+(\d)", r"\1\2", s)`. Collapses `82` ↔
+   `82.0`, `0.30` ↔ `0.3`, `1.77e-06` ↔ `1.77e-6`. Strict on
+   truncation (`0.3` ≠ `0.302`). Applied symmetrically in
+   `normalize_numeric` (manuscript side) and the new
+   set-building paths (source side).
+
+4. **`N_COUNT_RE` comma support.** Extend from `\b[nN]\s*=\s*\d+\b`
+   to `\b[nN]\s*=\s*\d+(?:,\d{3})*\b`. Mirrors the comma-pattern
+   `COUNT_OF_RE` already uses. Bundled into #41 because it's the
+   same dev-set false-positive class even though it's a regex
+   robustness fix, not a normalization extension.
+
+Expected dev-set impact (D-NNN re-evaluation post-#41,
+deterministic re-run of `check_numeric_grounding.py`, $0 LLM):
+
+| Project | Pre | Post | Residual |
+|---|---|---|---|
+| D2 amr_pangenome_atlas | 14 | 0–2 | possibly a percentage edge case |
+| D3 phb_granule_ecology | 3 | 0 | all three are sci-notation / K-suffix |
+| D1 conservation_vs_fitness | 6 | 3 | 2× `95%` pangenome-definition (drafter brought from external source without claim_inventory backing; real residual for #40) + 1× `80% Tettelin` (external citation; allowlist territory) |
+
+Non-goals (explicit deferrals):
+
+- **Unicode superscript** (`10⁻⁴³`, `10⁻¹³⁰`) — not present in
+  current dev set; file separately if it surfaces.
+- **External-citation allowlist** for `80% Tettelin`-class cases
+  — separate concern; lives at V1_X_BACKLOG.md #40 or a new entry.
+- **Match-class-aware fuzzy matching** against
+  `claim_inventory.tsv.claim_text` surrounding-sentence context —
+  already deferred to v1.1 in `build_normalized_set`'s docstring
+  (Stage 7 Patch 2 trade-off; same trade-off applies here).
+- **`check_throughline_numerics`'s parallel sci-notation problem
+  (#38)** — separate file with separate tests. #41 lands first;
+  #38 reuses the canonical helper.
+
+Test plan: ~18 new unit tests in `tests/unit/test_check_numeric_grounding.py`
+(+ 2-3 in `test_claim_inventory.py`) pinned to actual D1/D2/D3
+failure cases as regression fixtures. After tests pass, deterministic
+re-run of `check_numeric_grounding.py` against existing dev-set
+manuscripts to confirm the predicted impact above.
+
+Related: V1_X_BACKLOG.md #41 (P0, replaces dev-set evidence of
+#40); #38 (throughline-numerics, separate file scope); D-036
+(B1.e PERCENTAGE_RE + N_COUNT_RE regex pedigree — N_COUNT_RE
+comma fix is a continuation of B1.e robustness work);
+`check_numeric_grounding.py` Stage 7 Patch 2 (2026-05-18) which
+established the generic source-side extraction pattern.

@@ -244,6 +244,90 @@ _NUMERIC_PAYLOAD_RE = re.compile(
     r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
 )
 
+# D-052 (#41) — drafter-form scientific notation, e.g. `1.5 x 10^-43`.
+# Captured groups: (mantissa, signed_exponent). Mantissa may have a
+# decimal portion; multiplication char is x/X/×/* with optional
+# spaces; exponent caret optional; sign optional.
+_SCI_NOTATION_RE = re.compile(
+    r"(-?\d+(?:\.\d+)?)\s*[xX×*]\s*10\^?([-+]?\d+)"
+)
+
+# D-052 (#41) — SI suffix expansion. Applied SOURCE-SIDE ONLY in
+# build_normalized_set so notebook outputs like `83K`, `1.5M` are
+# expanded to integer form before the bare numeric extractor sees
+# them. Lookahead `(?=\s|$|[^\w])` guards against `1.5MHz`-class
+# collisions (next char being a word char fails the lookahead;
+# `M` followed by `H` keeps `1.5MHz` intact, while `M` followed by
+# space / punctuation / EOL expands).
+_SI_SUFFIX_MULTIPLIERS: dict[str, int] = {
+    "k": 1_000,
+    "m": 1_000_000,
+    "g": 1_000_000_000,
+    "t": 1_000_000_000_000,
+}
+_SI_SUFFIX_RE = re.compile(
+    r"(\d+(?:\.\d+)?)([KkMmGgTt])(?=\s|$|[^\w])"
+)
+
+
+def _canonical_form(raw: str) -> str:
+    """Canonical string form of a numeric value for set-lookup
+    comparison.
+
+    Collapses representational variants of the same value into one
+    key:
+      - 82, 82.0, 8.20e1 → "82"
+      - 0.30, 0.3 → "0.3"
+      - 1.77e-6, 1.77e-06 → "1.77e-6"
+      - 1.5e-43 → "1.5e-43"
+
+    Strict on truncation: 0.3 is NOT collapsed with 0.302.
+
+    Uses Python's general (`%g`) format at 10 sig figs (sufficient
+    for paper-context numbers; manuscripts rarely report beyond
+    4-6 sig figs). Post-strips leading zeros in scientific-notation
+    exponents so `format()`'s default `1.77e-06` and the drafter's
+    common `1.77e-6` collide on the same key.
+
+    Returns `raw` unchanged when it doesn't parse as a number.
+    """
+    try:
+        v = float(raw)
+    except (ValueError, OverflowError):
+        return raw
+    s = format(v, ".10g")
+    # Strip leading zeros in the exponent: `e-06` → `e-6`, `e+05` → `e5`.
+    s = re.sub(r"e([+-])0+(\d)", r"e\1\2", s)
+    # Drop explicit `+` in the exponent: `1.5e+10` → `1.5e10` (consistent
+    # with most drafter conventions). Python's %g already does this on
+    # most platforms but be defensive.
+    s = s.replace("e+", "e")
+    return s
+
+
+def _expand_si_suffixes(text: str) -> str:
+    """Expand K/M/G/T SI suffixes to integer form. Applied SOURCE
+    side only (inventory + REPORT) so notebook-shorthand `83K`
+    can ground a manuscript `83,000`. See D-052 (#41) for the
+    lookahead's role in avoiding `1.5MHz`-class collisions.
+
+    Non-integer mantissas expand to integer when the product is
+    whole (e.g. `1.5K` → `1500`), else fall back to canonical
+    float form. Pure text substitution; idempotent on already-
+    expanded text (no double-expansion).
+    """
+    def expand(m: re.Match[str]) -> str:
+        try:
+            mantissa = float(m.group(1))
+        except ValueError:
+            return m.group(0)
+        suffix = m.group(2).lower()
+        value = mantissa * _SI_SUFFIX_MULTIPLIERS[suffix]
+        if value == int(value):
+            return str(int(value))
+        return _canonical_form(str(value))
+    return _SI_SUFFIX_RE.sub(expand, text)
+
 
 def normalize_numeric(matched_text: str) -> str:
     """Return a canonical numeric string from a regex-matched substring.
@@ -261,15 +345,29 @@ def normalize_numeric(matched_text: str) -> str:
     audit log records it under ``notes`` for future tuning.
 
     Examples:
-      "219,121" → "219121"
-      "77%"     → "77"
-      "p=4e-4"  → "4e-4"
-      "n = 156" → "156"
-      "0.96"    → "0.96"
+      "219,121"          → "219121"
+      "77%"              → "77"
+      "p=4e-4"           → "4e-4"
+      "n = 156"          → "156"
+      "0.96"             → "0.96"
+      "1.5 x 10^-43"     → "1.5e-43"  (D-052 scientific notation)
+      "1.1 x 10^-130"    → "1.1e-130"
     """
     if not matched_text:
         return ""
     cleaned = matched_text.replace(",", "").strip()
+    # D-052 (#41) — recognize scientific notation `X.Y x 10^N` BEFORE
+    # falling back to bare numeric extraction. Without this, the
+    # generic _NUMERIC_PAYLOAD_RE finds the mantissa `1.5` first and
+    # drops the `10^-43` exponent entirely.
+    sci_m = _SCI_NOTATION_RE.search(cleaned)
+    if sci_m:
+        mantissa, exp = sci_m.group(1), sci_m.group(2)
+        try:
+            value = float(f"{mantissa}e{exp}")
+            return _canonical_form(str(value))
+        except (ValueError, OverflowError):
+            pass  # fall through to bare extraction
     m = _NUMERIC_PAYLOAD_RE.search(cleaned)
     if not m:
         return ""
@@ -312,16 +410,55 @@ def build_normalized_set(text: str) -> set[str]:
 
     Mirrors normalize_numeric's normalization rules: strip commas,
     drop leading "+", normalize "-0" / "-0.0" → "0".
+
+    D-052 (#41) — three additional normalization passes:
+
+      A. K/M/G/T SI suffix expansion via _expand_si_suffixes (source
+         side only). `83K` → `83000`, `1.5M` → `1500000`. Closes
+         D3's `83,000` (manuscript) vs `83K` (inventory) gap.
+
+      B. Explicit scientific-notation token extraction via
+         _SCI_NOTATION_RE before the bare-number sweep. The generic
+         _NUMERIC_PAYLOAD_RE would otherwise tokenize `1.5e-43` and
+         `1.5 x 10^-43` into different sets of payloads. The
+         _SCI_NOTATION_RE pass emits the canonical form
+         (`1.5e-43`) for both surface forms. Already-`eE`-form
+         scientific notation (`1.5e-43`) is also picked up here so
+         it canonicalizes uniformly.
+
+      C. Canonical-form application via _canonical_form on every
+         emitted value. Collapses `82.0` → `82`, `0.30` → `0.3`,
+         `1.77e-06` → `1.77e-6`.
     """
-    cleaned = text.replace(",", "")
+    # A. SI-suffix expansion before the comma strip.
+    expanded = _expand_si_suffixes(text)
+    cleaned = expanded.replace(",", "")
     out: set[str] = set()
+    # B. Extract scientific-notation tokens first, mask their spans
+    #    so the bare-numeric sweep below doesn't double-count their
+    #    mantissa/exponent digits as independent values.
+    masked = list(cleaned)
+    for m in _SCI_NOTATION_RE.finditer(cleaned):
+        mantissa, exp = m.group(1), m.group(2)
+        try:
+            value = float(f"{mantissa}e{exp}")
+            out.add(_canonical_form(str(value)))
+        except (ValueError, OverflowError):
+            continue
+        # Mask out the matched span so _NUMERIC_PAYLOAD_RE skips it.
+        for i in range(m.start(), m.end()):
+            masked[i] = " "
+    cleaned = "".join(masked)
+    # Original bare-number sweep, now operating on the post-mask text.
     for m in _NUMERIC_PAYLOAD_RE.finditer(cleaned):
         raw = m.group(0).lower()
         if raw.startswith("+"):
             raw = raw[1:]
         if raw in ("-0", "-0.0"):
             raw = "0"
-        out.add(raw)
+        # D-052 (#41) — apply canonical form so trailing-zero variants
+        # collapse: `82.0` → `82`, `0.30` → `0.3`, `1.77e-06` → `1.77e-6`.
+        out.add(_canonical_form(raw))
         # Range-dash carve-out: when the regex matches "-28.9" inside
         # a range like "12.9-28.9", the leading dash is regex-consumed
         # as a sign, but semantically it's a range separator. Add the
@@ -331,7 +468,7 @@ def build_normalized_set(text: str) -> set[str]:
         # not sign-correctness, so this is correct behavior. Sign-
         # misuse detection is the Tier 3 adversarial reviewer's job.
         if raw.startswith("-") and len(raw) > 1:
-            out.add(raw[1:])
+            out.add(_canonical_form(raw[1:]))
     return out
 
 
@@ -366,6 +503,8 @@ _CLAIM_SHAPED_CLASSES = frozenset({
     "log_fc",
     "count_of",
     "cliff_delta",
+    # D-052 (#41) — scientific_notation class added.
+    "scientific_notation",
 })
 
 
@@ -637,11 +776,15 @@ def run_grounding(
                 ))
                 continue
 
-            # Grounding cascade.
-            if norm in inventory_normalized:
+            # Grounding cascade. D-052 (#41) — apply canonical form
+            # to the manuscript-side normalized value so trailing-zero
+            # and exponent-representation variants collide with the
+            # canonical-form keys in the inventory/report sets.
+            canonical = _canonical_form(norm)
+            if canonical in inventory_normalized:
                 grounded_a += 1
                 continue
-            if norm in report_normalized:
+            if canonical in report_normalized:
                 grounded_b += 1
                 continue
 

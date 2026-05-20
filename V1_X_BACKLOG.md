@@ -1,8 +1,9 @@
 # paper-writer v1.x backlog
 
-**Last updated:** 2026-05-20 (post-dev-run diagnosis: #41 added at
-P0, #40 demoted to P1 with diagnostic correction, #30 closed, #43
-filed at P2).
+**Last updated:** 2026-05-20 (post-#41 ship: #41 closed with
+deterministic re-run results — 23→5 ungrounded across dev set,
+78% reduction; #44 filed for the newly-surfaced D2 `77.8%`
+residual; #40 updated with confirmed real residuals).
 **Status:** carryover ledger for findings surfaced during Stage 7
 Phase C (dev runs D1/D2/D3) and BERIL-comparison analysis. Review
 before Phase D holdout, and before any v1.0 tag.
@@ -31,7 +32,10 @@ lever / proposed fix, status.
 
 ## P0 — block v1.0 ship
 
-### #41 — Tier T extractor false positives: scientific notation, K-suffix, trailing-zero precision
+(Active P0 list is empty as of 2026-05-20. #41 shipped — see below.
+Promote any entry here when a new P0 surfaces.)
+
+### #41 — Tier T extractor false positives: scientific notation, K-suffix, trailing-zero precision (SHIPPED)
 
 **Evidence (Stage 7 dev runs forensic, 2026-05-20):**
 First-pass diagnosis attributed dev-set Tier T failures to drafter
@@ -88,8 +92,25 @@ suffixes; set lookup is exact-string, no trailing-zero tolerance.
 D2 14 → 0-2, D3 3 → 0, D1 6 → 1-2. The residual 1-2 are real
 (D1's `95%` cluster-definition threshold + `80%` Tettelin).
 
-**Status:** Open. Design + tests + deterministic re-run against
-D1/D2/D3 manuscripts BEFORE any holdout LLM spend.
+**Status: SHIPPED 2026-05-20.** Code landed in commit
+documented at `.commit-message-d052-tier-t-normalization.txt`;
+architecture decision at DECISIONS.md D-052. Sandbox in-process
+deterministic re-run against `manuscript.iter_1.md` for D1+D2+D3
+post-fix:
+
+| Project | Pre-#41 | Post-#41 | Δ |
+|---|---|---|---|
+| D1 conservation_vs_fitness | 6 | 3 | −3 |
+| D2 amr_pangenome_atlas | 14 | 2 | −12 |
+| D3 phb_granule_ecology | 3 | 0 | −3 |
+| TOTAL | 23 | **5** | **−18 (78% reduction)** |
+
+Confirmed real residuals (NOT extractor artifacts):
+- D1 — 2× `95%` pangenome cluster definition + 1× `80%` Tettelin
+  external citation. Tracked at #40 (drafter discipline) and
+  external-citation allowlist (not yet filed).
+- D2 — 2× `77.8%`/`22.2%` mechanism classification. Newly
+  surfaced post-#41. Filed as #44 (P2) for investigation.
 
 ### #40 — Drafter first-cut Tier T discipline (residual, post-#41)
 
@@ -316,6 +337,44 @@ NOT `check_numeric_grounding.py`. The scientific-notation problem
 in `check_numeric_grounding.py` (the dominant dev-set defect) is
 filed separately as **#41**, currently P0. Don't conflate the two
 file scopes.
+
+### #44 — D2 `77.8%`/`22.2%` mechanism classification — Tier T residual post-#41
+
+**Evidence (post-#41 deterministic re-run, 2026-05-20):** D2's two
+remaining ungrounded findings after #41 closed the sci-notation
+false-positive class:
+
+- Manuscript (Methods): "This approach classified 77.8% of AMR
+  clusters into defined mechanism categories, with 22.2% remaining
+  as other or unclassified [C-085]."
+- Manuscript (Results): "The mechanism classification covers 77.8%
+  of AMR clusters; 22.2% remain unclassified."
+
+`[C-085]` is the cited marker; the value `77.8` does NOT appear in
+`claim_inventory.tsv` or `REPORT.md` (verified by re-run trace).
+
+**Diagnosis (uninvestigated, hypothesis):** Three possibilities:
+1. **Drafter fabrication / rounding.** Drafter computed 77.8% from
+   some other source value (e.g., a count ratio in REPORT.md) and
+   the literal `77.8%` was never emitted by the source pipeline.
+2. **Marker resolution gap.** `[C-085]` resolves to an inventory
+   row, but the inventory row's `claim_text` may be a paraphrase
+   that omits the literal percentage (we record what claim is
+   made, not its numerical surface form).
+3. **Source-side extraction miss.** The inventory or REPORT.md
+   contains an equivalent representation (e.g., `0.778`,
+   `1,234 / 1,587 (77.8%)`) that `build_normalized_set` didn't
+   collect — though Patch 2's generic extractor was supposed to
+   close exactly this class.
+
+**Lever:** Open `claim_inventory.tsv` for D2's C-085 and read the
+linked notebook. If the source has `77.8%` in any form, file as
+extractor miss. If the source has only the underlying ratio,
+file as drafter discipline (#40 residual).
+
+**Status:** Open, P2. Doesn't block v1 ship. Investigate when
+re-running #41 evaluation against holdouts surfaces additional
+data points or before v2b threshold-setting.
 
 ### #43 — `review_cost_usd` not populated in remediation_cycles
 

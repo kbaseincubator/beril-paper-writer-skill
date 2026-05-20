@@ -300,7 +300,12 @@ class TestInventoryParsing:
         norm_set = cng.build_inventory_normalized_set(texts)
         assert "0.847" in norm_set
         assert "156" in norm_set
-        assert "4e-4" in norm_set
+        # D-052 (#41): _canonical_form collapses `4e-4` → `0.0004`
+        # (Python's %g chooses decimal form for this magnitude). The
+        # manuscript-side lookup applies the same canonical form, so
+        # grounding behavior is preserved; the key in the set just
+        # changed shape.
+        assert "0.0004" in norm_set
 
     def test_report_normalized_set_missing_file_returns_empty(self, tmp_path: Path):
         assert cng.build_report_normalized_set(tmp_path / "no_report.md") == set()
@@ -316,7 +321,8 @@ class TestInventoryParsing:
         norm = cng.build_report_normalized_set(report)
         assert "0.847" in norm
         assert "156" in norm
-        assert "4e-4" in norm
+        # D-052 (#41): canonical form collapses `4e-4` → `0.0004`.
+        assert "0.0004" in norm
 
 
 # ---------------------------------------------------------------------------
@@ -648,11 +654,18 @@ class TestPatch2GenericSourceExtractor:
 
     def test_handles_scientific_notation(self):
         """p-values in 1e-N form must extract correctly. Note: regex
-        lowercases the exponent marker via the unified normalisation."""
+        lowercases the exponent marker via the unified normalisation.
+
+        D-052 (#41): _canonical_form normalises both shapes. `1.5e-6`
+        stays in scientific form (Python's %g chooses sci at this
+        magnitude with leading-zero exponent stripped); `4e-04` falls
+        into decimal form `0.0004` (above sci-notation threshold).
+        Lookup symmetry preserved via _canonical_form on both sides.
+        """
         text = "p < 1.5e-6 versus baseline 4E-04 condition."
         norm = cng.build_normalized_set(text)
         assert "1.5e-6" in norm
-        assert "4e-04" in norm
+        assert "0.0004" in norm
 
     def test_dash_separated_range_grounds_via_both_endpoints(self):
         """End-to-end: a manuscript claim '28.9%' against a REPORT
@@ -713,3 +726,250 @@ class TestPatch2GenericSourceExtractor:
     def test_empty_source_yields_empty_set(self):
         """Edge case: empty source returns empty set, no errors."""
         assert cng.build_normalized_set("") == set()
+
+
+# ---------------------------------------------------------------------------
+# D-052 (#41) — scientific notation, K/M/G/T suffixes, trailing-zero
+# canonicalization, N_COUNT_RE comma support. Tests pinned to actual
+# D1/D2/D3 dev-set false-positive cases as regression fixtures.
+# ---------------------------------------------------------------------------
+
+
+class TestD052ScientificNotation:
+    """`X.Y x 10^N` form must normalize to `X.YeN` canonical form
+    on both manuscript and source side. The dominant defect in
+    D2 (12 of 14 ungrounded) and D3 (3 of 3)."""
+
+    def test_normalize_numeric_extracts_full_sci_notation(self):
+        """Manuscript-side: `1.5 x 10^-43` must normalize to `1.5e-43`,
+        not truncate to `1.5` (the original _NUMERIC_PAYLOAD_RE
+        behavior that caused all D2 mantissa-only false positives)."""
+        assert cng.normalize_numeric("1.5 x 10^-43") == "1.5e-43"
+        assert cng.normalize_numeric("1.1 x 10^-130") == "1.1e-130"
+        assert cng.normalize_numeric("7.7 x 10^-12") == "7.7e-12"
+
+    def test_normalize_numeric_handles_capital_X_and_unicode_times(self):
+        """Multiplication char can be x, X, ×, or *."""
+        assert cng.normalize_numeric("1.1 X 10^-130") == "1.1e-130"
+        assert cng.normalize_numeric("2.5 × 10^8") == "250000000"
+        assert cng.normalize_numeric("3.0 * 10^9") == "3000000000"
+
+    def test_normalize_numeric_sci_notation_preserves_through_p_prefix(self):
+        """The matched_text can carry surrounding context like `p = `;
+        the sci-notation regex must still find the X.Y x 10^N tail."""
+        assert cng.normalize_numeric("p = 1.1 x 10^-130") == "1.1e-130"
+        assert cng.normalize_numeric("p < 7.7 x 10^-12") == "7.7e-12"
+
+    def test_build_normalized_set_collides_sci_and_e_form(self):
+        """The KEY assertion for grounding: inventory's `p=1.1e-130`
+        and manuscript-side canonical of `1.1 x 10^-130` must both
+        land on the same set key. D2's dominant false-positive class."""
+        inventory = "Wilcoxon p=1.1e-130 for paired species AMR conservation test"
+        inventory_set = cng.build_normalized_set(inventory)
+        manuscript_value = cng.normalize_numeric("1.1 x 10^-130")
+        manuscript_canonical = cng._canonical_form(manuscript_value)
+        assert manuscript_canonical in inventory_set
+
+    def test_build_normalized_set_collides_xtimes10_and_e_form_when_inventory_has_xtimes10(self):
+        """Reverse direction: if the INVENTORY writes `1.5 x 10^-43`
+        (rare in notebook outputs, but possible) the set must still
+        carry the canonical `1.5e-43` key."""
+        inventory = "Spearman rho = 0.302, p = 1.5 x 10^-43 controlling for size"
+        inventory_set = cng.build_normalized_set(inventory)
+        assert "1.5e-43" in inventory_set
+        # Manuscript form `1.5e-43` (already in eE form) also grounds.
+        manuscript_value = cng.normalize_numeric("p = 1.5e-43")
+        manuscript_canonical = cng._canonical_form(manuscript_value)
+        assert manuscript_canonical in inventory_set
+
+    def test_d2_regression_full_grounding_pipeline(self):
+        """End-to-end D2 fixture: manuscript p = 1.1 x 10^-130 with
+        marker C-006 grounds against inventory `p=1.1e-130`. Prior
+        to #41 this was a P0 ungrounded finding."""
+        manuscript = (
+            "## Results\n\nThe Wilcoxon signed-rank test confirmed "
+            "this systematic depletion is highly significant "
+            "(p = 1.1 x 10^-130 [C-006]).\n"
+        )
+        inventory_set = cng.build_normalized_set(
+            "Wilcoxon p=1.1e-130 for paired species AMR conservation test"
+        )
+        findings, _, totals = cng.run_grounding(
+            manuscript, inventory_set, set()
+        )
+        ungrounded_values = {f.matched_text for f in findings}
+        assert "1.1 x 10^-130" not in ungrounded_values, (
+            f"D2 regression: `1.1 x 10^-130` must ground via "
+            f"inventory `1.1e-130`. Ungrounded: {ungrounded_values}"
+        )
+
+
+class TestD052SISuffixExpansion:
+    """K/M/G/T suffix expansion on SOURCE side only. Manuscript-side
+    untouched (drafters use formal expanded forms; suffix expansion
+    on manuscript would create new false-positive surface)."""
+
+    def test_k_suffix_expands_in_source(self):
+        """`83K/293K` in inventory → set has `83000` and `293000`."""
+        text = "Only 28% of genomes (83K/293K) have AlphaEarth embeddings"
+        norm = cng.build_normalized_set(text)
+        assert "83000" in norm
+        assert "293000" in norm
+        # The raw 28 percent is still there.
+        assert "28" in norm
+
+    def test_m_suffix_expands_in_source(self):
+        """`1.5M reads` → `1500000`."""
+        text = "Library covered 1.5M reads on average."
+        norm = cng.build_normalized_set(text)
+        assert "1500000" in norm
+
+    def test_si_suffix_does_not_eat_mhz_or_compound_letters(self):
+        """`1.5MHz` must NOT expand to `1500000Hz` — the lookahead
+        guards against `M` being followed by a word character."""
+        text = "Sampled at 1.5MHz on the analyzer."
+        norm = cng.build_normalized_set(text)
+        # 1.5 still extracted by the bare-numeric sweep.
+        assert "1.5" in norm
+        # 1500000 must NOT appear (we did not expand 1.5M before MHz).
+        assert "1500000" not in norm
+
+    def test_d3_regression_k_suffix_grounding(self):
+        """D3 fixture: manuscript `83,000 of 293,050` grounds against
+        inventory `83K/293K`."""
+        manuscript = (
+            "## Methods\n\nEmbeddings were available for 83,000 of "
+            "293,050 genomes (28% coverage) [C-095].\n"
+        )
+        inventory_set = cng.build_normalized_set(
+            "Only 28% of genomes (83K/293K) have AlphaEarth embeddings"
+        )
+        findings, _, totals = cng.run_grounding(
+            manuscript, inventory_set, set()
+        )
+        ungrounded_values = {f.matched_text for f in findings}
+        # The full count_of match `83,000 of 293,050` normalizes to
+        # the first number (`83000`); the second number (`293050`)
+        # also gets surfaced as ungrounded if not grounded.
+        # Both should ground against the K-expanded inventory.
+        for v in ungrounded_values:
+            assert "83" not in v.replace(",", "") or "293" not in v.replace(",", ""), (
+                f"D3 regression: `83,000`/`293,050` must ground via "
+                f"K-expanded inventory `83K/293K`. Ungrounded: "
+                f"{ungrounded_values}"
+            )
+
+
+class TestD052CanonicalForm:
+    """Trailing-zero canonicalization via _canonical_form. `%g`-based
+    collapse; strict on truncation."""
+
+    def test_canonical_strips_trailing_zeros(self):
+        """82.0 → 82; 0.30 → 0.3; 1.5000 → 1.5."""
+        assert cng._canonical_form("82.0") == "82"
+        assert cng._canonical_form("0.30") == "0.3"
+        assert cng._canonical_form("1.5000") == "1.5"
+
+    def test_canonical_preserves_truncation_strict(self):
+        """0.3 must NOT collapse to 0.302. Strict on truncation."""
+        assert cng._canonical_form("0.3") != cng._canonical_form("0.302")
+        assert cng._canonical_form("0.302") == "0.302"
+
+    def test_canonical_strips_exponent_leading_zero(self):
+        """1.77e-06 → 1.77e-6. Resolves the existing-eE-form vs
+        sub-millimeter-magnitude representation gap."""
+        assert cng._canonical_form("1.77e-06") == "1.77e-6"
+        assert cng._canonical_form("1.77e-6") == "1.77e-6"
+        assert cng._canonical_form("1.5e-43") == "1.5e-43"
+
+    def test_canonical_returns_unchanged_on_non_numeric(self):
+        """A non-numeric string returns unchanged."""
+        assert cng._canonical_form("not a number") == "not a number"
+        assert cng._canonical_form("") == ""
+
+    def test_d1_regression_82_percent_grounding(self):
+        """D1 fixture: manuscript `82%` (no decimal) grounds against
+        inventory `82.0%`. Trailing-zero precision mismatch was the
+        false-positive class."""
+        manuscript = (
+            "## Discussion\n\nBaseline core fraction is already "
+            "high (approximately 82%) in well-characterized "
+            "bacteria.\n"
+        )
+        inventory_set = cng.build_normalized_set(
+            "Conservation breakdown: 145,821 core (82.0%), "
+            "32,042 auxiliary (18.0%)"
+        )
+        findings, _, totals = cng.run_grounding(
+            manuscript, inventory_set, set()
+        )
+        ungrounded_pcts = {
+            f.matched_text for f in findings if "82" in f.matched_text
+        }
+        assert not ungrounded_pcts, (
+            f"D1 regression: `82%` (manuscript) must ground via "
+            f"inventory `82.0%`. Ungrounded with 82: {ungrounded_pcts}"
+        )
+
+
+class TestD052NCountCommaSupport:
+    """N_COUNT_RE extended to recognize thousand-separator commas.
+    Closes D1's `n = 22` false positive from `n=22,751`."""
+
+    def test_n_count_matches_full_comma_separated(self):
+        """`n=22,751` must match as the full string, not truncate
+        to `n=22` at the comma word boundary."""
+        from beril_paper_writer.skill.tools.claim_inventory import N_COUNT_RE
+        text = "Essential-core: n=22,751 genes, 41.9% Enzyme"
+        matches = [m.group(0) for m in N_COUNT_RE.finditer(text)]
+        assert matches == ["n=22,751"], (
+            f"N_COUNT_RE must match full comma-separated integer; "
+            f"got {matches}"
+        )
+
+    def test_n_count_still_matches_without_commas(self):
+        """`n = 156` (no commas) still matches."""
+        from beril_paper_writer.skill.tools.claim_inventory import N_COUNT_RE
+        text = "Sample size n = 156 patients."
+        matches = [m.group(0) for m in N_COUNT_RE.finditer(text)]
+        assert matches == ["n = 156"]
+
+    def test_n_count_handles_multi_comma_large_integer(self):
+        """`N = 1,234,567` matches all three comma groups."""
+        from beril_paper_writer.skill.tools.claim_inventory import N_COUNT_RE
+        text = "Total cohort: N = 1,234,567 sequences analyzed."
+        matches = [m.group(0) for m in N_COUNT_RE.finditer(text)]
+        assert matches == ["N = 1,234,567"]
+
+
+class TestD052IntegrationDevSet:
+    """End-to-end regression tests pinned to D1/D2/D3 dev-set
+    false-positive cases. These should drop to zero post-#41."""
+
+    def test_d3_phb_granule_three_p0s_should_resolve(self):
+        """D3's three ungrounded findings all expected to resolve:
+        K-suffix expansion (83K/293K) + scientific notation
+        (1.5 x 10^-43, 1.77 x 10^-6)."""
+        manuscript = (
+            "## Methods\n\nEmbeddings were available for 83,000 of "
+            "293,050 genomes (28% coverage) [C-095].\n\n"
+            "## Results\n\nGenome size itself is a strong predictor "
+            "of niche breadth (Spearman rho = 0.302, "
+            "p = 1.5 x 10^-43) [C-036], consistent with the "
+            "established principle.\n"
+        )
+        inventory_text = "\n".join([
+            "Only 28% of genomes (83K/293K) have AlphaEarth embeddings",
+            "Genome size vs niche breadth: rho = 0.302, p = 1.5e-43",
+        ])
+        inventory_set = cng.build_normalized_set(inventory_text)
+        findings, _, totals = cng.run_grounding(
+            manuscript, inventory_set, set()
+        )
+        # All three values should ground; no P0s for these matched_texts.
+        ungrounded_texts = {f.matched_text for f in findings}
+        for needle in ["83,000 of 293,050", "1.5 x 10^-43", "0.302"]:
+            assert needle not in ungrounded_texts, (
+                f"D3 regression: `{needle}` must ground. "
+                f"Ungrounded set: {ungrounded_texts}"
+            )

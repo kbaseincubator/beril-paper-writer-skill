@@ -229,6 +229,28 @@ TSV_COLUMNS: tuple[str, ...] = (
 # tests can pin its behavior directly.
 
 
+# Class 0 — Scientific notation: "1.5 x 10^-43", "1.77 X 10^-6",
+# "2.5 × 10^8", "3.0 * 10^9". The drafter form for p-values and
+# small effect sizes in formal writing. D-052 (#41) — claims the
+# full pattern BEFORE Class 2 (ratio_with_unit, whose unit list
+# includes `x`) can grab the mantissa-only partial. Without this
+# class, manuscript `p = 1.1 x 10^-130` matches as `1.1 x` →
+# normalized to "1.1" → fails set lookup against inventory's
+# `p=1.1e-130` which normalizes to "1.1e-130".
+#
+# Position: FIRST in PATTERN_CLASSES (longest-pattern-wins requires
+# this class to fire before any partial-match class with overlapping
+# leading prefix).
+#
+# Caveats: leading sign not supported (formal scientific writing
+# rarely uses `-1.5 x 10^N`; would discuss sign in prose). Unicode
+# superscript form (`10⁻⁴³`) deferred to a future patch (not present
+# in current dev set).
+SCIENTIFIC_NOTATION_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*[xX×*]\s*10\^?[-+]?\d+"
+)
+
+
 # Class 1 — Percentages (e.g. "88.2%", "5%").
 #
 # Word boundary at start prevents matching mid-token cases like
@@ -308,7 +330,7 @@ CI_RE = re.compile(
 )
 
 
-# Class 5 — N-counts (e.g. "n = 343", "N=156").
+# Class 5 — N-counts (e.g. "n = 343", "N=156", "n = 22,751").
 #
 # Word boundary on `n` is critical: without it, "Mn=2" (manganese
 # concentration) and the PCA-component pattern "PCA-component n=2"
@@ -316,7 +338,13 @@ CI_RE = re.compile(
 # "PCA-component n=2" — that's an irreducible deterministic limitation.
 # The LLM at B1.c will filter out PCA-component cases by reading the
 # surrounding context. Documented limitation; not a bug.
-N_COUNT_RE = re.compile(r"\b[nN]\s*=\s*\d+\b")
+#
+# D-052 (#41) — extended to allow thousand-separator commas:
+# `n = 22,751` previously truncated at the comma because `\b` ends
+# the match at the non-word `,` boundary. The `(?:,\d{3})*` group
+# mirrors COUNT_OF_RE's idiom: zero or more `,XXX` groups after the
+# leading digits. Caught D1's spurious `n = 22` ungrounded finding.
+N_COUNT_RE = re.compile(r"\b[nN]\s*=\s*\d+(?:,\d{3})*\b")
 
 
 # Class 6 — Metrics: AUC, R² / R^2 / R2, RMSE, MAE.
@@ -398,6 +426,9 @@ CLIFF_DELTA_RE = re.compile(
 # tests and any future LLM prompt referencing the class enumeration
 # would need to bump together.
 PATTERN_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # D-052 (#41) — scientific_notation MUST be first so it claims
+    # `1.5 x 10^-43` whole before ratio_with_unit grabs `1.5 x`.
+    ("scientific_notation", SCIENTIFIC_NOTATION_RE),
     ("percentage", PERCENTAGE_RE),
     ("ratio_with_unit", RATIO_WITH_UNIT_RE),
     ("p_value", P_VALUE_RE),
