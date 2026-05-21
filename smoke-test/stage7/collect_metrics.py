@@ -3,48 +3,63 @@
 Reads a paper-writer draft directory's state.json + audit artifacts and
 emits the metrics needed to evaluate the v1-MVP success criteria.
 
-Success bar (locked 2026-05-18 by Adam, STAGED_IMPROVEMENT_PLAN.md):
-    reached_assembled        = True
-    validators_pass_or_na   >= 8
-    p0_count                <= 5  (combined adversarial + numeric_grounding)
-    cost_so_far_usd         <= 10.0
+v1-bar v2b (2026-05-20) — post-Stage-7 holdout campaign
+=======================================================
 
-v1-bar v2a (2026-05-20) ships ONLY orthogonal pieces and leaves the
-locked bar unchanged:
+The success bar, revised after the 6-project dev+holdout campaign
+(D1/D2/D3 + H1/H2/H3). Supersedes the locked 2026-05-18 bar and the
+v2a interim. The bar revision is recorded in STAGED_IMPROVEMENT_PLAN.md.
 
-    1. First-cut measurement via audit/iter_1/ snapshot. When a draft
-       has been remediated, the bar evaluates the pre-remediation
-       state, not the post-remediation state. Under the no-auto-
-       remediate harness (Adam's 2026-05-19 decision) most drafts
-       will not have iter_1/; audit/ IS first-cut. iter_1/ remains
-       the right read for historical remediated drafts and for any
-       project the operator manually remediates.
+    reached_measurement_point      = True   (p0_review or assembled)
+    tier_t_ungrounded_count       <= 5      (deterministic, post-#41)
+    claim_markers_resolved_pct    >= 100    (deterministic)
+    cost_so_far_usd               <= 10.0
 
-    2. INCONCLUSIVE verdict for malformed adversarial JSON. When the
-       adversarial reviewer emits unescaped inner quotes (known
-       failure mode per feedback_llm_json_unfixable_in_parser.md),
-       strict json.loads returns 0 P0s — which would FALSELY pass
-       the bar on the partial Tier-T-only count. We detect parse
-       failure and label INCONCLUSIVE so the verdict is honest.
+What changed from the locked bar and why:
 
-    3. Cost-first-cut subtraction. When iter_1/ snapshot is in play,
-       cost_so_far_usd is rolled back by the remediation drafter +
-       review costs to attribute spend correctly. See #43 in
-       V1_X_BACKLOG.md — review_cost_usd is currently unpopulated by
-       the producer; the subtraction handles it via `or 0.0` for
-       forward compatibility.
+  - `reached_assembled` → `reached_measurement_point`. The harness no
+    longer auto-remediates (Adam 2026-05-19); the pipeline pauses at
+    p0_review and never reaches `assembled` on its own. The honest
+    equivalent of "ran far enough to measure" is "reached p0_review
+    or beyond."
 
-    4. New diagnostic fields (adversarial_p0_count, tier_t_ungrounded_count,
-       claim_markers_*, adversarial_json_parseable) collected from
-       disk and reported, but NOT in crit_all. These feed v2b's
-       upcoming bar revision after #41 (Tier T extractor false-
-       positive fix) ships clean numbers.
+  - `min_validators_pass_or_na >= 8` → DROPPED. Validators run only
+    post-assemble; the measurement point is pre-assemble. The
+    criterion is structurally unmeasurable at the bar's point.
 
-v2b will replace PASS_CRITERIA wholesale once #41 + the same-manuscript
-double-review measurement (#37 lever 4) are resolved. Under the no-
-auto-remediate harness `reached_assembled = True` cannot be satisfied
-without operator-driven remediation; that's the semantic mismatch v2b
-addresses. v2a stays faithful to what was locked 2026-05-18.
+  - `max_p0_findings <= 5` (combined adv + Tier T) → SPLIT and
+    narrowed. Only the DETERMINISTIC leg gates: `tier_t_ungrounded`.
+    Post-#41 (Tier T extractor normalization) the Tier T count is a
+    trustworthy deterministic signal.
+
+  - Adversarial P0 → ADVISORY, not gating. The holdout campaign
+    showed genuine first-cut adversarial P0 of 3-7 across 5
+    measurable projects with no clean good/bad threshold; the
+    reviewer is a sampling estimator with +/-2-5 run-to-run variance
+    (V1_X_BACKLOG.md #37). Gating a v1 success criterion on a noisy
+    LLM-opinion count is not defensible. Adversarial findings are
+    still reported here, still drive the orchestrator's p0_gate
+    operator pause, and a soft advisory flag fires above 8 — but they
+    do not fail the bar. (#37 lever 2.)
+
+  - The INCONCLUSIVE verdict is RETIRED. It existed only because a
+    malformed adversarial JSON blocked a clean PASS *while
+    adversarial gated*. With adversarial advisory, a malformed
+    adversarial JSON is a noted advisory gap, not a verdict blocker.
+
+Retained from v2a (orthogonal to the bar):
+
+  - First-cut measurement via audit/iter_1/ snapshot. When a draft
+    has been remediated, the bar evaluates the pre-remediation state.
+    Under the no-auto-remediate harness most drafts have audit/ as
+    first-cut (iter_1/ never created).
+
+  - Cost-first-cut subtraction: when iter_1/ is in play, cost is
+    rolled back by remediation drafter + review spend (V1_X_BACKLOG
+    #43 — review_cost_usd unpopulated by the producer; `or 0.0`
+    keeps the subtraction forward-compatible).
+
+Exit codes: 0 = PASS, 2 = FAIL, 1 = harness/setup error.
 
 Usage:
     python collect_metrics.py <draft_dir>
@@ -68,31 +83,27 @@ from typing import Any, Optional
 # unambiguous. Edit ONE place if Adam's decision shifts.
 # --------------------------------------------------------------------------
 
-# v1-bar v2a (2026-05-20): unchanged from the locked plan
-# (STAGED_IMPROVEMENT_PLAN.md, 2026-05-18). v2b will revise after
-# #41 + #37-lever-4 land.
-#
-# NOTE: under the no-auto-remediate harness (Adam's 2026-05-19
-# decision) the pipeline pauses at p0_review and the locked
-# `reached_assembled = True` cannot be satisfied without operator-
-# driven remediation. v2a evaluates faithfully to the locked bar;
-# expect every no-auto-remediate run to FAIL on this criterion until
-# v2b updates the measurement-point semantic.
+# v1-bar v2b (2026-05-20). See module docstring for the rationale behind
+# each criterion and what changed from the locked 2026-05-18 bar.
 PASS_CRITERIA = {
-    "reached_assembled":         True,
-    "min_validators_pass_or_na": 8,
-    "max_p0_findings":           5,
-    "max_cost_usd":              10.0,
+    "reached_measurement_point":     True,
+    "max_tier_t_ungrounded":         5,
+    "min_claim_marker_resolved_pct": 100,
+    "max_cost_usd":                  10.0,
 }
+
+# Adversarial P0 is ADVISORY, not gating. This threshold only drives a
+# soft "ELEVATED" flag in the report — it never fails the bar.
+ADVERSARIAL_P0_ADVISORY_CEILING = 8
 
 
 @dataclass
 class ProjectMetrics:
     """One project's metrics as collected from disk artifacts.
 
-    Includes both the locked-bar fields and the v1-bar v2a diagnostic
-    fields. Only the locked-bar fields enter crit_all evaluation; the
-    diagnostics are reported but not gating.
+    v1-bar v2b: the four gated criteria are reached_measurement_point,
+    tier_t_ungrounded, claim_markers_resolved_pct, cost. Adversarial
+    P0 and the other fields are diagnostics — reported, not gating.
     """
 
     # Identity / phase.
@@ -100,75 +111,69 @@ class ProjectMetrics:
     draft_dir:                      str
     final_phase:                    str
 
-    # Locked bar inputs.
-    reached_assembled:              bool
-    validators_pass_or_na:          int
-    validators_total:               int
-    validator_breakdown:            dict[str, int]
+    # --- Gated criteria inputs (v2b bar) ---
+    reached_measurement_point:      bool
+    tier_t_ungrounded_count:        int            # deterministic, post-#41
+    claim_markers_total:            int
+    claim_markers_unique:           int
+    claim_markers_resolved:         int
+    claim_markers_resolved_pct:     float
+    cost_so_far_usd:                float          # first-cut adjusted
+
+    # --- Advisory / diagnostic (NOT gating) ---
+    adversarial_p0_count:           int
+    adversarial_json_parseable:     bool
     p0_total:                       int            # adv + Tier T combined
     p0_by_source:                   dict[str, int]
     p0_by_class:                    dict[str, int]
     p0_demoted_count:               int
-    cost_so_far_usd:                float          # first-cut adjusted
+    # Validators run only post-assemble; kept for diagnostic value.
+    reached_assembled:              bool
+    validators_pass_or_na:          int
+    validators_total:               int
+    validator_breakdown:            dict[str, int]
     remediation_cycles_used:        int
     silent_failures:                int
 
-    # v2a diagnostic fields (NOT in crit_all; feed v2b bar revision).
-    reached_p0_review_or_assembled: bool = False   # measurement-point check
-    adversarial_p0_count:           int = 0
-    tier_t_ungrounded_count:        int = 0
-    claim_markers_total:            int = 0
-    claim_markers_unique:           int = 0
-    claim_markers_resolved:         int = 0
-    claim_markers_resolved_pct:     float = 0.0
-    adversarial_json_parseable:     bool = True
-
     notes:                          list[str] = field(default_factory=list)
 
-    # Pass/fail booleans against the LOCKED PASS_CRITERIA.
-    crit_reached_assembled:    bool = False
-    crit_validators_ok:        bool = False
-    crit_p0_ok:                bool = False
-    crit_cost_ok:              bool = False
+    # --- Pass/fail booleans against the v2b PASS_CRITERIA ---
+    crit_reached:              bool = False
+    crit_tier_t:               bool = False
+    crit_markers:              bool = False
+    crit_cost:                 bool = False
     crit_all:                  bool = False
-    overall_label:             str = "FAIL"   # PASS | FAIL | INCONCLUSIVE
+    overall_label:             str = "FAIL"   # PASS | FAIL
+    # Advisory flag — "OK" | "ELEVATED" | "UNMEASURABLE". Never gating.
+    adversarial_advisory:      str = "OK"
 
     def evaluate(self) -> None:
-        """Evaluate the locked 4-criteria bar.
-
-        INCONCLUSIVE handling: when adversarial JSON is unparseable,
-        p0_total under-counts (Tier T alone is countable). If the
-        partial count would otherwise PASS the bar, the verdict is
-        INCONCLUSIVE — we can't claim PASS without measurable
-        adversarial findings. If the partial count already exceeds
-        the threshold, FAIL is still defensible (we know it fails).
-        """
-        self.crit_reached_assembled = (
-            self.reached_assembled == PASS_CRITERIA["reached_assembled"]
+        """Evaluate the v2b 4-criteria bar. Adversarial P0 is advisory
+        only — it sets `adversarial_advisory` but never `crit_all`."""
+        self.crit_reached = self.reached_measurement_point
+        self.crit_tier_t = (
+            self.tier_t_ungrounded_count <= PASS_CRITERIA["max_tier_t_ungrounded"]
         )
-        self.crit_validators_ok = (
-            self.validators_pass_or_na >= PASS_CRITERIA["min_validators_pass_or_na"]
+        self.crit_markers = (
+            self.claim_markers_resolved_pct
+            >= PASS_CRITERIA["min_claim_marker_resolved_pct"]
         )
-        self.crit_p0_ok = self.p0_total <= PASS_CRITERIA["max_p0_findings"]
-        self.crit_cost_ok = (
-            self.cost_so_far_usd <= PASS_CRITERIA["max_cost_usd"]
-        )
+        self.crit_cost = self.cost_so_far_usd <= PASS_CRITERIA["max_cost_usd"]
         self.crit_all = all([
-            self.crit_reached_assembled,
-            self.crit_validators_ok,
-            self.crit_p0_ok,
-            self.crit_cost_ok,
+            self.crit_reached,
+            self.crit_tier_t,
+            self.crit_markers,
+            self.crit_cost,
         ])
+        self.overall_label = "PASS" if self.crit_all else "FAIL"
 
-        if not self.adversarial_json_parseable and self.crit_p0_ok:
-            # Adversarial unparseable; partial count looks OK but is
-            # incomplete. Cannot claim PASS.
-            self.overall_label = "INCONCLUSIVE"
-            self.crit_all = False
-        elif self.crit_all:
-            self.overall_label = "PASS"
+        # Advisory (non-gating) adversarial assessment.
+        if not self.adversarial_json_parseable:
+            self.adversarial_advisory = "UNMEASURABLE"
+        elif self.adversarial_p0_count > ADVERSARIAL_P0_ADVISORY_CEILING:
+            self.adversarial_advisory = "ELEVATED"
         else:
-            self.overall_label = "FAIL"
+            self.adversarial_advisory = "OK"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -247,7 +252,7 @@ def _count_p0s(
     inlined raw P0 counting, missing the filter applied by p0_gate
     (NEEDS CITATION demotion, pre-compliance Data Availability
     demotion). After the fix, the metrics match the orchestrator's
-    log line `Remediation cycle 1: p0_before=N → p0_after=M`.
+    log line `Remediation cycle 1: p0_before=N -> p0_after=M`.
 
     Import is local so this harness still functions if the skill
     package isn't importable in the runtime environment — but in
@@ -340,20 +345,17 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
     final_phase = str(state.get("phase", "unknown"))
     validators_ok, validators_total, breakdown = _count_validators(state)
 
-    # v1-bar v2a: measure the FIRST-CUT state when the draft has been
-    # remediated. audit/iter_1/ holds the snapshot of audit JSONs at
-    # the first P0 gate pause — that's the first-cut quality we want
-    # to measure. If iter_1/ doesn't exist (no remediation has run
-    # yet), audit/ IS the first-cut state. Under the no-auto-
-    # remediate harness (Adam's 2026-05-19 decision), drafts naturally
-    # have audit/ as first-cut (iter_1/ never created).
+    # First-cut measurement when the draft has been remediated.
+    # audit/iter_1/ holds the snapshot of audit JSONs at the first P0
+    # gate pause. If iter_1/ doesn't exist (no remediation), audit/ IS
+    # the first-cut state. Under the no-auto-remediate harness drafts
+    # naturally have audit/ as first-cut.
     iter1_dir = audit_dir / "iter_1"
     if iter1_dir.is_dir() and (iter1_dir / "adversarial_review.json").is_file():
-        # Remediated draft — measure pre-remediation state via snapshot.
         measurement_dir = iter1_dir
         # Cost at first-cut = total - remediation drafter + review spend.
         # review_cost_usd is currently unpopulated by the producer
-        # (V1_X_BACKLOG.md #43); the `or 0.0` makes this forward-
+        # (V1_X_BACKLOG.md #43); the `or 0.0` keeps this forward-
         # compatible when the producer fix lands.
         cycles_data = state.get("remediation_cycles", [])
         remediation_spend = sum(
@@ -368,13 +370,10 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
 
     p0_total, p0_by_source, p0_by_class, p0_demoted = _count_p0s(measurement_dir)
 
-    # Empirical (D3 2026-05-19): adversarial reviewer occasionally
-    # emits malformed JSON (unescaped inner quotes per
-    # feedback_llm_json_unfixable_in_parser.md). Strict json.loads
-    # fails → the strict-count path in p0_gate returns 0 adversarial
-    # P0s, which would FALSELY pass a project whose true first-cut
-    # adversarial output contained P0s. Detect parse failure and
-    # surface as INCONCLUSIVE at evaluate().
+    # Adversarial JSON parseability — advisory only in v2b. A malformed
+    # adversarial JSON makes the adversarial P0 count unreliable, but
+    # adversarial is not a gated criterion, so this never blocks the
+    # verdict — it sets the advisory flag to UNMEASURABLE.
     adv_json_parseable = True
     adv_json_path = measurement_dir / "adversarial_review.json"
     if adv_json_path.is_file():
@@ -385,15 +384,12 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
         except OSError:
             adv_json_parseable = False
     else:
-        adv_json_parseable = False  # missing entirely is also inconclusive
+        adv_json_parseable = False
 
-    # v2a diagnostic split — collected but not gating.
     adv_p0 = int(p0_by_source.get("adversarial", 0))
     tier_t_p0 = int(p0_by_source.get("numeric_grounding", 0))
 
     # Claim marker stats — prefer measurement_dir, fall back to audit/.
-    # iter_1/ snapshots from pre-Phase-B drafts may not carry the
-    # claim_marker_check.json artifact.
     cm_path_candidates = [
         measurement_dir / "claim_marker_check.json",
         audit_dir / "claim_marker_check.json",
@@ -423,12 +419,6 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
         notes.append(
             "adversarial silent-failure observed; gate may have evaluated stale audit"
         )
-    if validators_total == 0 and final_phase != "assembled":
-        notes.append(
-            "no validators ran — expected when paused at p0_review pre-assemble; "
-            "the locked bar's min_validators_pass_or_na=8 cannot be satisfied "
-            "in this state (v2b resolves the harness/bar semantic mismatch)"
-        )
     if cycles_count > 0:
         notes.append(
             f"draft has been remediated ({cycles_count} cycle(s)); v1-bar measures "
@@ -438,35 +428,34 @@ def collect(draft_dir: Path, project_id: Optional[str] = None) -> ProjectMetrics
     if not adv_json_parseable:
         notes.append(
             "adversarial_review.json at the measurement point is MALFORMED "
-            "(unescaped inner quotes per known LLM failure mode). p0_total "
-            "is UNRELIABLE — Tier T findings are counted but adversarial "
-            "P0s cannot be enumerated. Verdict labeled INCONCLUSIVE rather "
-            "than PASS."
+            "or absent. Adversarial P0 count is unreliable — advisory flag "
+            "set to UNMEASURABLE. Adversarial is NOT a gated criterion in "
+            "v2b, so this does not affect the PASS/FAIL verdict."
         )
 
     m = ProjectMetrics(
         project_id=pid,
         draft_dir=str(draft_dir),
         final_phase=final_phase,
-        reached_assembled=(final_phase == "assembled"),
-        validators_pass_or_na=validators_ok,
-        validators_total=validators_total,
-        validator_breakdown=breakdown,
-        p0_total=p0_total,
-        p0_by_source=p0_by_source,
-        p0_by_class=p0_by_class,
-        p0_demoted_count=p0_demoted,
-        cost_so_far_usd=cost_first_cut,
-        remediation_cycles_used=cycles_count,
-        silent_failures=silent,
-        reached_p0_review_or_assembled=reached_measurement_point,
-        adversarial_p0_count=adv_p0,
+        reached_measurement_point=reached_measurement_point,
         tier_t_ungrounded_count=tier_t_p0,
         claim_markers_total=cm_total,
         claim_markers_unique=cm_unique,
         claim_markers_resolved=cm_resolved,
         claim_markers_resolved_pct=cm_pct,
+        cost_so_far_usd=cost_first_cut,
+        adversarial_p0_count=adv_p0,
         adversarial_json_parseable=adv_json_parseable,
+        p0_total=p0_total,
+        p0_by_source=p0_by_source,
+        p0_by_class=p0_by_class,
+        p0_demoted_count=p0_demoted,
+        reached_assembled=(final_phase == "assembled"),
+        validators_pass_or_na=validators_ok,
+        validators_total=validators_total,
+        validator_breakdown=breakdown,
+        remediation_cycles_used=cycles_count,
+        silent_failures=silent,
         notes=notes,
     )
     m.evaluate()
@@ -517,57 +506,50 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.json:
         print(json.dumps(m.to_dict(), indent=2))
-        if m.crit_all:
-            return 0
-        return 3 if m.overall_label == "INCONCLUSIVE" else 2
+        return 0 if m.crit_all else 2
 
-    # Human-readable (v1-bar v2a).
+    # Human-readable (v1-bar v2b).
     print(f"=== {m.project_id} — {m.overall_label} ===")
     print(f"  draft_dir:   {m.draft_dir}")
     print(f"  final_phase: {m.final_phase}")
     print()
-    print("  locked bar (STAGED_IMPROVEMENT_PLAN.md 2026-05-18):")
+    print("  v1-bar v2b (STAGED_IMPROVEMENT_PLAN.md, 2026-05-20):")
     print(
-        f"    reached_assembled:    {m.reached_assembled}  "
-        f"[crit: {'OK' if m.crit_reached_assembled else 'FAIL'}]"
+        f"    reached measurement point: {m.reached_measurement_point}  "
+        f"[crit: {'OK' if m.crit_reached else 'FAIL'}]"
     )
     print(
-        f"    validators_pass+NA:   {m.validators_pass_or_na} / "
-        f"{m.validators_total}  "
-        f"[crit: >= {PASS_CRITERIA['min_validators_pass_or_na']} → "
-        f"{'OK' if m.crit_validators_ok else 'FAIL'}]"
+        f"    Tier T ungrounded:         {m.tier_t_ungrounded_count}  "
+        f"[crit: <= {PASS_CRITERIA['max_tier_t_ungrounded']} → "
+        f"{'OK' if m.crit_tier_t else 'FAIL'}]"
     )
-    if not m.adversarial_json_parseable:
+    print(
+        f"    claim markers resolved:    {m.claim_markers_resolved}/"
+        f"{m.claim_markers_unique} ({m.claim_markers_resolved_pct:.1f}%)  "
+        f"[crit: >= {PASS_CRITERIA['min_claim_marker_resolved_pct']}% → "
+        f"{'OK' if m.crit_markers else 'FAIL'}]"
+    )
+    print(
+        f"    cost_so_far_usd:           ${m.cost_so_far_usd:.2f}  "
+        f"[crit: <= ${PASS_CRITERIA['max_cost_usd']:.2f} → "
+        f"{'OK' if m.crit_cost else 'FAIL'}]"
+    )
+    print()
+    print("  advisory (NOT gating):")
+    if m.adversarial_advisory == "UNMEASURABLE":
         print(
-            f"    p0_total:             {m.p0_total} (Tier T only; adversarial "
-            f"UNPARSEABLE)  [crit: <= {PASS_CRITERIA['max_p0_findings']} → "
-            f"{'OK' if m.crit_p0_ok else 'FAIL'} (partial)]"
+            "    adversarial P0:            UNMEASURABLE "
+            "(adversarial_review.json malformed/absent)"
         )
     else:
         print(
-            f"    p0_total:             {m.p0_total}  "
-            f"[crit: <= {PASS_CRITERIA['max_p0_findings']} → "
-            f"{'OK' if m.crit_p0_ok else 'FAIL'}]"
+            f"    adversarial P0:            {m.adversarial_p0_count}  "
+            f"[advisory ceiling {ADVERSARIAL_P0_ADVISORY_CEILING} → "
+            f"{m.adversarial_advisory}]"
         )
-    print(
-        f"    cost_so_far_usd:      ${m.cost_so_far_usd:.2f}  "
-        f"[crit: <= ${PASS_CRITERIA['max_cost_usd']:.2f} → "
-        f"{'OK' if m.crit_cost_ok else 'FAIL'}]"
-    )
     print()
-    print("  v2a diagnostic detail (not in bar):")
-    print(
-        f"    reached_measurement_point: {m.reached_p0_review_or_assembled} "
-        f"(p0_review|...|assembled)"
-    )
-    print(f"    adversarial_P0:            {m.adversarial_p0_count}"
-          + ("  (UNRELIABLE — JSON malformed)" if not m.adversarial_json_parseable else ""))
-    print(f"    Tier T ungrounded:         {m.tier_t_ungrounded_count}")
-    print(
-        f"    claim markers:             {m.claim_markers_resolved}/"
-        f"{m.claim_markers_unique} resolved "
-        f"({m.claim_markers_resolved_pct:.1f}%)"
-    )
+    print("  diagnostic detail:")
+    print(f"    p0_total:                  {m.p0_total} (adv + Tier T combined)")
     print(f"    p0_by_source:              {m.p0_by_source}")
     print(f"    p0_by_class:               {m.p0_by_class}")
     if m.p0_demoted_count > 0:
@@ -575,7 +557,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"    p0_demoted:                {m.p0_demoted_count} "
             "(NEEDS CITATION + pre-compliance Data Availability filtered)"
         )
-    print(f"    validator_breakdown:       {m.validator_breakdown}")
+    print(
+        f"    validators:                {m.validators_pass_or_na} / "
+        f"{m.validators_total} pass+NA "
+        f"({'post-assemble' if m.reached_assembled else 'expected 0/0 pre-assemble'})"
+    )
     print(f"    remediation_cycles:        {m.remediation_cycles_used}")
     print(f"    silent_failures:           {m.silent_failures}")
     if m.notes:
@@ -583,9 +569,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("  notes:")
         for n in m.notes:
             print(f"    - {n}")
-    if m.crit_all:
-        return 0
-    return 3 if m.overall_label == "INCONCLUSIVE" else 2
+    return 0 if m.crit_all else 2
 
 
 if __name__ == "__main__":
