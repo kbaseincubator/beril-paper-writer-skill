@@ -101,7 +101,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION = "v1"
-TOOL_VERSION = "0.1.0-stage4-tierT"
+# 0.2.0-d052: D-052 (#41) added scientific-notation / K-suffix /
+# trailing-zero normalization. Bumped so emitted numeric_grounding.json
+# audit metadata distinguishes post-#41 output from pre-#41.
+TOOL_VERSION = "0.2.0-d052"
 
 
 # Allowlist patterns. Each matches an entire ``matched_text`` (anchored

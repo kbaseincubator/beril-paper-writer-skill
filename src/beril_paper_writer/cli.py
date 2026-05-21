@@ -9,12 +9,10 @@ Subcommands (per LAYOUT.md "Slash commands"):
   continue        Resume a paused paper draft (apply pick + revision; run drafting).
   assemble        Render markdown intermediates to .docx (Phase 5 — currently stub).
 
-The drafting workflow runs via the shipped shell script tools/paper_writer.sh,
-which the `draft` and `continue` Python subcommands invoke. Same pattern as
-beril-adversarial, with Python wrappers for the front of the pipeline so
-slash-command markdowns can invoke either via bash blocks (paper_writer.sh
-directly) or via the Python CLI (beril-paper-writer draft / continue) — both
-paths land at the same orchestrator.
+The drafting workflow runs via the Python orchestrator
+(`beril_paper_writer.orchestrator.PaperWriterOrchestrator`); the `draft`
+and `continue` subcommands construct and drive it. (The v0.x shell
+orchestrator `tools/paper_writer.sh` was retired 2026-05-20 — D-053.)
 
 Exit codes:
   0  success or paused-cleanly-at-handoff

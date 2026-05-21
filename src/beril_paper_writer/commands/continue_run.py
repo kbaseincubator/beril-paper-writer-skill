@@ -6,22 +6,25 @@ Resume a paused paper draft. The behavior depends on state.json's `phase`:
     Requires --pick TLN. If --revision is non-empty, invokes
     revise_throughline.v1.md via `claude -p` to refine the chosen
     candidate per the user's revision text. Otherwise copies the
-    chosen candidate verbatim into 00_throughline.md. Then sets
-    phase=drafting and dispatches to paper_writer.sh resume, which
-    drafts citation_pool → methods → ... → abstract → assemble →
-    review and pauses at phase=review (the final handoff).
+    chosen candidate verbatim into 00_throughline.md. Then resumes
+    the Python orchestrator, which drafts citation_pool → drafting →
+    review and pauses at phase=p0_review (the v1-MVP measurement
+    point).
 
 - phase=drafting / phase=review
-    Re-dispatches to paper_writer.sh resume with no further action.
-    Useful when a prior run halted mid-draft (claude failure, retry
-    exhaustion). The shell script's idempotency handles the rest.
+    Resumes the Python orchestrator with no further action. Useful
+    when a prior run halted mid-draft (claude failure, retry
+    exhaustion). The orchestrator's phase idempotency handles the rest.
 
 - phase=assembled
     Reports "already complete" and exits 0.
 
 - phase=init
-    Re-dispatches to paper_writer.sh resume which re-runs the early
-    phases idempotently and pauses at throughline_pick.
+    Resumes the Python orchestrator, which re-runs the early phases
+    idempotently and pauses at throughline_pick.
+
+(The v0.x shell orchestrator paper_writer.sh was retired 2026-05-20,
+D-053; all resume paths now drive PaperWriterOrchestrator.)
 
 Per SPEC §5.5 (intercalation hash-diff): on resume, source-artifact
 hashes are recomputed and compared against state.json's recorded
@@ -83,7 +86,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
     p.add_argument(
         "--model",
         default=None,
-        help="Override default model. Forwarded to paper_writer.sh and the revise step.",
+        help="Override default model. Forwarded to the orchestrator and the revise step.",
     )
     p.add_argument(
         "--no-stream",
@@ -488,7 +491,7 @@ def run(args: argparse.Namespace) -> int:
         state.save_state(draft_dir, st)
         print(f"✓ state.json updated: phase=citation_pool, throughline={args.pick}", file=sys.stderr)
 
-        # Now dispatch to paper_writer.sh resume to run the drafting phases.
+        # Now resume the Python orchestrator to run the drafting phases.
         return _resume_via_orchestrator(
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),
@@ -511,7 +514,7 @@ def run(args: argparse.Namespace) -> int:
         "p0_review", "remediate",
         "optimize", "rewrite", "compliance_gate", "compliance",
     ):
-        # paper_writer.sh handles each of these idempotently.
+        # The Python orchestrator handles each of these idempotently.
         return _resume_via_orchestrator(
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),

@@ -42,12 +42,13 @@ _LOCAL_SUBDIRS = ("state",)
 _SHIPPED_FILES = ("SKILL.md",)
 
 # Files inside shipped subdirs that need executable bit set after copy.
-# v0.1.0-spec: these don't exist yet; the loop tolerates missing entries.
+# The loop tolerates missing entries. install copies the whole tools/
+# subdir (see _SHIPPED_SUBDIRS), so this list is chmod hygiene only,
+# not a copy manifest. (paper_writer.sh + the v0.x checker tools were
+# retired 2026-05-20 — D-053; entries dropped here accordingly.)
 _EXECUTABLE_FILES = (
-    "tools/paper_writer.sh",
     "tools/stream_progress.py",
     "tools/paper_writer_helpers.py",
-    "tools/check_throughline_glyphs.py",
     "tools/extract_methods.py",
     "tools/extract_figures.py",
     "tools/extract_tables.py",
@@ -55,8 +56,6 @@ _EXECUTABLE_FILES = (
     "tools/validate_manuscript.py",
     "tools/assemble_docx.py",
     "tools/aggregate_metadata.py",
-    "tools/check_figures_manifest.py",
-    "tools/check_tables_manifest.py",
 )
 
 

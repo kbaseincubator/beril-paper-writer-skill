@@ -316,7 +316,60 @@ v1.x work. Consider (4) before locking v2b's `max_adversarial_p0`.
 
 ## P2 — post-v1.0
 
-### #47 — Data Availability sequencing + orphaned generator machinery
+### #48 — Tier 1 native check-table buildout (v1.1)
+
+**Origin:** the paper_writer.sh retirement audit (2026-05-20, D-053).
+SPEC §7.2 specifies a 9-row deterministic Tier-1 check table; the v1.0
+Python `phase_review` Tier 1 implements only the numeric/claim legs
+(`check_numeric_grounding`, `check_claim_markers`,
+`check_throughline_numerics`). The rest of the table is unimplemented.
+
+The v0.x tools that historically covered some of these rows
+(`check_figures_manifest`, `check_tables_manifest`,
+`check_caption_provenance`, `check_sentence_complexity`,
+`check_abbreviation_discipline`, `check_echo_repetition`) were deleted
+with paper_writer.sh — they were bound to the per-section + `*_manifest.tsv`
+artifacts the v0.8 holistic write abandoned, so they could not be
+wired in as-is. Their *function* is real and deferred here.
+
+**Scope — build these as v0.8-native Tier-1 regex checks against
+holistic-write artifacts (`manuscript.md`, `figures_inventory.md`,
+`tables_inventory.md`, `claim_inventory.tsv`):**
+- Figure/table callout resolution (every `(Fig. N)` / `(Table N)` in
+  prose resolves to an inventory entry) — the cheap, high-value
+  mechanical check; a paper with a dangling figure callout is a real
+  defect.
+- ICMJE IMRAD section presence; AI-disclosure block; data-availability
+  statement presence (subsumes the review-timing concern from #47).
+- Word-count-per-section vs story-outline budget.
+- Language-quality advisories (sentence length, abbreviation
+  discipline, echo repetition) — lower priority; advisory, never
+  gating; only worth it per `feedback_prompt_discipline_needs_post_check`
+  if the copy-edit phase proves insufficient.
+
+**Status:** Open, v1.1. Deliberately deferred from v1.0 per Adam
+2026-05-20 — v1.0 ships the deterministic numeric/claim legs + the
+canonical adversarial reviewer (which covers overclaim/scope/register
+judgmentally). Old tool source is in git history (pre-D-053) for
+reference if any logic is worth porting.
+
+### #47 — Data Availability sequencing + orphaned generator machinery — SUPERSEDED
+
+**Status: SUPERSEDED by #48, 2026-05-20.** The orphaned-machinery half
+is resolved — `check_data_availability.py` + the pre-v0.8 generator
+were deleted with paper_writer.sh (D-053). The residual review-timing
+concern (the adversarial reviewer flags "missing Data Availability"
+at `phase_review` because the section is added later at
+`phase_compliance_gate`) folds into #48's "data-availability statement
+presence" Tier-1 row. Kept here for evidence trail; see #48 for the
+forward-looking work.
+
+**Evidence (Stage 7 holdouts, 2026-05-20):** Every holdout's
+adversarial review flagged "no Data Availability / Code Availability
+statement" as a P0 (`missing_section`). It is **not a real gap in
+the shipped product** — it is a review-timing artifact:
+
+- `holistic_draft.v1.md` instructs the drafter to write only the
 
 **Evidence (Stage 7 holdouts, 2026-05-20):** Every holdout's
 adversarial review flagged "no Data Availability / Code Availability

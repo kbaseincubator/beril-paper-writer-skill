@@ -13,21 +13,20 @@ This command:
      `beril-adversarial` to absolute paths up front, fails loud if
      `claude` is missing, warns at init if `beril-adversarial` is
      missing — Tier J + Tier K)
-  4. Runs the pipeline asynchronously; on `PipelineHalted` at
-     throughline_pick, prints a handoff summary parseable by the
-     slash-command markdown
+  4. Runs the pipeline asynchronously; the orchestrator catches
+     `PipelineHalted` internally and prints the throughline-pick
+     handoff summary itself
 
 See LAYOUT.md 'Slash commands' for the user-facing CLI shape and
 orchestrator.py for the pipeline state machine. (Historical: this
 command was originally a thin wrapper around `tools/paper_writer.sh
 draft`; the Python orchestrator took over in Stage 1, and the bash
-flow is on the retirement track per the 2026-05-17 audit.)
+orchestrator was retired 2026-05-20 — D-053.)
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -55,7 +54,10 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
     p.add_argument(
         "--model",
         default=None,
-        help="Override default model (Sonnet). Forwarded to paper_writer.sh.",
+        help=(
+            "Override the holistic-draft model (default: Opus 4.6, per "
+            "D-050). Forwarded to the orchestrator."
+        ),
     )
     p.add_argument(
         "--depth",
@@ -202,86 +204,10 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         asyncio.run(orch.run_pipeline())
-        
-        # At this point, the pipeline should raise PipelineHalted or finish.
-        # If it halted at throughline_pick, it should have printed the handoff message.
+        # run_pipeline catches PipelineHalted internally and prints the
+        # throughline-pick handoff itself; a normal return means the
+        # pipeline paused cleanly or finished.
         return 0
     except Exception as e:
-        if type(e).__name__ == "PipelineHalted":
-            # Read .handoff.json to print the summary.
-            # Stage 1 Tier B contract-drift fix (2026-05-11): the plan.v1
-            # prompt emits 'candidates_summary' (dict TLN→description) and
-            # 'next_steps' (free-form prose). The legacy draft.py was
-            # reading 'choices' (array) and 'resume_command' (string) —
-            # neither of which the prompt produces. Result: the handoff
-            # printer surfaced nothing useful and the user had to dig
-            # through the JSON to find the resume command. This block now
-            # reads BOTH schemas defensively.
-            handoff = draft_dir / ".handoff.json"
-            if handoff.is_file():
-                try:
-                    import json
-                    with handoff.open() as f:
-                        data = json.load(f)
-                    print("", file=sys.stderr)
-                    print("─── Draft paused at throughline_pick ───", file=sys.stderr)
-                    print(f"  draft_dir: {draft_dir}", file=sys.stderr)
-                    print(f"  handoff:   {handoff}", file=sys.stderr)
-
-                    # Candidate count + descriptions — accept either
-                    # schema. plan.v1 emits 'candidates_summary' (dict);
-                    # earlier design emitted 'choices' (list).
-                    candidates_summary = data.get("candidates_summary") or {}
-                    choices_list = data.get("choices") or []
-                    n_candidates = (
-                        len(candidates_summary)
-                        if isinstance(candidates_summary, dict) and candidates_summary
-                        else len(choices_list)
-                    )
-                    print(f"  candidates: {n_candidates}", file=sys.stderr)
-                    if isinstance(candidates_summary, dict):
-                        for cid, desc in list(candidates_summary.items())[:6]:
-                            # Truncate long descriptions for readability.
-                            desc_str = str(desc)
-                            if len(desc_str) > 200:
-                                desc_str = desc_str[:197] + "..."
-                            print(f"    {cid}: {desc_str}", file=sys.stderr)
-
-                    n_warnings = len(data.get("advisory_warnings", []))
-                    if n_warnings:
-                        print(f"  advisory warnings: {n_warnings}", file=sys.stderr)
-
-                    # Resume command — accept 'resume_command' (explicit),
-                    # else derive from 'next_steps' (prose), else synthesize
-                    # a defensible default for throughline_pick.
-                    resume = data.get("resume_command")
-                    next_steps = data.get("next_steps")
-                    if not resume and next_steps:
-                        # Show the prompt's prose; user reads + extracts.
-                        print(f"  next_steps:", file=sys.stderr)
-                        for line in str(next_steps).splitlines():
-                            print(f"    {line}", file=sys.stderr)
-                    if not resume:
-                        # Synthesize the canonical throughline-pick resume.
-                        # The continue command requires --pick TLN; the
-                        # user has to choose. We surface the canonical form
-                        # so the next step is obvious.
-                        cid_hint = (
-                            next(iter(candidates_summary)) if candidates_summary
-                            else "TL1"
-                        )
-                        resume = (
-                            f"beril-paper-writer continue {draft_dir} "
-                            f"--pick {cid_hint}  "
-                            f"# pick one of: "
-                            f"{', '.join(candidates_summary.keys()) if candidates_summary else 'TL1, TL2, TL3'}"
-                        )
-                    print(f"  resume:    {resume}", file=sys.stderr)
-                    print("", file=sys.stderr)
-                    print(draft_dir)
-                except Exception as ex:
-                    print(f"Warning: could not read handoff JSON at {handoff}: {ex}", file=sys.stderr)
-            return 0
-            
         print(f"error: pipeline execution failed: {e}", file=sys.stderr)
         return 2

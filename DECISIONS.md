@@ -1814,3 +1814,61 @@ Related: V1_X_BACKLOG.md #41 (P0, replaces dev-set evidence of
 comma fix is a continuation of B1.e robustness work);
 `check_numeric_grounding.py` Stage 7 Patch 2 (2026-05-18) which
 established the generic source-side extraction pattern.
+
+## D-053 — 2026-05-20 — Retire paper_writer.sh + the v0.x checker tools
+
+**Decision.** Delete the v0.x shell orchestrator `paper_writer.sh`
+(~3468 LOC) and the 12 checker tools reachable only through it, as
+part of the v1.0 ship. Amend SPEC §7.2 to match the v1.0
+implementation.
+
+**Context.** The v0.8 redesign (D-034) replaced the shell orchestrator
+with the Python `PaperWriterOrchestrator`. `paper_writer.sh` was left
+shipped-but-unused — a half-finished migration. The pre-v1 code +
+documentation review (2026-05-20) found it was the root of: 5 docs
+describing it as the live orchestrator; the `next_actions.md` artifact
+cited as a real output (only paper_writer.sh wrote it); 12 checker
+tools wired only into it; stale `cli.py` / `continue_run.py`
+docstrings. Doc staleness and code dead-weight were one problem.
+
+**Audit before deletion.** Each of the 12 tools was classified
+against SPEC and the Python orchestrator:
+- 5 SPEC-explicitly-RETIRED — `check_overclaim`, `check_scope_coherence`
+  (both superseded by the canonical adversarial reviewer's Tier-2
+  classes), `check_repair_scope` (no rewrite loop in v0.8),
+  `check_throughline_glyphs` (story builder absorbs it),
+  `ensemble_review` (never wired).
+- 6 SPEC §7.2 claimed Tier 1 "subsumes" — `check_figures_manifest`,
+  `check_tables_manifest`, `check_caption_provenance`,
+  `check_sentence_complexity`, `check_abbreviation_discipline`,
+  `check_echo_repetition`. The audit found this claim FALSE: the
+  Python Tier 1 never wired them, and they are architecturally bound
+  to the per-section + `*_manifest.tsv` artifacts the holistic write
+  abandoned. All advisory (exit 0). Deferred to v1.1 (#48).
+- 1 — `check_data_availability`: SPEC said KEEP, implementation
+  orphaned it; v0.8's Data Availability path is the compliance_gate
+  autofix. Deleted; folded into #48.
+
+All 12 confirmed advisory and confirmed to have zero live imports
+before deletion. 7 had test files (also deleted).
+
+**Why defer the 6 rather than wire them in.** They are advisory-only
+(never gated, even in v0.x); the Stage 7 holdouts passed v1-bar v2b
+without them; and re-providing their function correctly means
+v0.8-native rewrites against holistic artifacts, not as-is
+integration. Bundling all of SPEC §7.2's unimplemented Tier-1 rows
+into one honest v1.1 item (#48) is cleaner than shipping v1.0 with a
+few freshly-wired advisory tools and the rest still missing. v1.0
+ships the deterministic numeric/claim Tier-1 legs + the canonical
+adversarial reviewer.
+
+**Scope of the change.** Deleted: `paper_writer.sh`, 12 tool files, 7
+test files. Edited: `install_skill.py` (chmod list), SPEC §7.2 + the
+tool-disposition table, `cli.py` / `continue_run.py` / `draft.py`
+docstrings, `draft.py` (removed the unreachable `PipelineHalted`
+handler — `run_pipeline` catches it internally),
+`check_numeric_grounding.py` `TOOL_VERSION` bump.
+
+Related: D-034 (v0.8 holistic redesign — the "subtraction over
+addition" intent this completes); V1_X_BACKLOG #48 (v1.1 Tier-1
+buildout), #47 (superseded by #48).

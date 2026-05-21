@@ -938,11 +938,24 @@ Pure mechanical checks; LLM pass only for ambiguity resolution.
 | AI-disclosure block (M3-equivalent) | regex |
 | Data-availability statement (M4-equivalent) | regex + length check |
 
-This subsumes v0.7.x's `validate_manuscript.py M1–M10` plus the v0.6
-manifest cross-walks (`check_figures_manifest.py`, `check_tables_manifest.py`,
-`check_caption_provenance.py`) plus the v0.8 punch list Tier-B advisory
-checkers (`check_sentence_complexity.py`, `check_abbreviation_discipline.py`,
-`check_echo_repetition.py`).
+**v1.0 implementation status (D-053, 2026-05-20).** The v1.0 Tier 1
+implements the *deterministic numeric/claim* legs:
+`check_numeric_grounding.py` (Tier T), `check_claim_markers.py`, and
+`check_throughline_numerics.py` (run at phase_plan). `validate_manuscript.py`
+runs post-assemble at the compliance gate, not at this Tier-1 point.
+
+The v0.6 manifest cross-walks (`check_figures_manifest.py`,
+`check_tables_manifest.py`, `check_caption_provenance.py`) and the v0.8
+language-quality advisory checkers (`check_sentence_complexity.py`,
+`check_abbreviation_discipline.py`, `check_echo_repetition.py`) were
+**retired with the v0.x shell orchestrator** (D-053). They were
+architecturally bound to the per-section + `*_manifest.tsv` artifacts
+the v0.8 holistic write abandoned. Re-providing their function as
+v0.8-native Tier-1 regex checks — the remaining rows of the table
+above — is the **v1.1 "Tier 1 native check-table buildout"** item
+(V1_X_BACKLOG #48). v1.0 ships the deterministic numeric/claim legs
+plus the canonical adversarial reviewer (Tier 3); the manifest and
+language-quality rows are v1.1.
 
 **Cost:** ~$0.02 per pass. **Cap:** 2 passes; on second-pass failure, the
 specific failures route to Phase 4 selective per-section work or to
@@ -1381,20 +1394,20 @@ go/no-go shifts toward "keep v0.7.x as default."
 | `prompts/fallback_reviewer.v1.md` | inline reviewer | REWRITTEN → `fallback_reviewer.v2.md` | Tier 3 fallback when beril-adversarial CLI absent (Q5); rewrites to v3 paper schema; stays in active prompts/, not archive/ |
 | `prompts/figure_caption.v1.md` | LLM caption synthesis | KEPT (Phase 8) | No change |
 | `validate_manuscript.py` (M1–M10) | post-draft validator | REWRITTEN as Tier 1 cascade | Logic preserved; routing and verbiage change |
-| `check_throughline_glyphs.py` | plan.v1 cross-walk | RETIRED → archive/ | Phase 1 story builder absorbs glyph discipline |
-| `check_data_availability.py` | M4 helper | KEPT → Phase 6 | Compliance gate item |
-| `check_figures_manifest.py` | manifest cross-walk | KEPT → Tier 1 | Mechanical check |
-| `check_tables_manifest.py` | manifest cross-walk | KEPT → Tier 1 | Mechanical check |
-| `check_caption_provenance.py` | caption integrity | KEPT → Tier 1 | Mechanical check |
-| `check_scope_coherence.py` | section drift | RETIRED → archive/ | Tier 2 register_drift class replaces |
-| `check_overclaim.py` | overclaim detector | RETIRED → archive/ | Tier 2 unbacked_quantitative class replaces |
-| `check_sentence_complexity.py` | language quality | KEPT → Tier 1 | Mechanical (the v0.8.0 punch-list version) |
-| `check_abbreviation_discipline.py` | language quality | KEPT → Tier 1 | Mechanical |
-| `check_echo_repetition.py` | language quality | KEPT → Tier 1 | Mechanical |
-| `check_repair_scope.py` | rewrite-loop scope | RETIRED → archive/ | No rewrite loop in v0.8 |
-| `ensemble_review.py` | (currently unused?) | RETIRED if not wired | TBD at M3 |
+| `check_throughline_glyphs.py` | plan.v1 cross-walk | DELETED (D-053) | Phase 1 story builder absorbs glyph discipline |
+| `check_data_availability.py` | M4 helper | DELETED (D-053) | v0.x-bound; v0.8 Data Availability path is the compliance_gate autofix |
+| `check_figures_manifest.py` | manifest cross-walk | DELETED (D-053) | v0.x-architecture-bound; function deferred to v1.1 (#48) |
+| `check_tables_manifest.py` | manifest cross-walk | DELETED (D-053) | v0.x-architecture-bound; function deferred to v1.1 (#48) |
+| `check_caption_provenance.py` | caption integrity | DELETED (D-053) | v0.x-architecture-bound; function deferred to v1.1 (#48) |
+| `check_scope_coherence.py` | section drift | DELETED (D-053) | Tier 2 register_drift class replaces |
+| `check_overclaim.py` | overclaim detector | DELETED (D-053) | Tier 2 unbacked_quantitative class replaces |
+| `check_sentence_complexity.py` | language quality | DELETED (D-053) | Advisory; function deferred to v1.1 (#48) |
+| `check_abbreviation_discipline.py` | language quality | DELETED (D-053) | Advisory; function deferred to v1.1 (#48) |
+| `check_echo_repetition.py` | language quality | DELETED (D-053) | Advisory; function deferred to v1.1 (#48) |
+| `check_repair_scope.py` | rewrite-loop scope | DELETED (D-053) | No rewrite loop in v0.8 |
+| `ensemble_review.py` | shell-era review aggregator | DELETED (D-053) | Never wired into the Python pipeline |
 | `assemble_docx.py` | docx renderer | KEPT (Phase 8) | No change |
-| `paper_writer.sh` | 3000+ line orchestrator | REWRITTEN | New phase enum, new dispatch table; ~1500 lines targeted |
+| `paper_writer.sh` | v0.x shell orchestrator | DELETED (D-053) | Superseded by the Python orchestrator in v0.8; retired 2026-05-20 |
 | `state.py` | state.json schema | EXTENDED | v0.7→v0.8 migration in M8 |
 | `commands/draft.py` + `continue_run.py` | CLI dispatchers | EXTENDED | New phase enum support; v0.7 flags retained for back-compat where possible |
 
