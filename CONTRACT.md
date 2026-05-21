@@ -1,12 +1,13 @@
 # Cross-skill interop contract — paper-writer consumer side
 
-**Status:** Created at v0.6.5 (2026-05-03). Consumer-side contract for
-beril-paper-writer's dependency on beril-adversarial.
+**Status:** Created v0.6.5 (2026-05-03); reviewed current as of v1.0
+(2026-05-20). Consumer-side contract for beril-paper-writer's
+dependency on beril-adversarial.
 
-**Companion:** beril-adversarial's producer-side CONTRACT.md (v0.7.0)
-documents the full CLI surface, JSON schemas, and migration procedures.
-This document pins **what paper-writer expects** and **how it handles
-the adversarial skill's output**.
+**Companion:** beril-adversarial's producer-side CONTRACT.md
+documents the full CLI surface, JSON schemas, and migration
+procedures. This document pins **what paper-writer expects** and
+**how it handles the adversarial skill's output**.
 
 ---
 
@@ -20,8 +21,8 @@ Two reviewer modes exist:
 
 | Mode | When used | CLI | Speed | Classes | Tool access |
 |---|---|---|---|---|---|
-| **Fallback inline** | Default in v0.6.x; always used in rewrite loop | `claude -p` with `fallback_reviewer.v1.md` | ~30s | 3 (overclaim, citation rigor, scope alignment) | None |
-| **Canonical adversarial** | Post-rewrite audit (v0.7.0+) | `beril-adversarial review <dir> --type paper` | 5–10 min | 10 | PubMed, WebSearch, Read |
+| **Canonical adversarial** | Default at Tier 3 of `phase_review` (in-pipeline) | `beril-adversarial review <dir> --type paper` | 5–10 min | 10 | PubMed, WebSearch, Read |
+| **Fallback inline** | Tier 3 only when the canonical CLI is absent or `--no-adversarial` is set | `claude -p` with `fallback_reviewer.v1.md` | ~30s | 3 (overclaim, citation rigor, scope alignment) | None |
 
 The fallback reviewer is **not a degraded adversarial** — it's a
 purpose-built fast reviewer for the rewrite loop. The canonical
@@ -86,25 +87,27 @@ CONTRACT.md).
 
 ### JSON schema version
 
-Paper-writer v0.7.x accepts: **`adversarial-review-paper.v2`** or
+Paper-writer v1.0 accepts: **`adversarial-review-paper.v2`** or
 **`adversarial-review-paper.v3`** (v3 is the current adversarial
 output as of adversarial v0.7.0+). v3 changes: class rename
 `narrative_weakness` → `central_objection`; new `citation_reality`
 class; `--output` flag honored. See adversarial CONTRACT.md §v0.7.0
 migration.
 
-**Note:** Paper-writer v0.7.x does not yet invoke the canonical
-adversarial reviewer in-pipeline (`phase_adversarial_audit` is
-planned but unimplemented). The canonical reviewer is used
-standalone via `beril-adversarial review --type paper`. The
-in-pipeline rewrite loop uses the fallback inline reviewer only.
+**Note:** Paper-writer v1.0 invokes the canonical adversarial
+reviewer **in-pipeline** at Tier 3 of `phase_review` — the Python
+orchestrator runs `beril-adversarial review --type paper` directly
+(absolute-path resolution + loud-warn fallback per DECISIONS.md
+D-051). The inline `fallback_reviewer.v1.md` runs at Tier 3 only
+when the canonical CLI is absent or `--no-adversarial` is set. The
+Tier-3 outcome is recorded in `audit/review_mode.json` (see below).
 
 Schema version is found in the JSON at `.schema_version`.
 
 ### Exit code handling
 
-Paper-writer's orchestrator (paper_writer.sh) should handle adversarial
-exit codes as follows:
+Paper-writer's Python orchestrator handles adversarial exit codes as
+follows:
 
 | Exit | Meaning | Paper-writer policy |
 |---|---|---|
@@ -120,9 +123,9 @@ reviewer and rewrite loop use legacy labels. The mapping is bijective:
 
 | v2 JSON (`severity`) | Paper-writer label | Rewrite-loop behavior |
 |---|---|---|
-| `P0` | Critical | Triggers rewrite dispatch to affected section |
-| `P1` | Important | Surfaces in next_actions.md; rewrite-eligible at pass 1 |
-| `P2` | Suggested | next_actions.md only; not auto-rewritten |
+| `P0` | Critical | Counted by the P0 gate; surfaced in `p0_findings.md` with proceed options |
+| `P1` | Important | Surfaces in `p0_findings.md`; remediation-eligible |
+| `P2` | Suggested | `p0_findings.md` only; not auto-remediated |
 | `info` | _(no action)_ | Single `central_objection` finding (v3; was `narrative_weakness` in v2); strategic note for author. Not a fix target |
 
 Consumer-side translation:
@@ -153,9 +156,9 @@ classes that need special handling:
 | `citation_reality` | paper-only | Routes to references.v1.md rewrite + citation_map fix |
 | `report_drift` | paper-only | Routes to fix_target + reframing_log.md update |
 | `abstract_body_mismatch` | paper-only | Routes to abstract.v1.md rewrite |
-| `missing_section` | paper-equiv | Surfaces in next_actions.md (cannot auto-generate a section) |
+| `missing_section` | paper-equiv | Surfaces in `p0_findings.md` (cannot auto-generate a section) |
 | `section_arc` | paper-equiv | Routes to fix_target section's rewrite prompt |
-| `throughline` | yes | Surfaces in next_actions.md (throughline is user-owned) |
+| `throughline` | yes | Surfaces in `p0_findings.md` (throughline is user-owned) |
 | `central_objection` (v3) / `narrative_weakness` (v2) | yes | No action — strategic note (info severity) |
 
 ### fix_target values (paper-writer prompt names)
@@ -169,10 +172,9 @@ abstract.v1.md, limitations.v1.md, references.v1.md,
 00_throughline.md, reframing_log.md, manuscript.v1.md
 ```
 
-Paper-writer's rewrite dispatcher maps these to the actual rewrite
+Paper-writer's remediation dispatcher maps these to the actual rewrite
 invocation. If a `fix_target` value does not match a known prompt,
-the finding is logged to `audit/rewrite_summary.txt` and surfaced
-in `next_actions.md` for manual resolution.
+the finding is surfaced in `p0_findings.md` for manual resolution.
 
 ---
 
@@ -182,43 +184,20 @@ in `next_actions.md` for manual resolution.
 
 | Paper-writer | Adversarial | Schema | Notes |
 |---|---|---|---|
-| v0.6.x | v0.6.0–v0.6.3 | paper.v2 | Current stable pair |
-| v0.6.x | v0.7.0 | paper.v3 | v3 output readable but `narrative_weakness` → `central_objection` class rename requires paper-writer parser update |
-| v0.7.0 (planned) | v0.7.0 | paper.v3 | Full v3 adoption |
+| v1.0 | v0.7.0.5+ | paper.v3 | Current pair. v1.0 parses both paper.v2 and paper.v3; v3 is the live adversarial output |
 
-### Runtime version check (v0.7.0+)
+### Runtime resolution + fallback
 
-Paper-writer's orchestrator should verify adversarial is installed and
-at a compatible version before invoking the canonical reviewer:
-
-```bash
-# In paper_writer.sh, before phase_adversarial_audit:
-if ! command -v beril-adversarial &>/dev/null; then
-    log_warn "beril-adversarial not installed; skipping canonical audit"
-    log_warn "Install: pipx install beril-adversarial-skill"
-    return 0
-fi
-
-adv_version=$(beril-adversarial --version 2>/dev/null || echo "unknown")
-log_step "beril-adversarial version: $adv_version"
-
-# Version compatibility gate (update when schema changes):
-case "$adv_version" in
-    0.6.*|0.7.*|0.8.*)
-        ;;  # Compatible range
-    *)
-        log_warn "beril-adversarial $adv_version may be incompatible"
-        log_warn "Expected 0.6.x–0.8.x for adversarial-review-paper.v2/v3"
-        log_warn "Falling back to inline reviewer"
-        return 0
-        ;;
-esac
-```
-
-**Note:** `beril-adversarial --version` outputs the version string
-to stdout (verified at v0.7.0). The check is advisory — an
-unrecognized version falls back to the inline reviewer rather than
-failing the pipeline.
+The Python orchestrator resolves the `beril-adversarial` CLI to an
+absolute path at construction time (`resolve_adversarial_bin()`,
+honoring the `BERIL_ADVERSARIAL_BIN` env override). If the CLI is
+not found, the orchestrator logs a loud warning at init — minutes
+before `phase_review` — so the operator knows what kind of review is
+coming, and Tier 3 falls back to the inline `fallback_reviewer.v1.md`.
+This is the loud-warn fallback of DECISIONS.md D-051; the canonical
+reviewer is required-by-default but its absence degrades gracefully
+rather than halting. The Tier-3 outcome is recorded in
+`audit/review_mode.json`.
 
 ---
 
@@ -384,7 +363,7 @@ When either side needs to change an interface that the other depends on:
 
 - beril-adversarial CONTRACT.md (producer side): `spike/beril-adversarial-skill-draft/CONTRACT.md`
 - DECISIONS.md D-005: loose coupling rationale
-- paper_writer.sh lines 2242–2262: architecture decision comment
+- DECISIONS.md D-051: adversarial CLI resolution + loud-warn fallback
 - fallback_reviewer.v1.md: inline reviewer prompt (3-class scope)
 - Memory: `feedback_cross_skill_contract_drift.md` (why this contract exists)
 - Memory: `project_adversarial_v0_6_0.md` (adversarial v0.6.0 paper alignment)

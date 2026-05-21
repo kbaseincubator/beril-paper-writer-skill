@@ -14,10 +14,10 @@ expected volume and impact:
    (`validate_manuscript.py`), new post-checkers (`check_*.py`), or
    extensions to existing ones. Medium volume; catches systematic
    failures mechanically.
-3. **Orchestrator fixes** — `paper_writer.sh` bug fixes, phase-
+3. **Orchestrator fixes** — `orchestrator.py` bug fixes, phase-
    ordering changes, new pipeline phases. Lower volume; higher risk.
 
-No other categories flow back in v0.7.x. Per-draft output
+No other categories flow back. Per-draft output
 (`papers/draft_N/`), state files, and project-derived data are
 strictly user-owned and never flow upstream.
 
@@ -98,9 +98,9 @@ Validators live at `src/beril_paper_writer/skill/tools/`:
 
 **Requirements:**
 
-- Every new validator or checker must include unit tests. The current
-  test suite has 720 tests; new validators should add proportional
-  coverage.
+- Every new validator or checker must include unit tests; new
+  validators should add proportional coverage. Run `pytest` from the
+  repo root to confirm the suite passes clean.
 - Validators return `ValidatorResult` with `status` in
   `{pass, fail, soft-warning}`. New validators must document which
   status they use and why.
@@ -109,8 +109,10 @@ Validators live at `src/beril_paper_writer/skill/tools/`:
 
 ### Orchestrator fixes
 
-`paper_writer.sh` is the ~2700-line bash orchestrator. Changes here
-have the highest blast radius. Submit with:
+The Python orchestrator (`src/beril_paper_writer/orchestrator.py`,
+class `PaperWriterOrchestrator`) drives the pipeline phases. New
+pipeline phases and phase-ordering changes go here. Changes have the
+highest blast radius. Submit with:
 
 - The specific bug or behavior change.
 - A regression test or verification command.
@@ -136,12 +138,13 @@ pip install -e ".[dev]" --break-system-packages
 pytest tests/ -v
 ```
 
-Expected: 720+ tests pass. If your change adds new functionality,
+The suite should pass clean. If your change adds new functionality,
 add tests. If your change fixes a bug, add a regression test.
 
 ## Release cadence
 
-Contributions are batched into point releases (v0.7.x). There is no
+Contributions are batched into point releases off the current
+v1.x line. There is no
 fixed schedule; releases happen when a contribution set is meaningful
 and all tests pass. Each release documents what changed, what it
 costs, and what users need to do (typically: `pipx install --force` +

@@ -147,11 +147,9 @@ Sonnet 4.5. Off-class models (Haiku, third-party) may need prompt tuning.
 
 Sets a *soft serial* cost ceiling. The orchestrator's circuit breaker
 checks `state.cost_so_far_usd` before each LLM call and halts if it
-exceeds N. Parallel calls (e.g., paper_writer.sh's legacy best-of-3
-fallback reviewer, which is on the retirement track per the
-2026-05-17 audit) can overshoot the cap because all candidates start
-before any returns. The Python orchestrator's review path is serial and
-respects the cap cleanly.
+exceeds N. The Python orchestrator's review path is serial, so it
+respects the cap cleanly — there are no parallel candidate calls that
+could overshoot the cap before the breaker checks again.
 
 ### `--depth`
 
@@ -232,9 +230,9 @@ PATH-visibility dependency entirely — useful when the orchestrator runs
 nested under Claude Code (where the inherited PATH may not include
 `~/.nvm/versions/node/*/bin/` even if the interactive shell has it).
 
-The legacy bash flow (`paper_writer.sh`) is on the retirement track per
-the 2026-05-17 audit. New invocations go through the Python orchestrator;
-the bash flow is preserved as a safety net during the transition.
+All invocations run through the Python orchestrator
+(`src/beril_paper_writer/orchestrator.py`). The legacy bash flow
+(`paper_writer.sh`) has been removed per decision D-053.
 
 ## Cross-references
 

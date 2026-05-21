@@ -361,8 +361,9 @@ Every live-test failure cycle in v0.4–v0.7.x produced a per-section patch:
 - v0.6: tables pipeline (extract, manifest, post-check, embed).
 - v0.7.0/0.1: rewrite_passes counter, abstract italic labels, figure-manifest
   + scope-coherence false positives, M2 sentence caps, abstract anti-patterns.
-- v0.7.2 (in flight): Data Availability fixes.
-- The deferred v0.8.0 punch list: 7 prompt rules + 3 advisory checkers.
+- v0.7.2: Data Availability fixes.
+- The v0.8.0 punch list: 7 prompt rules + 3 advisory checkers (the
+  checkers were later retired with paper_writer.sh — D-053).
 
 The pattern is asymptotic. Each patch closes one symptom of the same
 upstream weakness — the per-section orchestrator hands each prompt a slice

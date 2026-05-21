@@ -9,7 +9,7 @@ project ready (REPORT.md + notebooks + figures).
 **Time:** ~5 minutes for install + configure; ~15–50 minutes for a
 full paper draft depending on depth.
 
-**Cost:** A standard-depth paper draft on Sonnet costs roughly
+**Cost:** A standard-depth paper draft on Opus costs roughly
 $15–80 depending on project complexity and tier. To reduce cost:
 use `--depth quick` (~$5–15), use `--no-adversarial` to skip the
 review-rewrite loop, or use `--model` to select a cheaper model.
@@ -60,7 +60,7 @@ This installs the `beril-paper-writer` CLI. Verify it worked:
 beril-paper-writer --version
 ```
 
-You should see `beril-paper-writer-skill 0.7.2` (or later).
+You should see `beril-paper-writer-skill 1.0.0` (or later).
 
 ### Configure
 
@@ -139,7 +139,7 @@ beril-paper-writer draft .
 | `--mode report` | Structured activity report | tier-driven |
 | `--depth quick` | Fast draft (~5–10 min, lower cost) | `standard` |
 | `--depth deep` | Thorough draft (~30–50 min) | `standard` |
-| `--model <id>` | Override LLM model | Sonnet |
+| `--model <id>` | Override LLM model | Opus |
 | `--no-adversarial` | Skip adversarial review; use inline reviewer | off |
 | `--max-cost-usd N` | Halt if cumulative spend exceeds $N | none |
 
@@ -304,7 +304,7 @@ manual edits or to inform a re-draft.
 | Depth | Typical cost | Wall clock |
 |---|---|---|
 | `quick` | $5–15 | 5–10 min |
-| `standard` | $15–50 | 15–25 min |
+| `standard` | $15–50 | 15–40 min |
 | `deep` | $30–80 | 30–50 min |
 
 Costs vary with project size (more notebooks = more extraction
@@ -323,8 +323,9 @@ EXPLORATORY ones).
   pricing).
 
 The pipeline reports cumulative cost in `state.json` and in the
-terminal progress stream. At the end, `next_actions.md` includes
-the total spend.
+terminal progress stream. The P0 gate's `p0_findings.md` records the
+spend at gate time; the final total is carried in
+`state.cost_so_far_usd`.
 
 ---
 
@@ -350,7 +351,7 @@ On the hub, check that `~/.local/bin` is in your PATH. Run
 draft is incomplete but state is saved. Increase the limit and run
 `continue` to finish.
 
-**Figures not appearing in manuscript** — Check `next_actions.md`
+**Figures not appearing in manuscript** — Check `p0_findings.md`
 for figure-manifest warnings. Figures must be in the project's
 `figures/` directory with filenames matching `fig<N>_<name>.<ext>`.
 

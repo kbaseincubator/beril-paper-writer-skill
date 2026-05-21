@@ -13,16 +13,20 @@
 + Stage 3 closure (2026-05-17).
 **Status:** Living document. Updated incrementally as features ship.
 
-> **Known stale areas (audit 2026-05-17):** The REPAIR_MODE per-section
-> contract (§ "Per-section prompt invocation contract" subsection) and
-> the `state.json` schema example use per-section file names
-> (`01_methods.md`, `02_results.md`, ...) that no longer exist in the
-> Stage 3 holistic-draft flow. The manuscript is now a single
-> `manuscript.md`. Those sections are accurate for the historical
-> v0.7.x bash flow but stale for the current Python orchestrator.
-> Deeper LAYOUT.md cleanup is on the post-bash-retirement backlog;
-> the "Stage 3 additions" section at the end of this doc is the
-> authoritative description of the current runtime state.
+> **Known stale areas (audit 2026-05-17, updated for v1.0):** The
+> REPAIR_MODE per-section contract (§ "Per-section prompt invocation
+> contract" subsection) and the `state.json` schema example use
+> per-section file names (`01_methods.md`, `02_results.md`, ...) that
+> no longer exist in the Stage 3 holistic-draft flow. The manuscript
+> is now a single `manuscript.md`. Those sections describe a
+> historical sectional flow and are stale for the current Python
+> orchestrator. Orchestrator references throughout this doc have been
+> updated to the Python orchestrator
+> (`src/beril_paper_writer/orchestrator.py`); the legacy
+> `paper_writer.sh` bash flow was removed per decision D-053. Deeper
+> per-section cleanup remains on the backlog; the "Stage 3 additions"
+> section at the end of this doc is the authoritative description of
+> the current runtime state.
 
 This document specifies the shape of `ArkinLaboratory/beril-paper-writer-skill`.
 The skill mirrors `beril-adversarial-skill-draft`'s pipx-installable, ships-
@@ -54,7 +58,6 @@ ArkinLaboratory/beril-paper-writer-skill/
 │       ├── SKILL.md
 │       ├── commands/        slash-command markdowns (.md per CLI verb)
 │       ├── tools/
-│       │   ├── paper_writer.sh        the orchestrator (planned ~1000 lines)
 │       │   ├── stream_progress.py     reused parser pattern from adversarial
 │       │   ├── extract_methods.py     notebook AST walker for Methods grounding
 │       │   ├── extract_figures.py     figure selection + caption extraction
@@ -100,7 +103,8 @@ ArkinLaboratory/beril-paper-writer-skill/
 ## What ships vs. what runs
 
 **Ships in the package (static, versioned):**
-- Shell orchestrator `tools/paper_writer.sh`
+- Python orchestrator `src/beril_paper_writer/orchestrator.py`
+  (class `PaperWriterOrchestrator`)
 - Python helpers under `tools/` (extract_methods, extract_figures,
   citation_pool, validate_manuscript, assemble_docx, stream_progress)
 - 10 versioned `.v1.md` system prompts under `prompts/`
@@ -243,12 +247,13 @@ files `01_methods.md` through `07_data_availability.md` and an
 `assemble_docx.py` post-step concatenated them. That sectional-flow
 output shape is retired.)
 
-## Orchestrator capabilities (what `paper_writer.sh` must provide)
+## Orchestrator capabilities (what the orchestrator must provide)
 
-The prompts assume an orchestrator (`paper_writer.sh`, planned in
-Phase 4) that exposes the following capabilities. None of these are
-called from inside a prompt; the orchestrator runs them between
-prompt invocations.
+The prompts assume an orchestrator (the Python
+`PaperWriterOrchestrator` in `src/beril_paper_writer/orchestrator.py`)
+that exposes the following capabilities. None of these are called
+from inside a prompt; the orchestrator runs them between prompt
+invocations.
 
 ### Extract-tool invocation
 
@@ -344,8 +349,8 @@ hatches.
 
 ## Per-section prompt invocation contract
 
-The orchestrator (`paper_writer.sh`) invokes each section prompt as
-a `claude -p` subagent. Two invocation modes:
+The orchestrator (the Python `PaperWriterOrchestrator`) invokes each
+section prompt as a `claude -p` subagent. Two invocation modes:
 
 ### Drafting mode (default)
 
@@ -572,9 +577,9 @@ from beril-adversarial — relative paths sometimes nest under unexpected
 bases). Each per-section subagent gets the absolute path of the file it
 should write.
 
-`paper_writer.sh` derives BERIL_ROOT from its install path (symlink-safe
-via `pwd -P`) and `cd`'s there before invoking claude. Same pattern as
-adversarial.
+The orchestrator derives BERIL_ROOT from the resolved project path
+and `cd`'s there before invoking claude. Same intent as adversarial's
+symlink-safe resolution.
 
 ## Stream-json parser + retry
 
@@ -674,7 +679,7 @@ The writer shells out to `beril-adversarial` as an installed sibling
 skill:
 
 ```bash
-# Inside paper_writer.sh's review phase
+# Inside the orchestrator's review phase
 beril-adversarial review --type paper "$DRAFT_DIR" 2>&1 | tee "$REVIEW_LOG"
 ```
 
@@ -901,7 +906,7 @@ Stage 3 flipped `self.model` from Sonnet 4.5 to Opus 4.6.
 
 ### Bash flow status (paper_writer.sh)
 
-On the retirement track per the 2026-05-17 audit. The Python
-orchestrator (`orchestrator.py`) is the canonical entry point. The
-bash flow is preserved as a safety net during the transition but is
-not on any active call path from post-Stage-3 `draft.py` / `continue_run.py`.
+Removed per decision D-053. The Python orchestrator
+(`orchestrator.py`, class `PaperWriterOrchestrator`) is the sole
+entry point; `draft.py` / `continue_run.py` drive it directly.
+`paper_writer.sh` no longer exists in the repo.

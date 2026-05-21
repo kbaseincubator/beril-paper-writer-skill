@@ -18,16 +18,21 @@ deployment. Sister skills:
 
 ## Status
 
-**v0.8.0 + Stage 3 (closed 2026-05-17)** — production pipeline. **965 unit
-tests**. Live-tested on three BERDL projects: `functional_dark_matter`,
-`genotype_to_phenotype_enigma`, `ibd_phage_targeting`.
+**v1.0.0** — first stable release. Validated by the Stage 7 v1-MVP
+campaign: six BERDL projects (3 dev + 3 blind holdout) run end-to-end
+and scored against the v1-bar v2b success criteria. The pipeline
+reached the review measurement point on 6/6, resolved 100% of claim
+markers on 6/6, and stayed within the $10/draft cost budget on 6/6;
+3/3 dev and 2/3 holdout passed the full bar.
 
-Stage 3 closed the post-v0.8 in-situ defects surfaced by the
-`ibd_phage_targeting` BERIL slash-command runs: figure embedding,
-absolute-path resolution for `claude` and `beril-adversarial`, model-pin on
-all LLM calls, citation-pool schema corrections, source-notebook recovery,
-and a loud-warn fallback when the canonical adversarial reviewer is
-unavailable. See `STAGED_IMPROVEMENT_PLAN.md` for the change log.
+v1.0 ships **with documented known limits** — see `RELEASE_NOTES.md`
+and `V1_X_BACKLOG.md`. The notable ones: #46 (the drafter can pull
+predicted values from `RESEARCH_PLAN.md` into Results as if measured —
+this was the single holdout failure, and it is loudly detected, not
+silent) and #48 (the deterministic Tier-1 check table is partially
+implemented; figure/table-callout and language-quality checks are
+deferred to v1.1). See `STAGED_IMPROVEMENT_PLAN.md` for the full
+build history. Run `pytest` from the repo root to confirm the suite.
 
 ## What it does
 
@@ -50,8 +55,8 @@ unavailable. See `STAGED_IMPROVEMENT_PLAN.md` for the change log.
    fabricating numbers, citations, sample sizes, or tool versions.
    Methods are *extracted from notebooks*, not generated freely.
 6. Runs a three-tier review cascade:
-   - **Tier 1** — deterministic cross-walks (numeric grounding, citation
-     resolution, figure callouts).
+   - **Tier 1** — deterministic checks (numeric grounding against
+     `claim_inventory.tsv` + REPORT.md; claim-marker resolution).
    - **Tier 2** — Haiku light review.
    - **Tier 3** — canonical adversarial review via
      [beril-adversarial](https://github.com/ArkinLaboratory/beril-adversarial-skill).
@@ -79,7 +84,7 @@ disk in `papers/draft_N/state.json`.
 pipx install git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
 
 # 2. Verify
-beril-paper-writer --version           # 0.8.0
+beril-paper-writer --version           # 1.0.0
 beril-paper-writer configure           # confirms claude + beril-adversarial paths + Python deps
 
 # 3. Deploy slash-command + skill files into BERIL_ROOT
@@ -106,7 +111,7 @@ The pipx venv has all runtime deps. Inject pytest once at setup:
 ```bash
 pipx inject beril-paper-writer-skill pytest
 PYBIN=$(pipx environment --value PIPX_LOCAL_VENVS)/beril-paper-writer-skill/bin/python
-PYTHONPATH=src $PYBIN -m pytest tests/unit -q   # expect 965 pass
+PYTHONPATH=src $PYBIN -m pytest tests/unit -q   # suite should pass clean
 ```
 
 Do NOT run from system Python — it won't have nbformat / python-docx.
@@ -127,11 +132,19 @@ beril-paper-writer draft <project_id> [--mode paper|report]
 # Resume after picking a throughline (the load-bearing user gate)
 beril-paper-writer continue <draft_dir> --pick TL1
                                         [--revision "tweak text"]
+                                        [--remediate]
+                                        [--max-remediate-cycles N]
                                         [--no-adversarial]
 
 # Re-render the manuscript without re-running the pipeline
 beril-paper-writer assemble <draft_dir>
 ```
+
+`--remediate` is opt-in: by default `continue` pauses at the P0 gate
+(`phase=p0_review`) and the operator decides whether to remediate.
+With `--remediate`, the pipeline runs up to `--max-remediate-cycles`
+remediation rounds (default 2) before pausing. See CONFIGURE.md for
+the complete flag reference.
 
 `--no-adversarial` is an explicit opt-out from the canonical
 beril-adversarial reviewer; the inline fallback runs instead with no
@@ -255,7 +268,8 @@ no biological-claim verification.
 | [DECISIONS.md](DECISIONS.md) | Developers | Running log of design decisions with rationale (D-001+) |
 | [STAGED_IMPROVEMENT_PLAN.md](STAGED_IMPROVEMENT_PLAN.md) | Developers | Active plan-of-record; Stage 1/2/3 closure tables |
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Reference | Comprehensive single-artifact guide (retained as reference) |
-| [release-notes/](release-notes/) | Reference | Per-version release notes (v0_1 through v0_8) |
+| [RELEASE_NOTES.md](RELEASE_NOTES.md) | All | The v1.0 release story + known limits |
+| [release-notes/](release-notes/) | Reference | Per-version release notes (v0_1 through v0_6) |
 | [PARTICIPANT-RUNBOOK](https://github.com/ArkinLaboratory/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md) | Participants | Cross-skill runbook covering all 4 BERIL skills end-to-end |
 
 ## License

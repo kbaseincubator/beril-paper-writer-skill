@@ -120,11 +120,12 @@ new shell.
 ### Step 2 — Deploy the skill into BERIL_ROOT
 
 The `install-skill` subcommand copies the bundled SKILL.md, slash
-commands, prompts (10 versioned `.v1.md` prompts), the orchestrator
-(`tools/paper_writer.sh`), Python helpers (`tools/*.py`), and
-references into `<BERIL_ROOT>/.claude/skills/beril-paper-writer/`.
-Claude Code auto-discovers skills under `.claude/skills/`, so this
-is how the slash commands become available.
+commands, prompts (10 versioned `.v1.md` prompts), the Python helpers
+(`tools/*.py`), and references into
+`<BERIL_ROOT>/.claude/skills/beril-paper-writer/`. Claude Code
+auto-discovers skills under `.claude/skills/`, so this is how the
+slash commands become available. The pipeline itself runs from the
+installed `beril-paper-writer` package (the Python orchestrator).
 
 ```bash
 cd "$BERIL_ROOT"
@@ -141,9 +142,9 @@ beril-paper-writer install-skill /path/to/BERIL-research-observatory
 
 This will:
 
-- Copy `SKILL.md`, `commands/*.md`, `prompts/*.md`, `tools/*.{py,sh}`,
+- Copy `SKILL.md`, `commands/*.md`, `prompts/*.md`, `tools/*.py`,
   `references/*.md` into `.claude/skills/beril-paper-writer/`.
-- Make `tools/paper_writer.sh` and `tools/*.py` executable.
+- Make `tools/*.py` executable.
 - Preserve the `state/` directory verbatim (never overwritten or
   deleted across re-installs).
 - Skip if the destination is up-to-date (idempotent).
@@ -213,7 +214,7 @@ beril-paper-writer draft projects/<small_project_id> \
 
 Expected:
 
-- Wall clock: ~5–10 minutes on Sonnet.
+- Wall clock: ~5–10 minutes on Opus.
 - Cost: ~$5–15.
 - Output: `projects/<id>/papers/draft_1/manuscript.md`.
 
@@ -229,8 +230,11 @@ Verify after the pipeline completes:
 2. `papers/draft_1/00_throughline.md` contains the chosen narrative
    arc with evidence map.
 3. `papers/draft_1/references.md` contains a numbered reference list.
-4. `papers/draft_1/next_actions.md` lists remaining issues.
-5. `papers/draft_1/reviews/` contains at least one fallback review.
+4. `papers/draft_1/p0_findings.md` lists any P0-gate issues and
+   proceed options.
+5. `papers/draft_1/audit/adversarial_review.md` contains the review
+   (or `papers/draft_1/reviews/fallback_review.md` if the fallback
+   reviewer ran).
 
 Generate the Word document:
 
@@ -354,7 +358,7 @@ state is saved. Increase the limit and run `continue` to finish.
 
 ### Figures not appearing in manuscript
 
-Check `next_actions.md` for figure-manifest warnings. Figures must be
+Check `p0_findings.md` for figure-manifest warnings. Figures must be
 in the project's `figures/` directory with filenames matching
 `fig<N>_<name>.<ext>`.
 
@@ -386,10 +390,10 @@ Explicit arguments always win over branch / cwd inference.
 - **Resumability:** `beril-paper-writer continue <draft_dir>` resumes
   from wherever the pipeline stopped. State persists on disk in
   `state.json`. Idempotent across sessions and across pipx upgrades
-  (within the same v0.7.x).
+  (within the same v1.x line).
 - **Cost transparency:** each run prints cumulative cost in the
-  terminal progress stream and in `state.json`. At the end,
-  `next_actions.md` includes the total spend. No silent costs.
+  terminal progress stream and in `state.json` (`cost_so_far_usd`).
+  No silent costs.
 
 ## When to use each subcommand
 

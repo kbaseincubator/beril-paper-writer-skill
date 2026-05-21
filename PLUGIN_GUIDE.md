@@ -24,7 +24,7 @@ the `beril-paper-writer` skill within a BERIL deployment.
 > for that read [`SPEC.md`](SPEC.md) and [`DECISIONS.md`](DECISIONS.md).
 
 > **Skill version.** This guide tracks `beril-paper-writer-skill
-> v0.7.1`. For the changelog, see the per-minor `RELEASE_NOTES`
+> v1.0.0`. For the changelog, see the per-minor `RELEASE_NOTES`
 > files.
 
 ---
@@ -114,8 +114,8 @@ candidates. Pick one:
 The pipeline runs the full drafting sequence (~15–25 min on standard
 depth). Output lands at
 `projects/my_project_id/papers/draft_1/manuscript.md`. Read
-`next_actions.md` for remaining issues; run `assemble` for the Word
-document.
+`p0_findings.md` for any P0-gate issues and `audit/adversarial_review.md`
+for the review; run `assemble` for the Word document.
 
 If you're outside Claude Code or scripting:
 
@@ -165,14 +165,14 @@ pipx install --force git+ssh://git@github.com/ArkinLaboratory/beril-paper-writer
 ### Verify
 
 ```bash
-beril-paper-writer --version    # should print "beril-paper-writer-skill 0.7.2"
+beril-paper-writer --version    # should print "beril-paper-writer-skill 1.0.0"
 beril-paper-writer --help       # lists subcommands: draft, install-skill, configure, continue, assemble
 ```
 
 ### Updating
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.7.1
+pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v1.0.0
 ```
 
 After every update: **re-run `beril-paper-writer install-skill
@@ -214,8 +214,7 @@ beril-paper-writer install-skill .
 │   ├── fallback_reviewer.v1.md  ← In-loop reviewer (3 classes)
 │   └── rewrite.v1.md            ← Apply review-driven fixes
 ├── references/                  ← Reporting standards checklist
-├── tools/                       ← Orchestrator + Python helpers
-│   ├── paper_writer.sh          ← Main orchestrator (~2700 lines)
+├── tools/                       ← Python helpers
 │   ├── extract_methods.py       ← Notebook AST walker
 │   ├── extract_figures.py       ← Figure selection + caption extraction
 │   ├── extract_tables.py        ← Table extraction from notebooks
@@ -246,7 +245,7 @@ The skill has **no runtime configuration files**. See
 [`CONFIGURE.md`](CONFIGURE.md) for the full reference. Key points:
 
 - **`claude` CLI** is the only hard runtime dependency.
-- **Model default** is Sonnet. Override per-invocation with
+- **Model default** is Opus. Override per-invocation with
   `--model <id>`.
 - **Cost controls** via `--max-cost-usd`, `--depth`, and
   `--no-adversarial`.
@@ -267,10 +266,10 @@ pip install -e ".[dev]"     # or --break-system-packages if PEP 668
 pytest tests/ -v
 ```
 
-Expected: 720 tests pass in ~2 seconds. Tests cover validator
-behavior (M1–M10), post-checkers (figures, tables, scope coherence,
-throughline glyphs), state management, discovery, CLI surface, and
-prompt structural integrity.
+Run `pytest` from the repo root; the suite should pass clean. Tests
+cover validator behavior (M1–M10), post-checkers (figures, tables,
+scope coherence, throughline glyphs), state management, discovery,
+CLI surface, and prompt structural integrity.
 
 ### Live test against a real BERDL project (LLM cost ~$5–15)
 
@@ -286,9 +285,11 @@ Verify after the run:
 - `manuscript.md` exists and is non-empty (typically 3000–8000 words).
 - `00_throughline.md` contains the chosen narrative arc.
 - `references.md` contains a numbered reference list.
-- `next_actions.md` lists remaining issues and total cost.
-- `reviews/` contains at least one fallback review.
-- All M1–M10 validators report in `next_actions.md`.
+- `p0_findings.md` lists any P0-gate issues; `state.json` carries
+  the cumulative cost (`cost_so_far_usd`).
+- `audit/adversarial_review.{md,json}` contains the review (or
+  `reviews/fallback_review.md` if the fallback reviewer ran).
+- M1–M10 validator results are recorded under `audit/`.
 
 ### Cross-skill integration smoke
 
@@ -309,8 +310,10 @@ verify the producer-side shape.
 | Subcommand keyword | NONE — flags follow directly | **`draft`** required |
 | Best for | Interactive use by a researcher | Programmatic / scripted |
 
-Both delegate to the same `tools/paper_writer.sh` orchestrator and
-produce identical output. Pick whichever fits your context.
+Both drive the same Python orchestrator
+(`src/beril_paper_writer/orchestrator.py`, class
+`PaperWriterOrchestrator`) and produce identical output. Pick
+whichever fits your context.
 
 ### Project resolution
 
@@ -351,7 +354,7 @@ Each candidate has strength glyphs (✓ direct / ⚠ partial /
 ✗ contradicts / ◇ orthogonal), a weakness inventory, and a "would
 NOT include if chosen" list.
 
-Wall clock: ~2–3 min on Sonnet.
+Wall clock: ~2–3 min on Opus.
 
 ### Phase 2 — Throughline pick (user gate)
 
@@ -393,7 +396,7 @@ factual claim must trace to a canonical project source, verified
 bibliography entry, or explicit metadata. No LLM training knowledge
 allowed as a source.
 
-Wall clock: ~10–25 min on Sonnet depending on `--depth` and tier.
+Wall clock: ~10–25 min on Opus depending on `--depth` and tier.
 
 ### Phase 5 — Validation + assembly
 
@@ -411,8 +414,9 @@ The bounded rewrite loop (up to 2 passes per SPEC §8.3) dispatches
 
 ### Phase 7 — Final output
 
-The pipeline writes `next_actions.md` (remaining issues checklist),
-updates `state.json` with final cost and status, and pauses. Run
+The pipeline writes `p0_findings.md` (P0-gate findings and proceed
+options), updates `state.json` with final cost and status, and
+pauses. Run
 `beril-paper-writer assemble <draft_dir>` to generate the Word
 document.
 
@@ -457,11 +461,10 @@ coauthors.
 
 - **BERDL project artifacts:** `REPORT.md`, `RESEARCH_PLAN.md`,
   notebooks, figures. These are the manuscript's ground truth.
-- **`beril-adversarial`** (optional): standalone adversarial reviews
-  produce `audit/adversarial_review.{md,json}` which inform manual
-  revision. The in-pipeline canonical adversarial audit
-  (`phase_adversarial_audit`) is planned but not yet implemented in
-  v0.7.x.
+- **`beril-adversarial`** (optional but recommended): the canonical
+  adversarial reviewer runs **in-pipeline** at Tier 3 of `phase_review`,
+  producing `audit/adversarial_review.{md,json}`. If the CLI is absent
+  the pipeline falls back to an inline reviewer (loud warning; D-051).
 
 ### Produces for
 
@@ -500,7 +503,7 @@ def test_adversarial_review_against_synthetic_draft(tmp_path):
 
 ### Adversarial schema compatibility
 
-Paper-writer v0.7.x accepts adversarial schema v2 and v3. The v3
+Paper-writer v1.0 accepts adversarial schema v2 and v3. The v3
 schema renamed `narrative_weakness` → `central_objection` and added
 `citation_reality`. See [`CONTRACT.md`](CONTRACT.md) for the full
 severity vocabulary mapping and class enum.
@@ -545,7 +548,7 @@ the limit and `continue`.
 
 ### Figures not appearing in manuscript
 
-Check `next_actions.md` for figure-manifest warnings. Figures must be
+Check `p0_findings.md` for figure-manifest warnings. Figures must be
 in the project's `figures/` directory with filenames matching
 `fig<N>_<name>.<ext>`.
 
@@ -597,5 +600,5 @@ abstract.
 
 ## Document version
 
-This guide tracks `beril-paper-writer-skill v0.7.1`. Update at every
+This guide tracks `beril-paper-writer-skill v1.0.0`. Update at every
 minor release; refresh examples and counts at every major.
