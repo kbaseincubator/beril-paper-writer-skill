@@ -145,7 +145,58 @@ reference):
 
 ## P1 — ship-noted (document as known limit)
 
-### #35 — Emit template reframing_log.md in phase_extract
+### #46 — Drafter pulls RESEARCH_PLAN.md predictions into Results as measured findings
+
+**Evidence (Stage 7 holdout H3 `metal_specificity`, 2026-05-20):**
+The drafter pulled hypothesis/prediction values from
+`RESEARCH_PLAN.md` into the Introduction and Results **as if they
+were measured results**:
+
+- `OR=2.08`, `p=4.3×10⁻¹⁶²` (Introduction) — RESEARCH_PLAN figures,
+  not in REPORT.md.
+- "predicted >90% core" / "predicted <80% core" — RESEARCH_PLAN
+  sub-hypotheses H1a/H1b.
+- Figure 2 caption "~30% at 1%, ~75% at 20%" — RESEARCH_PLAN
+  predictions; REPORT.md actually reports ~41% at 2%, ~67% at 10%.
+
+Corroborated by **two independent detectors**: Tier T flagged all
+of them as ungrounded (8 of metal_specificity's Tier T residue),
+and the adversarial reviewer independently flagged the same numbers
+(F003/F004/F005, `unbacked_quantitative`).
+
+**Diagnosis:** D-018 makes `RESEARCH_PLAN.md` a legitimate grounding
+source *for the Methods section* (it documents experimental intent).
+The drafter is **over-applying D-018** — treating planned/predicted
+values as valid grounding for Results and Introduction numerics,
+where only REPORT.md (measured) and claim_inventory should ground.
+This is a specific, nameable failure mode distinct from the generic
+#40 Tier T residue. Single project (H3) in the dev+holdout set, but
+it caused H3 to fail the v1-bar Tier T axis outright.
+
+**Lever options:**
+1. Tighten `holistic_draft.v1.md`: explicit rule that RESEARCH_PLAN
+   values may ground Methods *only*; Results/Introduction numerics
+   must ground in REPORT.md or claim_inventory. Worked anti-pattern
+   from H3.
+2. Per memory `feedback_prompt_discipline_needs_post_check` — prompt
+   rules alone have failed before; back with a post-check. Tier T
+   already catches these (it flagged all 8); the gap is the drafter
+   emitting them, not the detector missing them. A drafter-time Tier
+   T pre-check (bounded retry) is the mechanical backstop.
+
+**Status:** Open, P1. Ship v1 with this documented as a known limit;
+the pipeline detects the failure (Tier T + adversarial both fire),
+so it is loud, not silent. H3 is the v1 holdout that fails on it.
+
+### #35 — Emit template reframing_log.md in phase_extract — SHIPPED
+
+**Status: SHIPPED 2026-05-20** (pending commit). Implemented as
+module-level helper `write_reframing_log_stub(draft_dir)` in
+`orchestrator.py`, called from `phase_extract` step 4 (idempotent;
+never clobbers a drafter-populated log on resume). 4 unit tests in
+`tests/unit/test_reframing_log_stub.py`. Eliminates the recurring
+`missing_section` "reframing_log.md missing" P0 (observed on H2 and
+H3; H1 happened not to raise it — adversarial sampling variance).
 
 **Evidence:** D1 + D2 + D3 all flagged missing `reframing_log.md`
 as a P0 finding (adversarial `missing_section`). Pipeline never
@@ -264,6 +315,54 @@ v1.x work. Consider (4) before locking v2b's `max_adversarial_p0`.
 ---
 
 ## P2 — post-v1.0
+
+### #47 — Data Availability sequencing + orphaned generator machinery
+
+**Evidence (Stage 7 holdouts, 2026-05-20):** Every holdout's
+adversarial review flagged "no Data Availability / Code Availability
+statement" as a P0 (`missing_section`). It is **not a real gap in
+the shipped product** — it is a review-timing artifact:
+
+- `holistic_draft.v1.md` instructs the drafter to write only the
+  IMRAD body ("Abstract, Introduction, Methods, Results,
+  Discussion"). No back-matter.
+- Data Availability + AI Disclosure are added later, at
+  `phase_compliance_gate` (which runs AFTER p0_review), via the
+  `compliance_fix.v1.md` autofix.
+- The adversarial reviewer runs at `phase_review` — before
+  compliance_gate — so it sees a body with no Data Availability and
+  flags a P0 that the final assembled manuscript will not have.
+
+The p0_gate already demotes this finding ("pre-compliance Data
+Availability" demotion), so it does not inflate the gated P0 count
+— but it does clutter the adversarial review and is a genuine
+sequencing smell.
+
+**Orphaned machinery:** `check_data_availability.py` +
+`07_data_availability.md` implement a richer Data Availability
+generator with K-BERDL collection cross-referencing. Its docstring
+references `phase_data_avail` and "the shell orchestrator" — a
+**pre-v0.8 architecture that no longer exists**. The current v0.8
+Python orchestrator only *checks* for Data Availability
+(compliance_gate ~line 2570) and autofixes via LLM; it does not
+appear to invoke the rich generator. Likely orphaned.
+
+**Lever options (decide together):**
+1. Deterministic back-matter emitter: append TBD-placeholder Data
+   Availability + AI Disclosure sections after `phase_drafting`,
+   before `phase_review` (mirrors D-014's TBD-placeholder pattern
+   for author/funding/ethics, and #35's deterministic-stub shape).
+   Makes the manuscript complete-shaped at review time; removes the
+   spurious adversarial finding.
+2. Revive `check_data_availability.py` + wire a real
+   `phase_data_avail` into the v0.8 orchestrator.
+3. Accept as a documented review-timing artifact (zero code).
+
+**Status:** Open, P2. Not v1-blocking — the final assembled
+manuscript *does* get a Data Availability section via
+compliance_gate. This is a sequencing-cleanliness + dead-code
+question, best resolved as one focused piece of work rather than a
+rushed fix during the v1 ship push.
 
 ### #23 — Track `_audit_discrepancies_interactive` cost
 
