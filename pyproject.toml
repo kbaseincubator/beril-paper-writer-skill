@@ -1,9 +1,9 @@
 ####################################################################
 # beril-paper-writer-skill — pyproject.toml
 #
-# Status: v0.6.1 — visible figure captions + docx orchestration.
-# See RELEASE_NOTES_v0_6.md for v0.6 changes; prior release notes at
-# RELEASE_NOTES_v0_[1-5].md. Mirrors beril-adversarial-skill packaging.
+# Status: v1.0.0 — first stable release.
+# See RELEASE_NOTES.md for the v1.0 story; release-notes/ for the
+# per-version v0.x history. Mirrors beril-adversarial-skill packaging.
 ####################################################################
 
 [build-system]
@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "beril-paper-writer-skill"
-version = "0.8.0"
+version = "1.0.0"
 description = "BERIL Paper Writer — drafts ICMJE-conformant scientific manuscripts from BERDL analysis projects, with intercalated gap-fill loops and adversarial-review-driven revision. Distributed as a Claude Code skill."
 readme = "README.md"
 requires-python = ">=3.10"
