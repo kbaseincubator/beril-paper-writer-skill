@@ -183,6 +183,41 @@ def resolve_adversarial_bin() -> Optional[str]:
     return None
 
 
+def write_reframing_log_stub(draft_dir: Path) -> bool:
+    """Emit an empty-but-valid reframing_log.md template into ``draft_dir``.
+
+    The adversarial reviewer's report_drift detection reads
+    reframing_log.md for acknowledgment context and raises a
+    missing_section P0 when the file is absent — observed on every
+    Stage 7 holdout (H1/H2/H3). The holistic drafter is expected to
+    populate this file when the manuscript reframes REPORT.md content;
+    this stub guarantees the file always exists so (a) report_drift
+    detection has it and (b) the recurring spurious "file missing" P0
+    is eliminated. A genuinely-undocumented reframing still surfaces
+    as a real report_drift finding — the stub only removes the
+    infrastructure-gap false positive.
+
+    Idempotent: returns False without writing when the file already
+    exists (never clobbers a drafter-populated log on resume); returns
+    True when the stub was written.
+
+    V1_X_BACKLOG #35.
+    """
+    path = draft_dir / "reframing_log.md"
+    if path.exists():
+        return False
+    path.write_text(
+        "# Reframing Log\n\n"
+        "_No reframings recorded yet._\n\n"
+        "The drafter populates this file when the manuscript departs "
+        "from REPORT.md framing. Each entry should record what was "
+        "reframed and why, so the adversarial reviewer's report_drift "
+        "detection has acknowledgment context.\n",
+        encoding="utf-8",
+    )
+    return True
+
+
 class PaperWriterOrchestrator:
     """Manages the full lifecycle of a paper draft."""
 
@@ -541,6 +576,12 @@ class PaperWriterOrchestrator:
                 logf.write(stderr)
             if proc.returncode != 0:
                 logger.warning(f"extract_tables.py exited {proc.returncode}")
+
+        # 4. reframing_log.md stub (V1_X_BACKLOG #35). See
+        #    write_reframing_log_stub for rationale. Idempotent; never
+        #    clobbers a drafter-populated log on resume.
+        if write_reframing_log_stub(self.draft_dir):
+            logger.info("Emitted reframing_log.md stub")
 
         self.advance_phase("triage")
 

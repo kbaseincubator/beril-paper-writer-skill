@@ -166,31 +166,43 @@ content discipline is still aspirational.
 
 **Status:** Open. Small commit; can land alongside v1-bar v2.
 
-### #36 — Adversarial v3 schema validation strictness
+### #36 — Adversarial v3 schema validation strictness — RESOLVED (cross-skill, v0.7.0.5)
 
-**Evidence (Stage 7 dev runs):**
-- D2 first run: `citation_id` missing on F004, `line_range` missing on F009.
-- D2 second run: `line_range` missing on F009.
-- D3 first run: unescaped inner quotes — `Expecting ',' delimiter`.
-- D3 second run: `citation_id` missing on F007, F010.
+**Status: RESOLVED 2026-05-20** by beril-adversarial **v0.7.0.5**.
+The Stage 7 holdout campaign surfaced the root cause deterministically:
+`line_range` was wrongly required on section-scoped finding classes.
+`validate_presentation_review.py`'s `SECTION_LEVEL_REQUIRED_FIELDS`
+required both `section` and `line_range` whenever a `section` was
+present — but `section_arc` / `throughline` / `missing_section` /
+`central_objection` / `abstract_body_mismatch` are section- or
+document-scoped and have no single line range. H2
+(`adp1_triple_essentiality`) finding F020 (`section_arc`,
+`section: "Results"`, no `line_range`) was correctly emitted by the
+reviewer and wrongly rejected as non-correctable.
 
-All four failures produce structurally-invalid JSON that the
-adversarial CLI's validator catches. The orchestrator's gate
-proceeds anyway because it iterates `findings[]` directly, but
-downstream consumers can't trust the file.
+beril-adversarial v0.7.0.5 fixed it as specified in the cross-skill
+bug report: new `PAPER_LINE_RANGE_REQUIRED_CLASSES = {register_drift,
+claim_evidence, unbacked_quantitative, report_drift}` — `line_range`
+required only for those four line-specific classes, optional for the
+section/document-scoped ones; mirrors the existing `paragraph_quote`
+carve-out. The v3 paper prompt's field-rules table was also corrected.
+The companion `BlockingIOError` validator crash (H3) was fixed at root
+cause via `_harden_stderr()` (`os.set_blocking(stderr, True)`).
 
-**Diagnosis:** The v3 schema's required fields (`citation_id`,
-`line_range`) are inconsistently emitted by the LLM reviewer. Schema
-is empirically too strict for what the model reliably produces.
+**Verified 2026-05-20:** v0.7.0.5 deployed to `beril-extended` and
+re-run against all three holdouts' original adversarial JSONs —
+H1/H2/H3 all `PASS`, exit 0 (H2's previously-rejected F020 now
+accepted). The bug predated v0.7.0 (`line_range` has been in
+`SECTION_LEVEL_REQUIRED_FIELDS` since v0.6.0 paper-schema launch);
+the holdout campaign just exercised section-scoped findings hard
+enough to surface it.
 
-**Lever:** Cross-skill — beril-adversarial-skill needs to either
-(a) relax which fields are required on which classes, or (b)
-auto-fill / default missing fields. paper-writer side can do nothing.
-
-**Status:** File against beril-adversarial-skill. Document as known
-limit in v1.0 RELEASE_NOTES: "adversarial JSON may fail strict v3
-validation on some runs; the .md output is still useful and the
-gate iterates findings tolerantly."
+**Residual (NOT #36, separate issue):** D3's first-cut adversarial
+JSON had genuine unescaped inner quotes (`Expecting ',' delimiter`)
+— a different failure mode (`feedback_llm_json_unfixable_in_parser`),
+not schema strictness. v0.7.0.5 does not address it; it remains a
+known stochastic limitation and is why D3's v1-bar verdict is
+INCONCLUSIVE. Not v1-blocking.
 
 ### #37 — Adversarial reviewer non-determinism (sampling, not converging)
 
