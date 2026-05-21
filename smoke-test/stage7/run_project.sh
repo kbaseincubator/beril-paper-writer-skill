@@ -53,8 +53,29 @@ if ! command -v beril-paper-writer >/dev/null 2>&1; then
   echo "error: beril-paper-writer not on PATH" >&2
   exit 1
 fi
-if ! beril-paper-writer continue --help 2>&1 | grep -q -- "--remediate"; then
+# Capture `continue --help` into a variable FIRST, then test the captured
+# string. Do NOT pipe directly into `grep -q`: under `set -o pipefail`,
+# `grep -q` closes the pipe on its first match (here `--remediate` is on
+# line 5 of ~56), the Python producer still holding unwritten lines gets
+# SIGPIPE / BrokenPipeError and exits non-zero, and pipefail propagates
+# that as the pipeline's exit code — a false "pre-Tier-S" verdict even
+# when `--help` plainly contains `--remediate`. It's a race: when Python
+# flushes its whole buffer before grep closes, the preflight passes; when
+# grep wins the race, it false-fails. Command substitution drains ALL
+# output, so the producer never SIGPIPEs. (Diagnosed 2026-05-20 when H2
+# of the Stage 7 holdout campaign false-failed after H1+H3 passed.)
+BPW_RESOLVED="$(command -v beril-paper-writer)"
+BPW_CONTINUE_HELP="$(beril-paper-writer continue --help 2>&1 || true)"
+if [[ -z "$BPW_CONTINUE_HELP" ]]; then
+  echo "error: 'beril-paper-writer continue --help' produced no output" >&2
+  echo "  resolved binary: $BPW_RESOLVED" >&2
+  echo "  (binary crashed, or PATH resolved a broken install)" >&2
+  exit 1
+fi
+# Bash glob membership test — no external grep, no pipe, no SIGPIPE risk.
+if [[ "$BPW_CONTINUE_HELP" != *"--remediate"* ]]; then
   echo "error: installed beril-paper-writer is pre-Tier-S (no --remediate flag)" >&2
+  echo "  resolved binary: $BPW_RESOLVED" >&2
   exit 1
 fi
 
@@ -102,8 +123,13 @@ if ! beril-paper-writer draft "$PROJECT_DIR"; then
 fi
 
 # Auto-discover the latest draft_N directory. ls -td sorts directories
-# by mtime descending; head -1 picks the most recent.
-DRAFT_DIR=$(ls -td "$PROJECT_DIR/papers/draft_"*/ 2>/dev/null | head -1)
+# by mtime descending; head -1 picks the most recent. The `|| true`
+# guards the same pipefail+SIGPIPE class as the preflight above: `head`
+# closes the pipe early, `ls` can SIGPIPE. ls output here is tiny so the
+# race is near-impossible, but `|| true` makes it provably safe under
+# `set -euo pipefail`; the `-z` check below catches a genuinely empty
+# result either way.
+DRAFT_DIR=$(ls -td "$PROJECT_DIR/papers/draft_"*/ 2>/dev/null | head -1 || true)
 DRAFT_DIR="${DRAFT_DIR%/}"   # strip trailing slash from ls -d format
 if [[ -z "$DRAFT_DIR" || ! -d "$DRAFT_DIR" ]]; then
   echo "error: no papers/draft_N/ found under $PROJECT_DIR" >&2
