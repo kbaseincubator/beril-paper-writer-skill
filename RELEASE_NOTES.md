@@ -1,11 +1,32 @@
 # beril-paper-writer-skill — release notes
 
-**Current:** v1.0.0 (2026-05-20).
+**Current:** v1.0.1 (2026-05-25).
 
 This file is the **cumulative current-version log** — where the skill
 is, what shipped, and pointers to per-version detail. Per-version
 release notes for the v0.x line live in
 [`release-notes/`](release-notes/).
+
+## v1.0.1 — adversarial exit-code contract (2026-05-25)
+
+A compatibility patch for beril-adversarial v0.7.0.8, which made a
+schema-invalid-but-parseable `adversarial_review.json` surface as
+exit 4 instead of exit 0.
+
+Before this patch, `phase_review` handled the canonical adversarial
+reviewer with a binary `if rc != 0` check: it logged a failure but then
+advanced unconditionally, and the two downstream consumers
+(`phase_p0_review` via the P0 gate, and `phase_optimize`) read
+`adversarial_review.json` off disk keyed on file presence, not on the
+exit code. A non-consumer-safe exit-4 `.json` that still parsed as JSON
+would have been counted as real P0 findings.
+
+v1.0.1 routes on the exit code (`classify_adversarial_exit`): exit 0/2
+are consumer-safe; exit 3/4/other quarantine the on-disk
+`adversarial_review.json` into `audit/rejected/` and fall back to the
+inline reviewer — the same graceful path used when the canonical CLI is
+absent. A clean (exit 0) run is unchanged. See DECISIONS.md D-054 and
+CONTRACT.md.
 
 ## v1.0.0 — first stable release (2026-05-20)
 

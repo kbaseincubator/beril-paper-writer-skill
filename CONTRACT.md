@@ -1,8 +1,9 @@
 # Cross-skill interop contract — paper-writer consumer side
 
-**Status:** Created v0.6.5 (2026-05-03); reviewed current as of v1.0
-(2026-05-20). Consumer-side contract for beril-paper-writer's
-dependency on beril-adversarial.
+**Status:** Created v0.6.5 (2026-05-03); reviewed current as of v1.0.1
+(2026-05-25 — exit-code routing for adversarial v0.7.0.8, D-054).
+Consumer-side contract for beril-paper-writer's dependency on
+beril-adversarial.
 
 **Companion:** beril-adversarial's producer-side CONTRACT.md
 documents the full CLI surface, JSON schemas, and migration
@@ -109,12 +110,25 @@ Schema version is found in the JSON at `.schema_version`.
 Paper-writer's Python orchestrator handles adversarial exit codes as
 follows:
 
-| Exit | Meaning | Paper-writer policy |
+| Exit | Meaning (adversarial CONTRACT.md v0.7.0.8) | Paper-writer policy (v1.0.1) |
 |---|---|---|
-| 0 | Clean pass | Parse JSON; route P0 findings to rewrite loop |
-| 2 | Auto-corrected (advisory) | Treat as 0; JSON is consumer-safe. Log the auto-correction for user awareness |
-| 1 | Validation failure | Retry once. If second run also exits 1, fall back to inline reviewer + warn user. Most common cause: unescaped `"` in JSON string field (per `feedback_llm_json_unfixable_in_parser.md`) |
-| 3 | Config error | `claude` CLI missing or prompt missing. Surface error; do not retry |
+| 0 | Clean pass; `.json` consumer-safe | Freshness-check `adversarial_review.json`, then route P0 findings through the P0 gate |
+| 2 | Auto-corrected / advisory (summary-count fix, JSON-escaping auto-repair, or v2-schema deprecation warning); `.json` consumer-safe | Treated as exit 0; the auto-correction is logged at INFO |
+| 3 | Config error (the reviewer's own `claude` CLI or a prompt is missing) | Quarantine any `adversarial_review.json` to `audit/rejected/`; fall back to the inline reviewer |
+| 4 | `.json` NOT consumer-safe — unparseable after the reviewer's auto-repair pass, OR parseable but schema-invalid (missing field / bad enum / dup id) | Quarantine the `.json` to `audit/rejected/` so the P0 gate + optimizer cannot parse it; fall back to the inline reviewer. One fresh `continue` re-run may clear a transient exit 4 — paper-writer does not loop |
+| 1 / other | Bad args or an unexpected failure | Same as exit 3: quarantine + inline fallback |
+
+**v0.7.0.8 contract change (D-054).** Before v0.7.0.8, a schema-invalid
+`.json` was emitted with exit 0 and a malformed one was the subject of
+the unescaped-quote bug. v0.7.0.7 added orchestrator-side JSON
+auto-repair; v0.7.0.8 made BOTH an unparseable and a schema-invalid
+`.json` surface as exit 4 — exit 1 no longer carries the "validation
+failure" meaning, it is now bad-args only. paper-writer v1.0.1 routes
+on exit code via `classify_adversarial_exit()`: only exit 0/2 are
+consumer-safe; every other code quarantines the on-disk `.json` (the P0
+gate and optimizer key on the file's presence + parseability, NOT on
+the exit code or the write-only `review_mode.json`) and runs the inline
+fallback reviewer.
 
 ### Severity vocabulary mapping
 
@@ -184,7 +198,7 @@ the finding is surfaced in `p0_findings.md` for manual resolution.
 
 | Paper-writer | Adversarial | Schema | Notes |
 |---|---|---|---|
-| v1.0 | v0.7.0.5+ | paper.v3 | Current pair. v1.0 parses both paper.v2 and paper.v3; v3 is the live adversarial output |
+| v1.0.1 | v0.7.0.8+ | paper.v3 | Current pair. paper-writer parses both paper.v2 and paper.v3; v3 is the live adversarial output. v1.0.1 adds exit-code routing for the v0.7.0.8 consumer-safety contract (D-054) |
 
 ### Runtime resolution + fallback
 
@@ -204,7 +218,9 @@ rather than halting. The Tier-3 outcome is recorded in
 ## Fallback reviewer coordination
 
 When the canonical adversarial reviewer is unavailable (not installed,
-wrong version, or exit 3), paper-writer uses `fallback_reviewer.v1.md`.
+or `--no-adversarial`) OR returns a non-consumer-safe exit (3, 4, or
+any non-(0,2) code — see the exit-code table), paper-writer quarantines
+any on-disk `adversarial_review.json` and uses `fallback_reviewer.v1.md`.
 The two reviewers produce different output formats:
 
 | Property | Fallback | Canonical |
@@ -234,7 +250,7 @@ manuscript carries without parsing the review file itself.
 
 ```json
 {
-  "reviewer": "canonical|canonical-failed|fallback|fallback-failed|none",
+  "reviewer": "canonical|canonical-silent-fail|fallback|fallback-failed|none",
   "note": "free-text context (reason tag, error summary, etc.)",
   "timestamp": "ISO-8601 UTC, e.g. 2026-05-16T14:30:00Z"
 }
@@ -244,11 +260,16 @@ manuscript carries without parsing the review file itself.
 
 | Value | Meaning |
 |---|---|
-| `canonical` | beril-adversarial ran successfully; `audit/adversarial_review.{md,json}` exists |
-| `canonical-failed` | beril-adversarial was invoked but exited non-zero; manuscript review may be incomplete; `note` carries the exit-code summary |
-| `fallback` | inline `fallback_reviewer.v1.md` ran; `reviews/fallback_review.md` exists; `note` indicates `reason=adversarial-missing` (canonical was unreachable) or `reason=explicit-opt-out` (`--no-adversarial` flag) |
+| `canonical` | beril-adversarial returned a consumer-safe result (exit 0, or exit 2 = auto-corrected/advisory); `audit/adversarial_review.{md,json}` exists |
+| `canonical-silent-fail` | beril-adversarial returned a consumer-safe exit but did not rewrite `adversarial_review.json` (Tier S-9a freshness check failed); the gate may evaluate against stale findings |
+| `fallback` | inline `fallback_reviewer.v1.md` ran; `reviews/fallback_review.md` exists; `note` carries `reason=` — `adversarial-missing` (canonical not installed), `explicit-opt-out` (`--no-adversarial`), or `canonical-exit-<N>-...` (a non-consumer-safe canonical exit; v1.0.1 / D-054) |
 | `fallback-failed` | inline fallback was invoked but exited non-zero; manuscript is effectively unreviewed |
 | `none` | the fallback prompt file is missing on disk; manuscript is unreviewed and Tier 3 was silently skipped |
+
+`canonical-failed` was retired in v1.0.1 (D-054): a non-consumer-safe
+canonical exit (3/4/other) now quarantines the bad JSON and falls back,
+so the recorded value becomes `fallback` with a `canonical-exit-<N>`
+reason rather than `canonical-failed`.
 
 ### When to read it
 

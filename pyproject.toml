@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "beril-paper-writer-skill"
-version = "1.0.0"
+version = "1.0.1"
 description = "BERIL Paper Writer — drafts ICMJE-conformant scientific manuscripts from BERDL analysis projects, with intercalated gap-fill loops and adversarial-review-driven revision. Distributed as a Claude Code skill."
 readme = "README.md"
 requires-python = ">=3.10"

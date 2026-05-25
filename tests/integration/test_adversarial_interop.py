@@ -12,6 +12,11 @@ import json
 
 import pytest
 
+from beril_paper_writer.orchestrator import (
+    PaperWriterOrchestrator,
+    classify_adversarial_exit,
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures: minimal adversarial-review-paper.v2 JSON
@@ -233,26 +238,117 @@ class TestAdversarialSchemaV2Roundtrip:
 
 
 class TestAdversarialExitCodeRouting:
-    """Verify paper-writer's exit code handling per CONTRACT.md."""
+    """Verify paper-writer routes beril-adversarial exit codes per the
+    v0.7.0.8 contract (adversarial CONTRACT.md exit-code table).
+
+    The routing decision lives in
+    ``beril_paper_writer.orchestrator.classify_adversarial_exit`` —
+    ``phase_review`` calls it directly. This exercises real code, not a
+    self-consistency check on hard-coded tuples: the pre-v1.0.1 version
+    of this class asserted literal tuples and its comment referenced
+    the long-retired ``paper_writer.sh`` (see DECISIONS.md D-053/D-054).
+    """
 
     @pytest.mark.parametrize(
-        "exit_code,should_use_json",
+        "exit_code,expected",
         [
-            (0, True),   # clean pass
-            (2, True),   # auto-corrected, JSON is safe
-            (1, False),  # validation failure, JSON unsafe
-            (3, False),  # config error
+            (0, "consumer-safe"),       # clean pass
+            (2, "consumer-safe"),       # auto-corrected / advisory
+            (3, "not-consumer-safe"),   # config error
+            (4, "not-consumer-safe"),   # .json NOT consumer-safe (v0.7.0.8)
+            (1, "not-consumer-safe"),   # bad args / unexpected
+            (5, "not-consumer-safe"),   # any other code
+            (-9, "not-consumer-safe"),  # killed by signal
         ],
     )
-    def test_exit_code_json_safety(self, exit_code, should_use_json):
-        """Document which exit codes produce consumer-safe JSON."""
-        # This is a contract-documentation test; the routing logic
-        # lives in paper_writer.sh. We verify the contract is
-        # self-consistent.
-        if should_use_json:
-            assert exit_code in (0, 2)
-        else:
-            assert exit_code in (1, 3)
+    def test_classify_adversarial_exit(self, exit_code, expected):
+        assert classify_adversarial_exit(exit_code) == expected
+
+    def test_only_zero_and_two_are_consumer_safe(self):
+        """Exit 0 and 2 — and only those — are consumer-safe. Pins the
+        resolution of the contradiction in adversarial CONTRACT.md: the
+        exit-code table and both reference consumers say 0/2; a stray
+        comment says 0-only. paper-writer follows 0/2 (see D-054)."""
+        safe = {
+            c for c in range(-10, 11)
+            if classify_adversarial_exit(c) == "consumer-safe"
+        }
+        assert safe == {0, 2}
+
+
+class TestAdversarialJsonQuarantine:
+    """Verify a non-consumer-safe ``adversarial_review.json`` is moved
+    out of the P0 gate's / optimizer's path on a non-(0,2) exit.
+
+    Regression guard for D-054: before the fix, an exit-4
+    schema-invalid-but-parseable ``.json`` was left on disk and
+    silently parsed by ``p0_gate.count_p0_findings`` and dispatched on
+    by ``phase_optimize`` — both key on the file's presence, not on the
+    exit code or the (write-only) ``review_mode.json``.
+    """
+
+    def _make_orch(self, tmp_path) -> PaperWriterOrchestrator:
+        draft_dir = tmp_path / "proj" / "papers" / "draft_1"
+        draft_dir.mkdir(parents=True)
+        return PaperWriterOrchestrator(draft_dir=draft_dir)
+
+    def test_quarantine_moves_the_file(self, tmp_path):
+        orch = self._make_orch(tmp_path)
+        audit = orch.draft_dir / "audit"
+        audit.mkdir()
+        adv = audit / "adversarial_review.json"
+        # A parseable-but-schema-invalid payload — the exit-4 case
+        # p0_gate's JSONDecodeError guard would NOT have caught.
+        adv.write_text(
+            '{"schema_version": "bad", "findings": "not-a-list"}',
+            encoding="utf-8",
+        )
+
+        dest = orch._quarantine_adversarial_json(
+            adv_json_path=adv, reason="canonical-exit-4-unsafe-json",
+        )
+
+        # Original gone — p0_gate._load_json_safe now sees "not found"
+        # and degrades cleanly instead of parsing garbage.
+        assert not adv.exists()
+        # Moved into audit/rejected/ with the reason in the filename.
+        assert dest is not None
+        assert dest.exists()
+        assert dest.parent == audit / "rejected"
+        assert "canonical-exit-4-unsafe-json" in dest.name
+        # Payload preserved for forensics.
+        assert dest.read_text(encoding="utf-8").startswith(
+            '{"schema_version"'
+        )
+
+    def test_quarantine_noop_when_no_file(self, tmp_path):
+        orch = self._make_orch(tmp_path)
+        (orch.draft_dir / "audit").mkdir()
+        dest = orch._quarantine_adversarial_json(
+            adv_json_path=(
+                orch.draft_dir / "audit" / "adversarial_review.json"
+            ),
+            reason="canonical-exit-3-config",
+        )
+        assert dest is None
+
+    def test_quarantine_leaves_companion_md(self, tmp_path):
+        """The companion .md is intentionally left in place: nothing
+        parses it programmatically and it stays human-useful."""
+        orch = self._make_orch(tmp_path)
+        audit = orch.draft_dir / "audit"
+        audit.mkdir()
+        adv_json = audit / "adversarial_review.json"
+        adv_json.write_text("{}", encoding="utf-8")
+        adv_md = audit / "adversarial_review.md"
+        adv_md.write_text("# Adversarial review\n", encoding="utf-8")
+
+        orch._quarantine_adversarial_json(
+            adv_json_path=adv_json,
+            reason="canonical-exit-4-unsafe-json",
+        )
+        assert not adv_json.exists()
+        assert adv_md.exists()
 
 
 class TestAdversarialV3ForwardCompat:

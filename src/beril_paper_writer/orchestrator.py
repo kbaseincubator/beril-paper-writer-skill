@@ -218,6 +218,43 @@ def write_reframing_log_stub(draft_dir: Path) -> bool:
     return True
 
 
+# Exit codes returned by `beril-adversarial review`, per that skill's
+# CONTRACT.md (v0.7.0.8, 2026-05-25). Centralised here so phase_review
+# and its tests share one source of truth.
+ADVERSARIAL_CONSUMER_SAFE_EXITS = (0, 2)
+
+
+def classify_adversarial_exit(returncode: int) -> str:
+    """Map a `beril-adversarial review` exit code to a paper-writer
+    action, per beril-adversarial CONTRACT.md v0.7.0.8.
+
+    Returns:
+      "consumer-safe"     — exit 0 (clean) or exit 2 (auto-corrected /
+                            advisory: summary-count fix, JSON-escaping
+                            auto-repair, or a v2-schema deprecation
+                            warning). In all of these the
+                            ``adversarial_review.json`` on disk may be
+                            parsed by the P0 gate and the optimizer.
+      "not-consumer-safe" — exit 4 (the .json is unparseable after the
+                            reviewer's auto-repair pass, OR parseable
+                            but schema-invalid), exit 3 (config error),
+                            or any other code (bad args / unexpected).
+                            The .json must be quarantined out of the
+                            file-keyed consumers' path and the inline
+                            fallback reviewer run instead.
+
+    Exit 2 is consumer-safe: the adversarial exit-code table and BOTH
+    of that skill's reference consumers (the bash ``case`` and the
+    Python ``returncode in (0, 2)`` example) branch 0 and 2 together.
+    The stray "exit 0 is the only safe signal" phrasing elsewhere in
+    adversarial CONTRACT.md is a known internal contradiction in that
+    document — see DECISIONS.md D-054.
+    """
+    if returncode in ADVERSARIAL_CONSUMER_SAFE_EXITS:
+        return "consumer-safe"
+    return "not-consumer-safe"
+
+
 class PaperWriterOrchestrator:
     """Manages the full lifecycle of a paper draft."""
 
@@ -1718,8 +1755,25 @@ with the citation key in the manuscript.
         #      machine-discoverable.
         #   3. self.adversarial_bin is set → invoke canonical reviewer
         #      via absolute path (Tier J discipline: no bare-name PATH
-        #      lookup). On non-zero exit, log ERROR but advance — the
-        #      optimizer's missing-findings check will skip cleanly.
+        #      lookup). Then route on exit code per beril-adversarial
+        #      CONTRACT.md v0.7.0.8 (see the routing block below):
+        #      exit 0/2 → adversarial_review.json is consumer-safe;
+        #      exit 3/4/other → quarantine the non-consumer-safe JSON
+        #      and run the inline fallback reviewer.
+        #
+        # v1.0.1 (2026-05-25, D-054): the former policy here was "on
+        # non-zero exit, log ERROR but advance — the optimizer's
+        # missing-findings check will skip cleanly." That became unsafe
+        # once adversarial v0.7.0.8 made exit 4 able to ship a
+        # freshly-written, parseable-but-schema-invalid .json: the two
+        # downstream consumers (phase_p0_review via
+        # p0_gate.count_p0_findings, and phase_optimize) key on the
+        # FILE's presence + parseability, not on this exit code and not
+        # on review_mode.json (write-only telemetry). p0_gate only
+        # guards against an unparseable file, so a schema-invalid
+        # exit-4 .json would sail straight into the P0 count. "Skip
+        # cleanly" only holds when the file is absent — hence the
+        # quarantine below.
         #
         # Stage 4 Tier R-3 (2026-05-17): the defensive `.touch()` of
         # references.md / citation_map.md that lived here has been
@@ -1788,44 +1842,96 @@ with the citation key in the manuscript.
             # the rc!=0 branch.
             stdout_text = stdout.decode("utf-8", errors="ignore")
             stderr_text = stderr.decode("utf-8", errors="ignore")
-            if proc.returncode != 0:
-                logger.error(
-                    f"Adversarial review failed (rc={proc.returncode}):\n"
-                    f"STDOUT: {stdout_text[:2000]}\n"
-                    f"STDERR: {stderr_text[:2000]}"
-                )
-                # Record the failure mode so downstream / audit knows.
-                self._write_review_mode(
-                    reviewer="canonical-failed",
-                    note=f"beril-adversarial exited {proc.returncode}; see logs",
-                )
-            else:
-                # Always echo stdout/stderr at INFO so we can diagnose
-                # exit-0-but-misbehaved cases. ``or '<empty>'`` so the
-                # log line isn't an awkward trailing colon.
+            if classify_adversarial_exit(proc.returncode) == "consumer-safe":
+                # Exit 0 (clean) or 2 (auto-corrected / advisory).
+                # adversarial_review.json is consumer-safe either way.
+                # Echo stdout/stderr at INFO so exit-0-but-misbehaved
+                # cases stay diagnosable. ``or '<empty>'`` keeps the
+                # log line from ending in an awkward colon.
                 logger.info(
-                    f"Adversarial review completed (rc=0):\n"
+                    f"Adversarial review completed (rc={proc.returncode}):\n"
                     f"STDOUT: {stdout_text[:2000] or '<empty>'}\n"
                     f"STDERR: {stderr_text[:2000] or '<empty>'}"
                 )
+                if proc.returncode == 2:
+                    logger.info(
+                        "beril-adversarial exited 2: the validator "
+                        "auto-corrected the summary block, auto-repaired "
+                        "JSON escaping, or emitted a schema-deprecation "
+                        "warning. Per the adversarial exit-code table "
+                        "the .json is consumer-safe — treating as a "
+                        "clean pass."
+                    )
                 # Tier S-9a defensive check: did the CLI actually write?
                 wrote_ok = self._check_adversarial_output_fresh(
                     adv_json_path=adv_json_path,
                     subprocess_start=subprocess_start,
                 )
                 if wrote_ok:
-                    self._write_review_mode(reviewer="canonical")
+                    self._write_review_mode(
+                        reviewer="canonical",
+                        note=(
+                            "exit 2: auto-corrected / advisory"
+                            if proc.returncode == 2
+                            else ""
+                        ),
+                    )
                 else:
                     self._write_review_mode(
                         reviewer="canonical-silent-fail",
                         note=(
-                            "beril-adversarial exited 0 but did not "
-                            "rewrite audit/adversarial_review.json; "
-                            "gate will evaluate against stale findings "
-                            "if any. See orchestrator logs for "
-                            "adversarial stdout/stderr."
+                            f"beril-adversarial exited {proc.returncode} "
+                            "but did not rewrite "
+                            "audit/adversarial_review.json; gate will "
+                            "evaluate against stale findings if any. See "
+                            "orchestrator logs for adversarial "
+                            "stdout/stderr."
                         ),
                     )
+            else:
+                # Exit 3 (config error), 4 (.json not consumer-safe),
+                # or any other code. The adversarial_review.json on disk
+                # must not reach the P0 gate or the optimizer: on exit 4
+                # because the producer declared it unsafe (possibly
+                # parseable-but-schema-invalid, which p0_gate would NOT
+                # catch); on exit 3/other because a STALE .json from a
+                # prior round may be present and the freshness check
+                # above only runs on the consumer-safe path. Quarantine
+                # it, then fall back to the inline reviewer so the
+                # manuscript still gets a Tier-3 review — exactly as if
+                # the canonical CLI had been absent.
+                logger.error(
+                    f"Adversarial review did not return a consumer-safe "
+                    f"result (rc={proc.returncode}):\n"
+                    f"STDOUT: {stdout_text[:2000] or '<empty>'}\n"
+                    f"STDERR: {stderr_text[:2000] or '<empty>'}"
+                )
+                if proc.returncode == 4:
+                    reason = "canonical-exit-4-unsafe-json"
+                elif proc.returncode == 3:
+                    reason = "canonical-exit-3-config"
+                else:
+                    reason = f"canonical-exit-{proc.returncode}"
+                quarantined = self._quarantine_adversarial_json(
+                    adv_json_path=adv_json_path, reason=reason,
+                )
+                if quarantined is not None:
+                    logger.warning(
+                        "Tier 3: quarantined the non-consumer-safe "
+                        f"adversarial_review.json to {quarantined}; the "
+                        "P0 gate and optimizer will not parse it."
+                    )
+                logger.warning(
+                    "Tier 3: falling back to the inline reviewer "
+                    "(LIGHTER — 3 finding classes vs 10, no literature "
+                    "scan, no biological-claim verification; the "
+                    "optimizer cannot dispatch on its markdown output "
+                    "and will skip). Per the adversarial contract a "
+                    "single fresh re-run may clear a transient exit 4 "
+                    "— re-run `beril-paper-writer continue <draft_dir>` "
+                    "once if the full canonical review is needed."
+                )
+                await self._run_fallback_reviewer(reason=reason)
 
         # Stage 4 Tier S (2026-05-18): advance to the P0 gate instead
         # of jumping straight to optimize. The gate reads both
@@ -1953,6 +2059,68 @@ with the citation key in the manuscript.
             return False
         return True
 
+    def _quarantine_adversarial_json(
+        self, *, adv_json_path: Path, reason: str,
+    ) -> Optional[Path]:
+        """v1.0.1 (2026-05-25, D-054). Move a non-consumer-safe
+        ``adversarial_review.json`` out of the path of the two
+        file-keyed downstream consumers — ``phase_p0_review`` (via
+        ``p0_gate.count_p0_findings``) and ``phase_optimize``.
+
+        Called on any non-(0,2) exit of ``beril-adversarial review``.
+        Exit 4 means the producer declared the .json not
+        consumer-safe; exit 3 / other mean a STALE .json from a prior
+        round may be lying around. Either way the file must not reach
+        the P0 gate or the optimizer, both of which key on the file's
+        presence + parseability, not on the exit code. p0_gate only
+        guards against an *unparseable* file — a parseable-but-schema-
+        invalid exit-4 .json would otherwise be counted as real
+        findings.
+
+        The file is MOVED (not deleted) into ``audit/rejected/`` with
+        a UTC-timestamped name so the bad payload stays available for
+        forensics ("fail loud with maximal diagnostics"). The
+        companion ``adversarial_review.md`` is intentionally left in
+        place: nothing parses it programmatically, and the producer's
+        contract says the .md is still human-useful on exit 4.
+
+        Returns the quarantine destination path if a file was moved,
+        or ``None`` if there was nothing to quarantine or the move
+        failed (both cases are logged).
+        """
+        if not adv_json_path.is_file():
+            return None
+        rejected_dir = self.draft_dir / "audit" / "rejected"
+        rejected_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        dest = rejected_dir / f"adversarial_review.{ts}.{reason}.json"
+        try:
+            adv_json_path.rename(dest)
+        except OSError as exc:
+            logger.error(
+                f"_quarantine_adversarial_json: rename {adv_json_path} "
+                f"→ {dest} failed ({exc!r}); unlinking the source "
+                "instead so the P0 gate / optimizer cannot consume a "
+                "non-consumer-safe file. The bad payload is lost for "
+                "forensics."
+            )
+            try:
+                adv_json_path.unlink()
+            except OSError as exc2:
+                logger.error(
+                    f"_quarantine_adversarial_json: unlink also failed "
+                    f"({exc2!r}); a non-consumer-safe "
+                    "adversarial_review.json remains on disk and MAY be "
+                    "parsed by the P0 gate. Manual intervention "
+                    "required."
+                )
+            return None
+        logger.info(
+            "Quarantined non-consumer-safe adversarial_review.json → "
+            f"{dest}"
+        )
+        return dest
+
     def _write_review_mode(
         self, *, reviewer: str, note: str = "",
     ) -> None:
@@ -1960,14 +2128,24 @@ with the citation key in the manuscript.
         run state is machine-discoverable in audit/.
 
         Values for `reviewer`:
-          - "canonical"             — beril-adversarial succeeded
-          - "canonical-failed"      — beril-adversarial exited non-zero
-          - "canonical-silent-fail" — adversarial exited 0 but did not
+          - "canonical"             — beril-adversarial returned a
+                                       consumer-safe result (exit 0, or
+                                       exit 2 = auto-corrected/advisory)
+          - "canonical-silent-fail" — adversarial returned a
+                                       consumer-safe exit but did not
                                        rewrite adversarial_review.json
                                        (Stage 4 Tier S-9a)
           - "fallback"              — inline fallback_reviewer.v1 used
+                                       (canonical absent, --no-adversarial,
+                                       OR a non-consumer-safe canonical
+                                       exit — see `note` for the reason)
           - "fallback-failed"       — inline fallback also failed
           - "none"                  — Tier-3 skipped entirely
+
+        "canonical-failed" was retired in v1.0.1 (D-054): a
+        non-consumer-safe canonical exit (3/4/other) now quarantines
+        the bad JSON and falls back, so the recorded reviewer becomes
+        "fallback" with a `note` of `reason=canonical-exit-<N>...`.
         """
         import json
         audit_dir = self.draft_dir / "audit"

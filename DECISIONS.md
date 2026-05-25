@@ -1872,3 +1872,85 @@ handler — `run_pipeline` catches it internally),
 Related: D-034 (v0.8 holistic redesign — the "subtraction over
 addition" intent this completes); V1_X_BACKLOG #48 (v1.1 Tier-1
 buildout), #47 (superseded by #48).
+
+## D-054 — 2026-05-25 — Route beril-adversarial exit codes; quarantine non-consumer-safe JSON
+
+**Decision.** Replace `phase_review`'s binary `if rc != 0` handling of
+the canonical adversarial reviewer with exit-code routing per
+beril-adversarial CONTRACT.md v0.7.0.8. Exit 0/2 → `adversarial_review.json`
+is consumer-safe. Exit 3/4/other → quarantine the on-disk
+`adversarial_review.json` into `audit/rejected/` and fall back to the
+inline reviewer. Ship as v1.0.1.
+
+**Context.** The adversarial team shipped v0.7.0.7 (orchestrator-side
+JSON auto-repair) + v0.7.0.8 (a schema-invalid-but-parseable `.json`
+now exits 4, not 0) and asked consumers to confirm an `exit == 4`
+branch. A compatibility review found paper-writer was NOT compatible —
+and that the adversarial team's "messaging fix, not a correctness fix"
+framing was wrong for paper-writer specifically:
+
+- `phase_review` caught exit 4 in `if rc != 0` and logged ERROR, but
+  then `advance_phase("p0_review")` ran unconditionally. The only
+  failure record, `review_mode.json`, is write-only — nothing in
+  `src/` reads it back.
+- The two downstream consumers — `phase_p0_review` (via
+  `p0_gate.count_p0_findings`) and `phase_optimize` — key on the
+  *presence + parseability* of `adversarial_review.json`, not on the
+  exit code. `p0_gate._load_json_safe` only guards against an
+  *unparseable* file; a parseable-but-schema-invalid exit-4 `.json`
+  sailed straight into the P0 count and the optimizer's dispatch.
+- So "fail loud at the call site" did not stop the bad file being
+  consumed — the loud log and the file consumption are in different
+  phases joined by an unconditional advance. For a multi-phase state
+  machine, catching ≠ halting.
+
+Root cause: a stale assumption in the pre-fix branch-logic comment —
+"on non-zero exit ... advance — the optimizer's missing-findings check
+will skip cleanly." That assumed *failure ⇒ no parseable findings
+file*. v0.7.0.8 broke it: exit 4 can ship a freshly-written,
+parseable-but-invalid file.
+
+**Why quarantine + fallback (not halt).** Quarantining the `.json`
+restores the precondition the "skip cleanly" net depends on — an
+absent file. The fallback is paper-writer's existing graceful-
+degradation path (D-051): "exit 4 = canonical produced unusable
+output" is morally identical to "canonical unavailable," which already
+falls back. The manuscript still gets a Tier-3 review; `review_mode`
+records `fallback` with a `canonical-exit-<N>` reason. Halting was
+rejected as inconsistent with D-051. Per the adversarial contract a
+single fresh re-run may clear a transient exit 4 — paper-writer does
+not loop.
+
+**Adversarial CONTRACT.md contradiction (flagged upstream).** That
+document says both "exit 0 or 2 = consumer-safe" (exit-code table; bash
+`case`; Python `returncode in (0, 2)` reference) and "exit 0 is the
+only safe-to-parse signal" (two stray comments). paper-writer follows
+the preponderance: exit 0 AND 2 are consumer-safe.
+`classify_adversarial_exit()` encodes this; the adversarial team has
+been asked to fix the contradiction in their CONTRACT.md.
+
+**Scope of the change.** orchestrator.py: new module-level
+`classify_adversarial_exit()`; rewrote the `phase_review` Tier-3
+exit-handling block; new `_quarantine_adversarial_json()` method;
+updated the branch-logic comment + `_write_review_mode` docstring
+(`canonical-failed` retired — never written now). tests: rewrote
+`test_adversarial_interop.py::TestAdversarialExitCodeRouting` (it
+asserted literal tuples and referenced the retired `paper_writer.sh`)
+to exercise `classify_adversarial_exit`; added
+`TestAdversarialJsonQuarantine`. CONTRACT.md: exit-code table,
+review_mode table, version-compat row, fallback-coordination line.
+Full suite green (1024 passed).
+
+**Not done (deferred).** (1) A live cross-skill smoke test invoking a
+real `beril-adversarial` — remains a runbook item (adversarial
+CONTRACT.md asks every consumer for one; paper-writer's interop test is
+fixture-only). (2) The P0 gate still advances silently when total
+P0 == 0 even if the Tier-3 review degraded to fallback —
+`p0_findings.md` is only written when total > 0. This predates D-054
+and is a property of the fallback path generally, not the exit-4
+change; left for a separate gate-observability item.
+
+Related: D-051 (adversarial CLI resolution + loud-warn fallback);
+D-005 (loose coupling); CONTRACT.md exit-code table;
+`feedback_no_benchmark_gaming` (silent-wrong-answer doctrine);
+`feedback_cross_skill_contract_drift` (why CONTRACT.md exists).
