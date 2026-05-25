@@ -5,4 +5,4 @@ RELEASE_NOTES.md for the v1.0 release story + known limits;
 release-notes/ for per-version v0.x detail.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

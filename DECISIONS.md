@@ -1929,6 +1929,17 @@ the preponderance: exit 0 AND 2 are consumer-safe.
 `classify_adversarial_exit()` encodes this; the adversarial team has
 been asked to fix the contradiction in their CONTRACT.md.
 
+**Resolved 2026-05-25.** The adversarial team confirmed all three
+flagged points and corrected their CONTRACT.md — doc-only, no change to
+the exit-4 signal, folded into v0.7.0.8. Exit 0 and 2 are now stated as
+consumer-safe in the table and both reference consumers; exit 1 is
+corrected to "user/usage error, non-retryable" (not "validation
+failure") and exit 4 is now listed; a standing "Multi-phase consumers"
+note was added (catching != halting; the not-consumer-safe signal must
+cross phase boundaries). They also found and corrected the same
+exposure in presentation-maker's `m6_score.py`. paper-writer v1.0.1's
+routing already matches the corrected contract — no code change.
+
 **Scope of the change.** orchestrator.py: new module-level
 `classify_adversarial_exit()`; rewrote the `phase_review` Tier-3
 exit-handling block; new `_quarantine_adversarial_json()` method;
