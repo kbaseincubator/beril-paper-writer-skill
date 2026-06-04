@@ -1,11 +1,31 @@
 # beril-paper-writer-skill — release notes
 
-**Current:** v1.0.1 (2026-05-25).
+**Current:** v1.0.2 (2026-06-03).
 
 This file is the **cumulative current-version log** — where the skill
 is, what shipped, and pointers to per-version detail. Per-version
 release notes for the v0.x line live in
 [`release-notes/`](release-notes/).
+
+## v1.0.2 — docs: terminology + URL migration (2026-06-03)
+
+**Docs-only.** No code change.
+
+- README + pyproject description: "BERDL analysis projects" →
+  "BERIL analysis projects". BERDL has been deprecated as the
+  co-scientist name; the data layer is "KBase Lakehouse" and the
+  co-scientist is "BERIL". Operational artifacts (prompts, audit
+  messages, code identifiers like `berdl_query`/`berdl_start`) keep
+  BERDL by design.
+- README cross-skill links: sister-skill repos migrated from
+  `ArkinLaboratory` to `kbaseincubator` on 2026-06-03. Updated
+  beril-adversarial + beril-presentation-maker links; the
+  beril-atlas link is intentionally left at `ArkinLaboratory`
+  (atlas did not migrate).
+- README install hint: `pipx install` URL updated to
+  `kbaseincubator/beril-paper-writer-skill`.
+
+CRAFT submodule pin bumps from v1.0.1 → v1.0.2 in CRAFT v0.2.2.
 
 ## v1.0.1 — adversarial exit-code contract (2026-05-25)
 

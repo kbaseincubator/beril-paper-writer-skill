@@ -1,6 +1,6 @@
 # beril-paper-writer-skill
 
-Drafts ICMJE-conformant scientific manuscripts from BERDL analysis
+Drafts ICMJE-conformant scientific manuscripts from BERIL analysis
 projects. Takes a finished project (research plan, report, notebooks,
 figures, references) and produces a complete IMRAD draft with verified
 citations, embedded figures, adversarial review, and iterative
@@ -9,9 +9,9 @@ revision — without fabricating evidence.
 Distributed as a Claude Code skill that runs inside a
 [BERIL](https://github.com/kbaseincubator/BERIL-research-observatory)
 deployment. Sister skills:
-[beril-adversarial](https://github.com/ArkinLaboratory/beril-adversarial-skill)
+[beril-adversarial](https://github.com/kbaseincubator/beril-adversarial-skill)
 (harsh review),
-[beril-presentation-maker](https://github.com/ArkinLaboratory/beril-presentation-maker-skill)
+[beril-presentation-maker](https://github.com/kbaseincubator/beril-presentation-maker-skill)
 (scientific presentations),
 [beril-atlas](https://github.com/ArkinLaboratory/beril-atlas-skill)
 (corpus observability).
@@ -19,7 +19,7 @@ deployment. Sister skills:
 ## Status
 
 **v1.0.0** — first stable release. Validated by the Stage 7 v1-MVP
-campaign: six BERDL projects (3 dev + 3 blind holdout) run end-to-end
+campaign: six BERIL projects (3 dev + 3 blind holdout) run end-to-end
 and scored against the v1-bar v2b success criteria. The pipeline
 reached the review measurement point on 6/6, resolved 100% of claim
 markers on 6/6, and stayed within the $10/draft cost budget on 6/6;
@@ -59,7 +59,7 @@ build history. Run `pytest` from the repo root to confirm the suite.
      `claim_inventory.tsv` + REPORT.md; claim-marker resolution).
    - **Tier 2** — Haiku light review.
    - **Tier 3** — canonical adversarial review via
-     [beril-adversarial](https://github.com/ArkinLaboratory/beril-adversarial-skill).
+     [beril-adversarial](https://github.com/kbaseincubator/beril-adversarial-skill).
      Falls back to an inline reviewer with a loud warning if the canonical
      CLI isn't installed.
 7. Applies a **subtraction-only optimizer**: it can remove unbacked claims
@@ -81,7 +81,7 @@ disk in `papers/draft_N/state.json`.
 
 ```bash
 # 1. Install the skill (clean install — do NOT use --editable)
-pipx install git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 
 # 2. Verify
 beril-paper-writer --version           # 1.0.0
@@ -270,7 +270,7 @@ no biological-claim verification.
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Reference | Comprehensive single-artifact guide (retained as reference) |
 | [RELEASE_NOTES.md](RELEASE_NOTES.md) | All | The v1.0 release story + known limits |
 | [release-notes/](release-notes/) | Reference | Per-version release notes (v0_1 through v0_6) |
-| [PARTICIPANT-RUNBOOK](https://github.com/ArkinLaboratory/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md) | Participants | Cross-skill runbook covering all 4 BERIL skills end-to-end |
+| [PARTICIPANT-RUNBOOK](https://github.com/kbaseincubator/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md) | Participants | Cross-skill runbook covering all 4 BERIL skills end-to-end |
 
 ## License
 
