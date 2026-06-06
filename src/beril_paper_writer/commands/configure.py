@@ -558,8 +558,10 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
         ),
     )
     p.add_argument(
-        "--beril-root",
-        help="Explicit BERIL_ROOT. Defaults to the discovery walk-up.",
+        "beril_root",
+        nargs="?",
+        default=None,
+        help="BERIL_ROOT (default: discovery walk-up).",
     )
     p.add_argument(
         "--no-discover",

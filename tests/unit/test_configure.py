@@ -820,3 +820,26 @@ def test_run_reads_optional_flags_via_getattr(tmp_path, monkeypatch):
     # outcome. (With no env keys and no discovery, the unresolved-tier
     # path fires and returns 1; that's fine.)
     assert isinstance(rc, int)
+
+
+# ---------------------------------------------------------------------------
+# `configure` argparse shape — positional BERIL_ROOT (CRAFT umbrella + doctor
+# both invoke `<cli> configure <BERIL_ROOT>` positionally; the prior flag form
+# would `argparse: unrecognized arguments` against any of those callers).
+# ---------------------------------------------------------------------------
+
+
+def test_configure_parser_accepts_positional_beril_root():
+    from beril_paper_writer.cli import build_parser
+
+    ns = build_parser().parse_args(["configure", "/tmp/x"])
+    assert ns.command == "configure"
+    assert ns.beril_root == "/tmp/x"
+
+
+def test_configure_parser_accepts_bare_invocation():
+    from beril_paper_writer.cli import build_parser
+
+    ns = build_parser().parse_args(["configure"])
+    assert ns.command == "configure"
+    assert ns.beril_root is None

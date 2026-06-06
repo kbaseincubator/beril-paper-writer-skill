@@ -30,7 +30,6 @@ from pathlib import Path
 
 from beril_paper_writer import __version__, discovery
 
-
 # Directories inside the shipped skill/ dir that should be overwritten on install
 _SHIPPED_SUBDIRS = ("commands", "prompts", "references", "tools")
 
@@ -173,7 +172,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"  [OK] claude — {claude_path}")
     print("")
     print(
-        f"Next: run `beril-paper-writer configure --beril-root {beril_root}` "
+        f"Next: run `beril-paper-writer configure {beril_root}` "
         "to bootstrap CRAFT runtime config."
     )
     return 0
