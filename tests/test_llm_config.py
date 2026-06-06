@@ -66,6 +66,55 @@ def test_bare_host_default():
     assert lc.bare_host({}) == lc.CBORG_BARE_HOST
 
 
+# --- app-internal base URL (CRAFT-CONTRACT §3.4 / Stage 6) ------------------
+# Symmetric /v1-keeping sibling of bare_host: same user-facing CBORG_BASE_URL
+# drives both clients, so app-internal (OpenAI-style) and claude -p
+# (Anthropic-style) can never disagree.
+
+
+def test_app_internal_base_url_keeps_v1_form():
+    assert (
+        lc.app_internal_base_url({"CBORG_BASE_URL": "https://api.cborg.lbl.gov/v1"})
+        == "https://api.cborg.lbl.gov/v1"
+    )
+
+
+def test_app_internal_base_url_bare_host_input_gets_v1():
+    # The bugfix case: user set bare host → app-internal call would have
+    # hit a /v1-less endpoint and 404'd. Helper appends /v1.
+    assert (
+        lc.app_internal_base_url({"CBORG_BASE_URL": "https://api.cborg.lbl.gov"})
+        == "https://api.cborg.lbl.gov/v1"
+    )
+
+
+def test_app_internal_base_url_trailing_slash_normalized():
+    assert (
+        lc.app_internal_base_url({"CBORG_BASE_URL": "https://api.cborg.lbl.gov/v1/"})
+        == "https://api.cborg.lbl.gov/v1"
+    )
+
+
+def test_app_internal_base_url_default():
+    assert lc.app_internal_base_url({}) == lc.CBORG_BARE_HOST + "/v1"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"CBORG_BASE_URL": "https://api.cborg.lbl.gov"},
+        {"CBORG_BASE_URL": "https://api.cborg.lbl.gov/v1"},
+        {"CBORG_BASE_URL": "https://api.cborg.lbl.gov/v1/"},
+        {"CBORG_BASE_URL": "https://proxy.example.com/cborg"},
+        {"CBORG_BASE_URL": "https://proxy.example.com/cborg/v1"},
+    ],
+)
+def test_app_internal_base_url_equals_bare_host_plus_v1(env):
+    """Invariant: app_internal_base_url(env) == bare_host(env) + '/v1'."""
+    assert lc.app_internal_base_url(env) == lc.bare_host(env) + "/v1"
+
+
 # --- newest-model discovery -------------------------------------------------
 
 
