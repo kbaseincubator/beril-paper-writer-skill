@@ -77,7 +77,7 @@ similar), or ensure `~/.local/bin` comes first in PATH.
 From any cwd:
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install --force git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 ```
 
 Alternative URL forms:
@@ -85,14 +85,14 @@ Alternative URL forms:
 - **SSH (requires registered SSH key):**
 
   ```bash
-  pipx install --force git+ssh://git@github.com/ArkinLaboratory/beril-paper-writer-skill.git
+  pipx install --force git+ssh://git@github.com/kbaseincubator/beril-paper-writer-skill.git
   ```
 
 - **Specific version (recommended for production / reproducible
   deployments):**
 
   ```bash
-  pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.8.0
+  pipx install --force git+https://github.com/kbaseincubator/beril-paper-writer-skill.git@v1.1.0
   ```
 
 - **From a wheel file (offline / pinned):**
@@ -130,7 +130,7 @@ installed `beril-paper-writer` package (the Python orchestrator).
 ```bash
 cd "$BERIL_ROOT"
 beril-paper-writer --version             # sanity check
-beril-paper-writer configure             # verify claude CLI + deps
+beril-paper-writer configure "$BERIL_ROOT"   # bootstrap CRAFT config + preflight
 beril-paper-writer install-skill .       # deploy skill files
 ```
 
@@ -174,31 +174,46 @@ ls "$BERIL_ROOT/.claude/skills/beril-paper-writer/prompts/"
 #   claim_demarcate.v1.md, discrepancy_classify.v1.md, rewrite.v1.md
 ```
 
-### Step 3 — Configure (verify dependencies)
+### Step 3 — Configure (bootstrap CRAFT runtime config)
 
 ```bash
-beril-paper-writer configure --beril-root "$BERIL_ROOT"
+beril-paper-writer configure "$BERIL_ROOT"     # positional; omit to auto-discover
 ```
 
-This subcommand:
+`configure` makes the deployment ready to draft: it wires `claude -p` to a
+CRAFT-contracted provider and runs a prerequisites preflight. In order, it:
 
-- Confirms `claude` is on PATH and reports the path.
-- Confirms Python with `nbformat` and `python-docx` is importable
-  (these ride in the pipx venv from `pyproject.toml`).
-- Reports whether `beril-adversarial` is installed (optional;
-  adversarial review available if present, fallback reviewer used
-  if absent).
-- Reports the BERIL_ROOT it auto-discovered.
-- Does NOT make any LLM calls — this is a fast pre-flight check.
+1. Extends `<BERIL_ROOT>/.env` with the CRAFT shared-config block + this
+   skill's per-skill marker — additively and idempotently (it never
+   re-declares a key your `.env` already holds).
+2. Selects the provider — `ACTIVE_PROVIDER` ∈ `anthropic | cborg |
+   subscription`, inferred from existing keys if unset (`CBORG_API_KEY` →
+   `cborg`, `ANTHROPIC_API_KEY` → `anthropic`, neither → `subscription`).
+3. Discovers the provider's model list and resolves the
+   reasoning/standard/fast tier pins; on a terminal it prompts for any tier
+   it can't resolve, and under `--yes`/no-TTY it fails loud rather than
+   guessing.
+4. Writes `<BERIL_ROOT>/.claude/settings.json` (provider base URL + tier
+   model ids) and `settings.local.json` (the secret token, gitignored).
+5. Runs a validation ping — a real `claude -p` call that must reply exactly
+   `ok` (so a wrong/renamed model id is caught, not silently accepted).
+6. Checks the skill's hard runtime prerequisite, `claude` on PATH, plus an
+   advisory check for the optional `beril-adversarial` reviewer. (Python
+   deps ride in the pipx venv and aren't re-checked.)
 
-If any hard check fails (exit code 3), fix the missing requirement
-and re-run. Common issues:
+Flags: `--no-discover` (pins-only), `--no-ping` (offline), `--yes` (CI;
+fail loud on unresolved tiers).
 
-- **`claude` not found:** install Claude Code per Anthropic's docs;
-  verify with `which claude`.
-- **`nbformat` / `python-docx` not importable:** re-run
-  `pipx install --force` to rebuild the venv with all deps.
-- **BERIL_ROOT wrong:** pass `--beril-root <path>` explicitly.
+If a check fails (exit 3), fix it and re-run — `configure` is idempotent:
+
+- **`claude` not found:** install Claude Code per Anthropic's docs; `which claude`.
+- **Unresolved tier under `--yes`/no-TTY:** re-run on a terminal to pick, or
+  pin `MODEL_<TIER>` in `.env`.
+- **Ping reply isn't `ok`:** wrong/renamed model for that tier; re-pin and re-run.
+- **`beril-adversarial` missing:** advisory only — the inline fallback reviewer
+  runs (degraded). Install it for the canonical Tier-3 review.
+- **venv broken (`nbformat` / `python-docx` import errors at draft time):**
+  `pipx install --force` to rebuild.
 
 ## First-run validation
 
@@ -289,9 +304,9 @@ Do NOT run tests via the hub's system Python — it won't have
 Re-run pipx install with the new version tag:
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v0.8.0
+pipx install --force git+https://github.com/kbaseincubator/beril-paper-writer-skill.git@v1.1.0
 beril-paper-writer --version                      # confirm new version
-beril-paper-writer configure                      # verify deps still resolve
+beril-paper-writer configure "$BERIL_ROOT"        # re-bootstrap CRAFT config (idempotent)
 beril-paper-writer install-skill "$BERIL_ROOT"   # refresh skill files
 ```
 
@@ -401,7 +416,7 @@ Explicit arguments always win over branch / cwd inference.
 |---|---|
 | `beril-paper-writer --version` | Sanity check |
 | `beril-paper-writer install-skill <BERIL_ROOT>` | One-time per hub deployment + after each pipx upgrade |
-| `beril-paper-writer configure` | One-time per hub deployment + after env changes |
+| `beril-paper-writer configure [<BERIL_ROOT>]` | Bootstrap/refresh CRAFT runtime config (provider, tiers, `settings.json` + ping); re-run after `.env` or provider changes |
 | `beril-paper-writer draft <project_id>` | Start a new manuscript draft |
 | `beril-paper-writer continue <draft_dir> --pick TLN` | Resume after throughline selection |
 | `beril-paper-writer assemble <draft_dir>` | Generate .docx from finished draft |

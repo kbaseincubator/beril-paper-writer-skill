@@ -51,7 +51,7 @@ writer to get an independent harsh review of your project or draft.
 On the BERIL JupyterHub, open a terminal and run:
 
 ```bash
-pipx install git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 ```
 
 This installs the `beril-paper-writer` CLI. Verify it worked:
@@ -64,22 +64,19 @@ You should see `beril-paper-writer-skill 1.0.0` (or later).
 
 ### Configure
 
-Verify that all dependencies are in place:
+`configure` bootstraps the CRAFT runtime config and confirms `claude -p` works before
+your first draft:
 
 ```bash
-beril-paper-writer configure
+beril-paper-writer configure "$BERIL_ROOT"     # positional; omit to auto-discover
 ```
 
-This checks for:
-
-- **Hard requirements** (must pass): `claude` CLI on PATH, Python
-  with `nbformat` and `python-docx`, the orchestrator script.
-- **Soft requirements** (warnings): `beril-adversarial` CLI (needed
-  for the adversarial review arm; falls back to an inline reviewer
-  if missing), bash 3.2+, standard POSIX utilities.
-
-If `configure` exits 0, you're ready. If it exits 3, fix the missing
-hard requirements it reports.
+It selects the LLM provider (inferred from your `.env` keys), pins the
+reasoning/standard/fast model tiers into `<BERIL_ROOT>/.claude/settings.json`, runs a
+validation ping, and checks the hard prerequisite `claude` on PATH (with an advisory
+check for the optional `beril-adversarial` reviewer). If it exits 0 you're ready; exit 3
+means a missing hard requirement it names. See [CONFIGURE.md](CONFIGURE.md) for the full
+model.
 
 ### Install the skill into your BERIL deployment
 
@@ -104,7 +101,7 @@ If configure warns that `beril-adversarial` is missing and you want
 the full adversarial review loop:
 
 ```bash
-pipx install git+https://github.com/ArkinLaboratory/beril-adversarial-skill.git
+pipx install git+https://github.com/kbaseincubator/beril-adversarial-skill.git
 cd /path/to/BERIL-research-observatory
 beril-adversarial install-skill .
 ```
@@ -361,7 +358,7 @@ for figure-manifest warnings. Figures must be in the project's
 
 ```bash
 # Full install sequence
-pipx install git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 cd /path/to/BERIL-research-observatory
 beril-paper-writer --version
 beril-paper-writer configure

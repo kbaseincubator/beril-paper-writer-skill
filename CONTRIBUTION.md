@@ -59,7 +59,7 @@ hatches) changes, not when anti-patterns or examples are refined.
 2. Draft the anti-pattern rule, self-review check, or worked-example
    update. Follow the existing format in the target prompt.
 3. Submit via PR against
-   `ArkinLaboratory/beril-paper-writer-skill` or email to
+   `kbaseincubator/beril-paper-writer-skill` or email to
    `aparkin@lbl.gov` with the prompt diff and a one-paragraph
    rationale.
 

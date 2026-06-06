@@ -2,10 +2,35 @@
 
 **Status:** v0.8.0 + Stage 3 (2026-05-17). Living document.
 
-The paper-writer skill has **no runtime configuration files** — it reads
-everything from CLI flags, environment, and the deployed prompts. This
-minimizes surprise. This document covers what controls exist and how to
-tune them.
+The paper-writer skill has **no per-project configuration file** —
+project-level tuning is via CLI flags at invocation time, which minimizes
+surprise. What it *does* have, as of CRAFT-CONTRACT §3.4, is **runtime
+configuration that `configure` bootstraps**: the LLM provider and the
+per-tier model pins `claude -p` uses, written to
+`<BERIL_ROOT>/.claude/settings.json`. This document covers both the
+`configure` bootstrap and the CLI controls.
+
+## Runtime configuration (`configure` — CRAFT §3.4)
+
+```bash
+beril-paper-writer configure "$BERIL_ROOT"     # or omit the path to auto-discover
+```
+
+`configure` wires `claude -p` to a CRAFT-contracted provider and confirms
+it works before your first draft. In order, it: extends `<BERIL_ROOT>/.env`
+with the CRAFT shared block + this skill's marker (additive, idempotent —
+never re-declaring a key already there); selects the provider
+(`ACTIVE_PROVIDER` ∈ `anthropic | cborg | subscription`, inferred from
+existing keys if unset — `CBORG_API_KEY` → `cborg`, `ANTHROPIC_API_KEY` →
+`anthropic`, neither → `subscription`); discovers the provider's model list
+and resolves the three tier pins (`MODEL_REASONING` / `MODEL_STANDARD` /
+`MODEL_FAST`), prompting on a TTY for any it can't resolve and failing loud
+under `--yes`/no-TTY; writes `<BERIL_ROOT>/.claude/settings.json` (provider
+base URL + tier model ids) and `settings.local.json` (the secret token,
+gitignored); and runs a validation ping that asserts a real `claude -p`
+reply of exactly `ok`. Flags: `--no-discover`, `--no-ping`, `--yes`.
+
+Re-run it any time the provider or `.env` changes; it's idempotent.
 
 ## Environment
 
@@ -41,7 +66,7 @@ The pipx venv bundles `nbformat` (notebook parsing), `python-docx`
 imports, blow away and reinstall:
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install --force git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 # Do NOT use --editable; pipx's editable mode produces partial installs
 # for this package's hatchling layout (missing top-level .py files).
 ```
@@ -95,7 +120,7 @@ to override.
 | `--depth quick` | Fast draft (~5–10 min, lower cost) | — |
 | `--depth standard` | Normal draft (~15–25 min) | ← default |
 | `--depth deep` | Thorough draft (~30–50 min) | — |
-| `--model <id>` | Override LLM model for reasoning phases (plan, triage, optimizer) AND holistic draft | `claude-opus-4-6` |
+| `--model <id>` | Override LLM model for reasoning phases (plan, triage, optimizer) AND holistic draft | tier-pinned (see Model selection) |
 | `--no-adversarial` | Skip canonical reviewer; use inline fallback explicitly | Off (canonical used if installed; loud-warn fallback if missing) |
 | `--max-cost-usd N` | Soft cap; checked between LLM calls | None |
 | `--no-stream` | Disable progress streaming | Off |
@@ -108,7 +133,7 @@ to override.
 | `<draft_dir>` | Path to paused draft directory | Required |
 | `--pick TLN` | Throughline candidate id (TL1, TL2, ...) | Required at throughline_pick phase |
 | `--revision "text"` | Revision note for chosen throughline | None |
-| `--model <id>` | Override LLM model | `claude-opus-4-6` |
+| `--model <id>` | Override LLM model | tier-pinned (see Model selection) |
 | `--no-adversarial` | Skip canonical reviewer | Off |
 | `--max-cost-usd N` | Soft cap | None |
 
@@ -121,25 +146,31 @@ to override.
 
 ## Model selection
 
-Stage 3 changed the default reasoning model from Sonnet 4.5 to **Opus
-4.6**. Rationale: `self.model` drives the load-bearing phases (plan
-throughline-candidate generation, triage claim extraction, the
-subtraction-only optimizer); silently scaffolding the manuscript on
-Sonnet was backwards. The holistic drafter and Tier-2 light review have
-always run Opus (drafter) and Haiku (light review) respectively.
+As of CRAFT-CONTRACT §3.4, paper-writer no longer hardcodes model ids. It
+maps its phases onto the three CRAFT tiers, and `configure` pins a concrete,
+visible model per tier into `<BERIL_ROOT>/.claude/settings.json`:
 
-Override per-invocation:
+| Tier | Phases | Class |
+|---|---|---|
+| `reasoning` | plan / throughline-candidate generation, triage, the subtraction-only optimizer, and review-incorporating synthesis | Opus |
+| `standard` | body drafting (the holistic pass) | Sonnet |
+| `fast` | classification, claim/figure extraction, Tier-2 light review | Haiku |
+
+Note the §3.4 default-policy shift: **body drafting moved from the reasoning
+tier to `standard`.** The expensive tier is spent where an error compounds
+or can't be recovered (framing, the optimizer, final synthesis); drafting is
+recoverable by the downstream review+revise pass, so it runs `standard`.
+Raise a phase's tier by re-pinning `MODEL_<TIER>` in `.env` and re-running
+`configure`.
+
+Override the model for a single invocation (applies to all phases):
 
 ```bash
-# Cheaper iteration on Sonnet
-beril-paper-writer draft my_project --model claude-sonnet-4-5
-
-# Force a specific Opus version
-beril-paper-writer draft my_project --model claude-opus-4-7
+beril-paper-writer draft my_project --model <model_id>
 ```
 
-The prompts are model-tolerant but were calibrated against Opus 4.6 +
-Sonnet 4.5. Off-class models (Haiku, third-party) may need prompt tuning.
+The prompts are model-tolerant but calibrated against Opus/Sonnet-class
+models; off-class models may need prompt tuning.
 
 ## Cost controls
 

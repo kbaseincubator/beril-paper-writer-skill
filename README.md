@@ -83,14 +83,35 @@ disk in `papers/draft_N/state.json`.
 # 1. Install the skill (clean install — do NOT use --editable)
 pipx install git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 
-# 2. Verify
-beril-paper-writer --version           # 1.0.0
-beril-paper-writer configure           # confirms claude + beril-adversarial paths + Python deps
+# 2. Verify the CLI loads
+beril-paper-writer --version           # 1.1.0
 
 # 3. Deploy slash-command + skill files into BERIL_ROOT
 cd <BERIL_ROOT>
 beril-paper-writer install-skill .
+
+# 4. Bootstrap CRAFT runtime config (provider, model tiers, settings.json + ping)
+beril-paper-writer configure .
 ```
+
+## Runtime configuration (provider + model tiers)
+
+`configure` (step 4 above) wires `claude -p` to a CRAFT-contracted provider and is safe
+to re-run when the environment changes (CRAFT-CONTRACT §3.4):
+
+- **Provider** — `ACTIVE_PROVIDER` ∈ `anthropic | cborg | subscription` in
+  `<BERIL_ROOT>/.env`; inferred from existing keys if unset, so an existing BERIL `.env`
+  works unchanged.
+- **Model tiers** — paper-writer maps its phases onto three tiers and `configure` pins a
+  concrete model per tier into `.claude/settings.json` (no hardcoded ids): `reasoning`
+  (plan, throughline, triage, optimizer, synthesis), `standard` (body drafting), `fast`
+  (classification, extraction, light review). Override a tier via `MODEL_REASONING` /
+  `MODEL_STANDARD` / `MODEL_FAST` in `.env`, or all phases for one run with `--model`.
+- **Additive `.env`** — `configure` only adds the CRAFT block + this skill's marker; it
+  never re-declares a credential the file already holds.
+
+See [CONFIGURE.md](CONFIGURE.md) and [HUB_INSTALL.md](HUB_INSTALL.md) §"Step 3 —
+Configure" for detail.
 
 Two environment overrides if `claude` or `beril-adversarial` isn't on PATH
 where the orchestrator can find them:

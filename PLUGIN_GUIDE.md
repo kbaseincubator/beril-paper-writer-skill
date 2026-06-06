@@ -8,7 +8,7 @@
 > - **Hub operators →** [HUB_INSTALL.md](HUB_INSTALL.md)
 > - **Configuration tuning →** [CONFIGURE.md](CONFIGURE.md)
 > - **Cross-skill participants →** the
->   [PARTICIPANT-RUNBOOK.md](https://github.com/ArkinLaboratory/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md)
+>   [PARTICIPANT-RUNBOOK.md](https://github.com/kbaseincubator/beril-presentation-maker-skill/blob/main/docs/cross-skill/PARTICIPANT-RUNBOOK.md)
 >   (covers all 4 BERIL skills end-to-end)
 >
 > This file is retained as a comprehensive reference but is not part
@@ -147,7 +147,7 @@ For everything else read on.
 ### Install from GitHub (recommended)
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install --force git+https://github.com/kbaseincubator/beril-paper-writer-skill.git
 ```
 
 ### Install from a wheel (offline / pinned)
@@ -159,20 +159,20 @@ pipx install --force /path/to/beril_paper_writer_skill-0.7.1-py3-none-any.whl
 ### SSH alternative
 
 ```bash
-pipx install --force git+ssh://git@github.com/ArkinLaboratory/beril-paper-writer-skill.git
+pipx install --force git+ssh://git@github.com/kbaseincubator/beril-paper-writer-skill.git
 ```
 
 ### Verify
 
 ```bash
-beril-paper-writer --version    # should print "beril-paper-writer-skill 1.0.0"
+beril-paper-writer --version    # should print "beril-paper-writer-skill 1.1.0"
 beril-paper-writer --help       # lists subcommands: draft, install-skill, configure, continue, assemble
 ```
 
 ### Updating
 
 ```bash
-pipx install --force git+https://github.com/ArkinLaboratory/beril-paper-writer-skill.git@v1.0.0
+pipx install --force git+https://github.com/kbaseincubator/beril-paper-writer-skill.git@v1.1.0
 ```
 
 After every update: **re-run `beril-paper-writer install-skill
@@ -260,7 +260,7 @@ The skill has **no runtime configuration files**. See
 ### Unit tests (fast, no LLM cost)
 
 ```bash
-git clone https://github.com/ArkinLaboratory/beril-paper-writer-skill.git
+git clone https://github.com/kbaseincubator/beril-paper-writer-skill.git
 cd beril-paper-writer-skill
 pip install -e ".[dev]"     # or --break-system-packages if PEP 668
 pytest tests/ -v

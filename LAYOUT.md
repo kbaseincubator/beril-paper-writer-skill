@@ -28,7 +28,7 @@
 > section at the end of this doc is the authoritative description of
 > the current runtime state.
 
-This document specifies the shape of `ArkinLaboratory/beril-paper-writer-skill`.
+This document specifies the shape of `kbaseincubator/beril-paper-writer-skill`.
 The skill mirrors `beril-adversarial-skill-draft`'s pipx-installable, ships-
 the-skill-as-package-data pattern. Read [SPEC.md](SPEC.md) first for *what*
 the skill does and *why*; this document is *how* it's packaged.
@@ -36,7 +36,7 @@ the skill does and *why*; this document is *how* it's packaged.
 ## Repository tree (planned)
 
 ```
-ArkinLaboratory/beril-paper-writer-skill/
+kbaseincubator/beril-paper-writer-skill/
 ├── pyproject.toml           hatchling build, zero runtime deps
 ├── README.md, LICENSE, .gitignore, .gitattributes
 ├── SPEC.md, LAYOUT.md, DECISIONS.md
@@ -793,7 +793,7 @@ checkpoint + user prompt to continue. Cost summary in
 
 ## Deliverables this document blocks
 
-1. Repo init: `gh repo create ArkinLaboratory/beril-paper-writer-skill --private --clone`
+1. Repo init: `gh repo create kbaseincubator/beril-paper-writer-skill --private --clone`
 2. Initial commit + tag `v0.1.0-spec` (spec only, no code)
 3. After spec sign-off: implementation begins per LAYOUT
 4. After live-test signoff: tag `v0.1.0` (full release)
@@ -886,13 +886,16 @@ because the optimizer's `citation_reality` dispatch inserts
 `[NEEDS CITATION:]` markers; supplementary_pool resolves them via
 WebSearch.
 
-### Model defaults (post-Stage-3)
+### Model tiers (post-Stage-3; CRAFT §3.4 tier-mapped)
 
-| Knob | Default | Drives |
+Model ids are no longer hardcoded — each knob resolves to the tier model `configure`
+pins in `<BERIL_ROOT>/.claude/settings.json`.
+
+| Knob | Tier (configure pin) | Drives |
 |---|---|---|
-| `self.model` | `claude-opus-4-6` | plan, triage, optimizer, compliance_fix, supplementary_pool |
-| `self.model_writing` | `claude-opus-4-6` | holistic draft |
-| `config.haiku_model` | `claude-3-haiku-20240307` | Tier-2 light review |
+| `self.model` | `reasoning` | plan, triage, optimizer, compliance_fix, supplementary_pool |
+| `self.model_writing` | `standard` | holistic draft |
+| `config.haiku_model` | `fast` (`pick_tier("fast")`) | Tier-2 light review |
 
 Stage 3 flipped `self.model` from Sonnet 4.5 to Opus 4.6.
 
