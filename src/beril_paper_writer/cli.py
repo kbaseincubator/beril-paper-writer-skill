@@ -35,6 +35,7 @@ from beril_paper_writer.commands import (
     continue_run,
     draft,
     install_skill,
+    template_env,
 )
 
 
@@ -56,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_skill.add_parser(subparsers)
     configure.add_parser(subparsers)
+    template_env.add_parser(subparsers)
     draft.add_parser(subparsers)
     continue_run.add_parser(subparsers)
     assemble.add_parser(subparsers)

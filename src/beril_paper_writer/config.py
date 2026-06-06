@@ -9,11 +9,25 @@ forward-deployed alongside this module has been deleted (audit
 2026-05-17, item 2). Once the dust settles on the architecture this
 module could shrink to just the `haiku_model` env lookup; deferred
 for now.
+
+CRAFT-CONTRACT §3.4 / Round 2b fixup (2026-06-06): `haiku_model`
+defaults to the CRAFT `pick_tier("fast")` ALIAS (`"haiku"`), NOT a
+concrete model id. The previous default `"claude-3-haiku-20240307"`
+is a Claude-3 model id that CBORG does NOT serve by that name —
+phase_review's Tier-2 silently 404'd under CBORG. The `HAIKU_MODEL`
+env var is honored when explicitly set (back-compat hatch for users
+who want to pin a specific Haiku revision); absent → the alias
+resolves to whatever Claude Code's
+ANTHROPIC_DEFAULT_HAIKU_MODEL points to (written by
+`beril-paper-writer configure` into .claude/settings.json), which is
+the CBORG-served claude-haiku-4-5 line.
 """
 
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+
+from beril_paper_writer import llm_config
 
 def load_environment():
     """Discover and load the appropriate .env file."""
@@ -24,7 +38,7 @@ def load_environment():
         Path.cwd(),
         Path.cwd().parent / "beril-extended"
     ]
-    
+
     for path in search_paths:
         if not path.name:
             continue
@@ -36,11 +50,18 @@ def load_environment():
 class Config:
     def __init__(self):
         load_environment()
-        
+
         self.cborg_api_key = os.environ.get("CBORG_API_KEY")
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         self.openai_api_key = os.environ.get("OPENAI_API_KEY")
-        self.haiku_model = os.environ.get("HAIKU_MODEL", "claude-3-haiku-20240307")
+        # CRAFT-CONTRACT §3.4 / Round 2b fixup: default is the CRAFT
+        # fast-tier ALIAS (resolved via settings.json's
+        # ANTHROPIC_DEFAULT_HAIKU_MODEL). HAIKU_MODEL env wins only
+        # when explicitly set — a stripped/whitespace-only value
+        # counts as unset so a stray `HAIKU_MODEL=` line in .env
+        # does NOT shadow the alias.
+        haiku_env = (os.environ.get("HAIKU_MODEL") or "").strip()
+        self.haiku_model = haiku_env or llm_config.pick_tier("fast")
         
     @property
     def default_stateless_provider(self) -> str:

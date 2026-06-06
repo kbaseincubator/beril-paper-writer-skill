@@ -271,6 +271,7 @@ class PaperWriterOrchestrator:
         system_prompt_text: str,
         user_prompt: str,
         model: str | None = None,
+        tier: str | None = None,
         allowed_tools: str | None = None,
     ) -> tuple[int, str, str, float]:
         """Stage 1 Tier D — single helper for claude -p invocations.
@@ -280,6 +281,19 @@ class PaperWriterOrchestrator:
         ``state.cost_so_far_usd``; persists state.json. Returns
         (returncode, stdout, stderr, cost_usd) so callers can do
         their own post-checks.
+
+        CRAFT-CONTRACT §3.4 / Round 2b: ``tier`` is the per-stage
+        CRAFT tier (``"reasoning"`` | ``"standard"`` | ``"fast"``);
+        ``llm_config.pick_tier(tier)`` resolves it to a Claude Code
+        ``--model`` alias (opus/sonnet/haiku), which Claude Code then
+        resolves to a concrete model id via
+        ``ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`` in
+        ``<BERIL_ROOT>/.claude/settings.json`` (written by
+        ``configure``). A caller-explicit ``model`` still wins per the
+        contract; emits a ``(tier=<tier>, model=<resolved>)`` log line
+        so the routing is observable. Passing neither falls back to
+        Claude Code's session default — kept for back-compat with
+        any path not yet migrated.
 
         Stage 2 Tier G (2026-05-11): user_prompt is passed via STDIN,
         not as a positional argv argument. The previous version passed
@@ -291,14 +305,27 @@ class PaperWriterOrchestrator:
         whatever argv-parsing quirk was eating the prompt.
         """
         import json
+
+        from beril_paper_writer import llm_config
+
+        # Resolve tier → alias when caller declared a tier and didn't
+        # pin model explicitly. Caller-explicit model always wins.
+        resolved_model = model
+        if not resolved_model and tier:
+            resolved_model = llm_config.pick_tier(tier)
+        if tier:
+            logger.info(
+                f"{phase_label}: tier={tier}, model={resolved_model}"
+            )
+
         cmd = [
             self.claude_bin, "-p",
             "--system-prompt", system_prompt_text,
             "--output-format", "json",
             "--dangerously-skip-permissions",
         ]
-        if model:
-            cmd.extend(["--model", model])
+        if resolved_model:
+            cmd.extend(["--model", resolved_model])
         if allowed_tools:
             cmd.extend(["--allowedTools", allowed_tools])
         # user_prompt goes via stdin (see Tier G docstring above).
@@ -366,16 +393,23 @@ class PaperWriterOrchestrator:
         self,
         draft_dir: Path,
         max_cost_usd: Optional[float] = None,
-        # Stage 3 (2026-05-12): `model` defaults to Opus, not Sonnet.
-        # `model` drives the reasoning-heavy phases — plan (throughline
-        # generation), triage (claim extraction + discrepancy audit),
-        # the optimizer — which are the most load-bearing decisions in
-        # the pipeline and where draft_9's source_notebook regression
-        # occurred. The holistic draft was already Opus; the scaffolding
-        # phases should not silently fall to Sonnet. The Tier-2 light
-        # review stays on Haiku (config.haiku_model) by design.
-        model: str = "claude-opus-4-6",
-        model_writing: str = "claude-opus-4-6",
+        # CRAFT-CONTRACT §3.4 / Round 2b: `model` and `model_writing`
+        # are CALLER-EXPLICIT overrides only (--model). When None the
+        # per-stage tier alias drives selection: reasoning-heavy phases
+        # (plan/throughline, citation/synthesis, optimize, remediate)
+        # → tier="reasoning" → alias "opus"; body drafting → tier=
+        # "standard" → alias "sonnet"; claim/discrepancy classification
+        # → tier="fast" → alias "haiku". Aliases resolve through
+        # Claude Code's native --model resolution via
+        # ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL in
+        # <BERIL_ROOT>/.claude/settings.json (written by `configure`).
+        # No concrete model id is hardcoded; a model swap is a
+        # settings.json re-pin. Tier-2 light review (phase_review) also
+        # routes through the tier system (pick_tier("fast")) per the
+        # 2026-06-06 fixup; the legacy HAIKU_MODEL env knob is honored
+        # only when explicitly set (back-compat hatch).
+        model: str | None = None,
+        model_writing: str | None = None,
         no_adversarial: bool = False,
         # Stage 4 Tier S (2026-05-18): P0 gate flags. Default behaviour
         # is "gate active, no remediation, no override" — so a fresh
@@ -656,6 +690,7 @@ Write the resulting TSV strictly to OUTPUT_PATH using the Write tool.
             # undercount). Pinning model=self.model fixes both.
             rc, stdout, stderr, _cost = await self._run_claude_p_with_cost(
                 phase_label="phase_triage.extract_claims",
+                tier="fast",
                 system_prompt_text=claims_prompt_path.read_text(encoding="utf-8"),
                 user_prompt=user_prompt,
                 model=self.model,
@@ -720,6 +755,7 @@ Write the resulting markdown strictly to OUTPUT_PATH using the Write tool.
             # claim-extraction call above (pin model, capture cost).
             rc, stdout, stderr, _cost = await self._run_claude_p_with_cost(
                 phase_label="phase_triage.audit_discrepancies",
+                tier="fast",
                 system_prompt_text=disc_prompt_path.read_text(encoding="utf-8"),
                 user_prompt=user_prompt,
                 model=self.model,
@@ -822,6 +858,7 @@ Also make sure to create the .handoff.json file!
         # Stage 1 Tier D: cost-tracking helper.
         rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
             phase_label="phase_plan",
+            tier="reasoning",
             system_prompt_text=prompt_path.read_text(encoding='utf-8'),
             user_prompt=user_prompt,
             model=self.model,
@@ -983,6 +1020,7 @@ Write the pool JSON to CITATION_POOL_PATH using the Write tool.
         # and Write (for the JSON output).
         rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
             phase_label="phase_citation_pool",
+            tier="reasoning",
             system_prompt_text=prompt_path.read_text(encoding='utf-8'),
             user_prompt=user_prompt,
             model=self.model,
@@ -1233,7 +1271,8 @@ Please draft the entire manuscript.
         # Stage 1 Tier D: use cost-tracking helper. Holistic draft is
         # the single largest LLM call ($4-8 expected per SPEC §6.7).
         rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
-            phase_label="phase_drafting (Opus)",
+            phase_label="phase_drafting",
+            tier="standard",
             system_prompt_text=prompt_path.read_text(encoding='utf-8'),
             user_prompt=user_prompt,
             model=self.model_writing,
@@ -1287,9 +1326,16 @@ Please generate the discrepancy audit JSON.
 
 Use the Write tool to write your JSON directly to AUDIT_OUTPUT_PATH.
 """
+        # CRAFT-CONTRACT §3.4 / Round 2b: discrepancy classification
+        # is a fast/haiku stage. Caller-explicit --model still wins.
+        from beril_paper_writer import llm_config
+        audit_model = self.model or llm_config.pick_tier("fast")
+        logger.info(
+            f"_audit_discrepancies_interactive: tier=fast, model={audit_model}"
+        )
         cmd = [
             self.claude_bin, "-p",
-            "--model", self.model,
+            "--model", audit_model,
             "--system-prompt", prompt_path.read_text(encoding='utf-8'),
             "--dangerously-skip-permissions",
             user_prompt
@@ -1351,6 +1397,7 @@ with the citation key in the manuscript.
                     # --allowedTools, mirroring the citation_pool bug).
                     rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
                         phase_label="phase_supplementary_pool",
+                        tier="reasoning",
                         system_prompt_text=prompt_path.read_text(encoding='utf-8'),
                         user_prompt=user_prompt,
                         model=self.model,
@@ -1719,19 +1766,47 @@ with the citation key in the manuscript.
         else:
             logger.info(summary)
 
+    def _resolve_tier2_model(self) -> str:
+        """Resolve the model id for the Tier-2 narrative-light review.
+
+        CRAFT-CONTRACT §3.4 / Round 2b fixup precedence:
+          1. caller-explicit --model (self.model) — highest priority
+          2. HAIKU_MODEL env var (config.haiku_model — back-compat
+             hatch ONLY when explicitly set)
+          3. llm_config.pick_tier("fast") → "haiku" alias → CBORG-served
+             claude-haiku-4-5 via ANTHROPIC_DEFAULT_HAIKU_MODEL
+
+        The previous bug: config.haiku_model defaulted to
+        "claude-3-haiku-20240307" — a Claude-3 model id that CBORG does
+        NOT serve by that name → phase_review's Tier-2 silently 404'd.
+        With the fixup in config.py, config.haiku_model is now itself
+        the "haiku" alias unless HAIKU_MODEL is set; this site checks
+        self.model first so --model wins.
+
+        Extracted as a method (rather than inlined in phase_review) so
+        the precedence is unit-testable without spinning up the full
+        async review cascade. See tests/unit/test_phase_review_tier2_routing.py.
+        """
+        from beril_paper_writer import llm_config
+        return self.model or config.haiku_model or llm_config.pick_tier("fast")
+
     async def phase_review(self):
         logger.info("Running tiered review cascade (M3)...")
         # Tier 1: Deterministic
         self._run_tier1_deterministic_checks()
 
-        # Tier 2: Haiku Light
-        logger.info(f"Tier 2: Haiku Light review using {config.haiku_model}")
+        # Tier 2: Haiku Light — route through the CRAFT tier system.
+        # See _resolve_tier2_model for precedence + rationale.
+        tier2_model = self._resolve_tier2_model()
+        logger.info(
+            f"phase_review.tier2: tier=fast, model={tier2_model}"
+        )
         prompt_path = Path(__file__).parent / "skill" / "prompts" / "haiku_review.v1.md"
         if prompt_path.exists():
             user_prompt = f"Review ASSEMBLED_PATH: {self.draft_dir / 'manuscript.md'}"
             cmd = [
                 self.claude_bin, "-p",
-                "--model", config.haiku_model,
+                "--model", tier2_model,
                 "--system-prompt", prompt_path.read_text(encoding='utf-8'),
                 "--dangerously-skip-permissions",
                 user_prompt
@@ -1985,6 +2060,7 @@ with the citation key in the manuscript.
 
         rc, stdout, stderr, _cost = await self._run_claude_p_with_cost(
             phase_label="phase_review.fallback",
+            tier="reasoning",
             system_prompt_text=prompt_path.read_text(encoding="utf-8"),
             user_prompt=user_prompt,
             model=self.model,
@@ -2516,6 +2592,7 @@ with the citation key in the manuscript.
         try:
             rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
                 phase_label=f"phase_remediate.iter_{cycle_n}",
+                tier="reasoning",
                 system_prompt_text=prompt_path.read_text(encoding="utf-8"),
                 user_prompt=user_prompt,
                 model=self.model_writing,
@@ -2695,6 +2772,7 @@ system prompt's "Inviolable forbidden actions" section.
             # Stage 1 Tier D: cost-tracking helper.
             rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
                 phase_label="phase_optimize",
+                tier="reasoning",
                 system_prompt_text=prompt_path.read_text(encoding='utf-8'),
                 user_prompt=user_prompt,
                 model=self.model,
@@ -2802,8 +2880,18 @@ Fix these compliance errors.
 - ASSEMBLED_PATH: {assembled_path}
 - COMPLIANCE_ERRORS_PATH: {errors_path}
 """
+                # CRAFT-CONTRACT §3.4 / Round 2b: compliance autofix is a
+                # review-incorporation pass → reasoning tier (opus).
+                # Caller-explicit --model still wins. Previously had no
+                # --model flag; Claude Code resolved to a session default.
+                from beril_paper_writer import llm_config
+                compliance_model = self.model or llm_config.pick_tier("reasoning")
+                logger.info(
+                    f"compliance_autofix: tier=reasoning, model={compliance_model}"
+                )
                 cmd = [
                     self.claude_bin, "-p",
+                    "--model", compliance_model,
                     "--system-prompt", prompt_path.read_text(encoding='utf-8'),
                     "--dangerously-skip-permissions",
                     user_prompt

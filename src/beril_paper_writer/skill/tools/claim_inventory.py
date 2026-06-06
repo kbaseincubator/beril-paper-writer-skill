@@ -1013,9 +1013,18 @@ _PROMPT_PATH = _SKILL_DIR / "prompts" / "claim_demarcate.v1.md"
 _DEMARCATOR_COST_CEILING_USD = 0.10
 
 
-# LLM model alias (Haiku 4.5 per SPEC §4.6 cost target). Public for
-# CLI override and test monkeypatch.
-DEFAULT_DEMARCATOR_MODEL = "claude-haiku-4-5-20251001"
+# CRAFT-CONTRACT §3.4 / Round 2b: classification → fast tier. The literal
+# string here is the Claude Code `--model` ALIAS (not a concrete model id);
+# Claude Code resolves it via ANTHROPIC_DEFAULT_HAIKU_MODEL in
+# <BERIL_ROOT>/.claude/settings.json (written by `beril-paper-writer
+# configure`). Kept as a literal — rather than `llm_config.pick_tier("fast")`
+# — so the script can be invoked standalone (`python discrepancy_register.py
+# --help`) without the parent package on sys.path. Canonical source of
+# truth: `beril_paper_writer.llm_config.TIER_FAMILY["fast"]`; if the family
+# alias ever changes, update both call-sites. Public for CLI override and
+# test monkeypatch. SPEC §4.6's cost target (~Haiku 4.5) is enforced by the
+# tier alias rather than a hardcoded model id.
+DEFAULT_DEMARCATOR_MODEL = "haiku"
 
 
 # B1.f (D-038, 2026-05-07) — batch unresolved candidates so a single
