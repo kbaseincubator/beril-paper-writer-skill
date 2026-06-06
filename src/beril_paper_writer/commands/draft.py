@@ -180,11 +180,17 @@ def run(args: argparse.Namespace) -> int:
         # Default False; when set, phase_review skips the canonical
         # beril-adversarial reviewer and uses the inline fallback
         # explicitly (no warning — user has chosen).
+        # CRAFT-CONTRACT §3.4 / Round 2b: `model` / `model_writing` are
+        # caller-explicit overrides only. When unset (None), the
+        # orchestrator routes each phase through its declared tier
+        # (reasoning/standard/fast → opus/sonnet/haiku alias resolved
+        # via .claude/settings.json written by `configure`). No
+        # hardcoded literal default.
         orch = PaperWriterOrchestrator(
             draft_dir,
             max_cost_usd=getattr(args, "max_cost_usd", None),
-            model=getattr(args, "model", None) or "claude-opus-4-6",
-            model_writing=getattr(args, "model_writing", None) or "claude-opus-4-6",
+            model=getattr(args, "model", None),
+            model_writing=getattr(args, "model_writing", None),
             no_adversarial=getattr(args, "no_adversarial", False),
             # Stage 4 Tier S: --ship-with-p0s is the only gate-related
             # flag exposed on `draft`. --remediate has no meaning on a

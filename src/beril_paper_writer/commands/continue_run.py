@@ -422,7 +422,14 @@ def run(args: argparse.Namespace) -> int:
     print(f"  project:   {st.project_id or '(unset)'}", file=sys.stderr)
     print("", file=sys.stderr)
 
-    model = args.model or "claude-sonnet-4-5-20250929"
+    # CRAFT-CONTRACT §3.4 / Round 2b: caller-explicit --model wins;
+    # otherwise revise_throughline (the only LLM call here) runs at
+    # the reasoning tier (throughline refinement is high-leverage).
+    # The "reasoning" alias resolves through
+    # ANTHROPIC_DEFAULT_OPUS_MODEL in <BERIL_ROOT>/.claude/settings.json
+    # (written by `beril-paper-writer configure`).
+    from beril_paper_writer import llm_config
+    model = args.model or llm_config.pick_tier("reasoning")
 
     # Phase-specific dispatch.
     if st.phase == "throughline_pick":

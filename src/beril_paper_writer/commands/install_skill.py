@@ -87,8 +87,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
         "--no-smoke-test",
         action="store_true",
         help=(
-            "Skip the post-install configure smoke test. Default is to "
-            "run it advisory (non-fatal) so the user sees a config status."
+            "Skip the post-install light check (claude on PATH + next-step "
+            "hint). Default: run it advisory (non-fatal)."
         ),
     )
     p.set_defaults(func=run)
@@ -152,19 +152,30 @@ def run(args: argparse.Namespace) -> int:
     if args.no_smoke_test:
         return 0
 
-    # Advisory smoke test — non-fatal
+    # Light post-install check — advisory, NEVER invokes configure.
+    # CRAFT-CONTRACT §3.4 req 3.5 (install-skill does NOT run configure).
+    # configure has real side effects (extends .env, writes
+    # .claude/settings.json + settings.local.json, runs a live `claude -p`
+    # ping) and must not run silently as a sub-step of install-skill.
+    # The canary's Hub-crash that motivated this decoupling was
+    # install-skill calling configure.run() and that path AttributeError'ing
+    # on a Namespace built without the --no-discover / --no-ping / --yes
+    # flags. Match the canary's shape (beril-adversarial install-skill).
     print("")
-    print("Running configure smoke test (advisory)...")
-    from beril_paper_writer.commands import configure
-    smoke_args = argparse.Namespace(
-        beril_root=str(beril_root),
+    claude_path = shutil.which("claude")
+    if claude_path is None:
+        print(
+            "  [WARN] claude CLI not found on PATH. Install Claude Code "
+            "(https://docs.claude.com) before running configure.",
+            file=sys.stderr,
+        )
+    else:
+        print(f"  [OK] claude — {claude_path}")
+    print("")
+    print(
+        f"Next: run `beril-paper-writer configure --beril-root {beril_root}` "
+        "to bootstrap CRAFT runtime config."
     )
-    smoke_rc = configure.run(smoke_args)
-    if smoke_rc != 0:
-        print("")
-        print("Configuration verification reported issues (above).")
-        print("The skill directory is in place; this is advisory.")
-        print("Run `beril-paper-writer configure` to re-check.")
     return 0
 
 
