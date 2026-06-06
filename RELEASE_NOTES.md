@@ -1,11 +1,77 @@
 # beril-paper-writer-skill — release notes
 
-**Current:** v1.0.2 (2026-06-03).
+**Current:** v1.1.0 (2026-06-06).
 
 This file is the **cumulative current-version log** — where the skill
 is, what shipped, and pointers to per-version detail. Per-version
 release notes for the v0.x line live in
 [`release-notes/`](release-notes/).
+
+## v1.1.0 — CRAFT runtime-config standardization (2026-06-06)
+
+**Coordinated CRAFT release.** Ships the CRAFT runtime-config arc
+(CRAFT-CONTRACT.md §3.4 v2). No `tests/integration` schema change, no
+manuscript-rendering behavior change.
+
+**What's new (operational, not schema-level):**
+
+- **Provider abstraction.** `ACTIVE_PROVIDER ∈ {anthropic, cborg,
+  subscription}` selects the reasoning backend for both `claude -p` and
+  app-internal calls. If unset, it is **inferred** for backward
+  compatibility (`CBORG_API_KEY` → `cborg`; `ANTHROPIC_API_KEY` →
+  `anthropic`; neither → `subscription`).
+- **Three model tiers.** `MODEL_REASONING` / `MODEL_STANDARD` /
+  `MODEL_FAST` replace per-phase model env vars. paper-writer's
+  orchestrator routes each phase through Claude Code's native
+  `--model` aliases (opus / sonnet / haiku) resolved against
+  `<BERIL_ROOT>/.claude/settings.json` written by `configure`.
+  Per-phase mapping (D-055): throughline / synthesis /
+  review-incorporation → **reasoning**; body drafting → **standard**;
+  claim classification → **fast**. A caller's explicit `--model`
+  still wins.
+- **`configure` is now CRAFT-bootstrap.** `beril-paper-writer
+  configure` is the runtime-config bootstrap: read `.env`, discover
+  the provider's model list (`/v1/models`), pin tier models
+  (interactive picker for unresolved tiers on a TTY; fail-loud
+  non-interactive), write `<BERIL_ROOT>/.claude/settings.json` (+
+  gitignored `settings.local.json`), run a response-asserting
+  validation ping against the reasoning tier with auto-fallback if
+  the pin fails. The pre-1.1 environment-audit incarnation is gone;
+  the genuinely-required preflight runs automatically inside the new
+  flow.
+- **Additive-only `.env`.** The shared CRAFT block + per-skill marker
+  are appended idempotently; existing keys (credentials, tier pins)
+  are **never re-declared** — re-declaration would shadow values
+  BERIL and other processes already set. `parse_env_text` strips
+  inline `#` comments from unquoted values.
+- **`app_internal_base_url()` canonical helper** (Stage 6) —
+  symmetric `/v1`-keeping sibling of `bare_host`. Verbatim in the
+  canonical `llm_config.py` copy across all CRAFT skills for
+  cross-skill conformance parity (CI-enforced via the craft-platform
+  conformance fixture).
+- **Tier-2 review routing fix (Stage 6 fixup).** `phase_review`'s
+  narrative-light review tier now resolves the model via the CRAFT
+  tier system rather than the legacy `HAIKU_MODEL` env knob. The
+  legacy knob is honored when explicitly set (back-compat hatch);
+  unset, the resolution flows through the canonical helper and stops
+  silently 404'ing under CBORG.
+
+**Backward compatibility.** Explicitly preserved: an old-style `.env`
+that only sets `CBORG_API_KEY` (no `ACTIVE_PROVIDER`, no `MODEL_*`)
+upgrades cleanly — `infer_provider` returns `cborg`,
+`compose_env_append` does NOT re-declare `CBORG_API_KEY`, discovery
+pins the tier models. Pinned by `test_old_style_env_upgrades_cleanly`
+in `tests/test_llm_config.py`. v1.0.x callers passing explicit
+`--model claude-opus-4-X` still bypass tier resolution as before.
+
+**Decision record.** `DECISIONS.md` D-055 captures the conformance
+choice; full rationale in `CRAFT-CONTRACT.md §3.4`.
+
+**References.** `CRAFT-CONTRACT.md §3.4`;
+`handoffs/CRAFT-config-round2-CC-brief.md` for the paper-writer
+specifics (`HAIKU_MODEL` route fix, the configure-shape and tier-vars
+choices); `handoffs/CRAFT-config-stage6-CC-brief.md` for
+`app_internal_base_url`.
 
 ## v1.0.2 — docs: terminology + URL migration (2026-06-03)
 

@@ -191,6 +191,43 @@ def test_resolve_cborg_missing_key_raises():
         lc.resolve({"ACTIVE_PROVIDER": "cborg"}, CBORG_AVAILABLE)
 
 
+# --- backward-compat: old-style .env upgrades cleanly -----------------------
+# Stage 7 / v1.1.0: the contract guarantees an old deployment .env (only
+# CBORG_API_KEY, no ACTIVE_PROVIDER, no MODEL_*) upgrades to v1.1.0 without
+# breaking. Both halves of that property are already pinned by
+# `test_infer_cborg_from_key` (inference) and
+# tests/unit/test_configure.py::test_compose_env_append_omits_keys_already_in_env
+# (additive-only). This test wires them together on the SAME .env text — the
+# realistic deployment scenario — so an "upgrade doesn't break an existing
+# deployment" regression hits one named test, not a forensic stitch.
+
+
+def test_old_style_env_upgrades_cleanly():
+    """An old deployment .env has only CBORG_API_KEY (no ACTIVE_PROVIDER,
+    no MODEL_*). After v1.1.0 / CRAFT §3.4:
+      1. provider inference returns 'cborg' (the user gets the expected backend),
+      2. compose_env_append's output does NOT redeclare CBORG_API_KEY (so the
+         BERIL-set credential is preserved by python-dotenv's last-write-wins).
+    Together: a hub running v1.0.x can re-pipx-install v1.1.0 and re-run
+    `beril-paper-writer configure` without touching .env first.
+    """
+    from beril_paper_writer.commands import configure
+
+    old_style_env = "CBORG_API_KEY=cb-actually-set-by-beril\n"
+
+    # Half 1: provider inference.
+    env_map = configure.parse_env_text(old_style_env)
+    assert lc.infer_provider(env_map) == "cborg"
+
+    # Half 2: additive-only compose.
+    appended = configure.compose_env_append(old_style_env)
+    appended_keys = configure.parse_env_text(appended).keys()
+    assert "CBORG_API_KEY" not in appended_keys, (
+        "v1.1.0 regression: compose_env_append redeclared CBORG_API_KEY on an "
+        "old-style .env — would shadow the BERIL-set credential."
+    )
+
+
 if __name__ == "__main__":
     import sys
 

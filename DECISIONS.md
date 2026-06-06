@@ -1965,3 +1965,54 @@ Related: D-051 (adversarial CLI resolution + loud-warn fallback);
 D-005 (loose coupling); CONTRACT.md exit-code table;
 `feedback_no_benchmark_gaming` (silent-wrong-answer doctrine);
 `feedback_cross_skill_contract_drift` (why CONTRACT.md exists).
+
+---
+
+## D-055 — 2026-06-06 — CRAFT runtime-config standardization (§3.4)
+
+**Decision (v1.1.0).** paper-writer conforms to CRAFT-CONTRACT.md §3.4
+(runtime configuration contract v2). Specifically:
+
+- `configure` is the CRAFT runtime-config bootstrapper (provider
+  inference + tier-model discovery + `settings.{json,local.json}` +
+  response-asserting validation ping with tier fallback). The legacy
+  environment-audit incarnation of `configure` is retired; the only
+  genuinely-required preflight is folded into the new flow.
+- Per-phase tier mapping (Stage 6 → Stage 7): throughline / synthesis
+  / review-incorporation → **reasoning**; body drafting →
+  **standard**; claim classification → **fast**. Implementation routes
+  through Claude Code's native `--model` aliases (opus / sonnet /
+  haiku) resolved against `<BERIL_ROOT>/.claude/settings.json`. A
+  caller-explicit `--model` still wins per §3.4.
+- The Tier-2 narrative-light review resolves the model via the canonical
+  helper, not the legacy `HAIKU_MODEL` env knob (back-compat hatch
+  preserved when explicitly set).
+
+**Rationale.** Each CRAFT skill (adversarial, paper-writer,
+presentation-maker) was independently reading `.env` and constructing
+provider/model wiring. That worked when one skill was the only
+consumer, but coexisting on a shared BERIL `.env` required additive-
+only conventions + a single resolver shape — otherwise skills shadow
+each other's keys via python-dotenv's last-write-wins. §3.4 codifies
+the convention and the canonical resolver shape; this skill is a
+**copy-not-share** consumer of that resolver (CI conformance fixture
+in craft-platform enforces the no-drift property).
+
+**Alternatives considered.** (a) Keep paper-writer's bespoke env
+parsing — rejected; that's exactly what §3.4 prevents on a shared
+deployment. (b) Make the resolver a shared library — rejected per
+§3.4: the conformance fixture replaces a shared library and avoids
+inter-skill version dependency.
+
+**Backward compatibility.** Old-style `.env` (only `CBORG_API_KEY`,
+no `ACTIVE_PROVIDER` / `MODEL_*`) is explicitly supported: provider
+inference returns `cborg`; `compose_env_append` does not redeclare
+the existing key; tier models come from discovery. Pinned by
+`test_old_style_env_upgrades_cleanly` in `tests/test_llm_config.py`.
+
+**Related:** CRAFT-CONTRACT.md §3.4;
+`handoffs/CRAFT-config-round2-CC-brief.md` (sub-round 2b
+paper-writer brief);
+`handoffs/CRAFT-config-stage6-CC-brief.md`
+(`app_internal_base_url` + conformance fixture);
+`handoffs/CRAFT-config-stage7-CC-brief.md` (release brief).
