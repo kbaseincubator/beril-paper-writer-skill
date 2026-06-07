@@ -192,6 +192,16 @@ def run(args: argparse.Namespace) -> int:
             model=getattr(args, "model", None),
             model_writing=getattr(args, "model_writing", None),
             no_adversarial=getattr(args, "no_adversarial", False),
+            # Cycle 2 / DP9b-analogue (v1.2.0, 2026-06-07): forward
+            # --mode + --depth into the orchestrator. Pre-v1.2.0 these
+            # were parsed by draft.py but silently dropped — the
+            # orchestrator constructor had no parameter for them, so
+            # the CLI choice never reached state.mode or the LLM tier
+            # selector. Now they thread through to state.mode +
+            # audit/user_intent.json, where the deliverable validator
+            # (G4) reads them as the truth anchor.
+            mode=getattr(args, "mode", None),
+            depth=getattr(args, "depth", None),
             # Stage 4 Tier S: --ship-with-p0s is the only gate-related
             # flag exposed on `draft`. --remediate has no meaning on a
             # fresh run (there are no P0s to remediate yet), and

@@ -88,6 +88,36 @@ def add_parser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParse
         default=None,
         help="Override default model. Forwarded to the orchestrator and the revise step.",
     )
+    # Cycle 2 / DP9b-analogue (v1.2.0, 2026-06-07): forward --mode +
+    # --depth on resume. Pre-v1.2.0 these were never on the continue
+    # CLI, so the only way to set them was via `draft` (which also
+    # silently dropped them) — there was no path for the user's
+    # intent to reach state.json. Now: explicit values flow through
+    # to PaperWriterOrchestrator(..., mode=..., depth=...) which
+    # persists to state.mode + audit/user_intent.json (with
+    # explicit-merge: process-1's explicit picks win over later
+    # implicit defaults; see user_intent.write_user_intent).
+    p.add_argument(
+        "--mode",
+        default=None,
+        choices=["paper", "report"],
+        help=(
+            "Override mode on resume. Forwarded to the orchestrator. "
+            "If the persisted state.mode already differs from this, "
+            "the orchestrator keeps the persisted value and the "
+            "deliverable validator (G4) surfaces the mismatch."
+        ),
+    )
+    p.add_argument(
+        "--depth",
+        default=None,
+        choices=["quick", "standard", "deep"],
+        help=(
+            "Override depth tier on resume. Forwarded to the orchestrator. "
+            "Echoed in audit/user_intent.json only; an intent-vs-output "
+            "check is deferred to a later cycle."
+        ),
+    )
     p.add_argument(
         "--no-stream",
         action="store_true",
@@ -379,6 +409,9 @@ def _resume_via_orchestrator(
     remediate: bool = False,
     ship_with_p0s: bool = False,
     max_remediate_cycles: int = 2,
+    # Cycle 2 / DP9b-analogue (v1.2.0): mode/depth on resume.
+    mode: str | None = None,
+    depth: str | None = None,
 ) -> int:
     import asyncio
     from beril_paper_writer.orchestrator import PaperWriterOrchestrator
@@ -396,6 +429,13 @@ def _resume_via_orchestrator(
         remediate=remediate,
         ship_with_p0s=ship_with_p0s,
         max_remediate_cycles=max_remediate_cycles,
+        # Cycle 2 / DP9b-analogue: forward --mode + --depth on resume.
+        # mode and depth are read off the same args namespace continue's
+        # CLI defines (added in v1.2.0). None = "no explicit intent on
+        # this re-entry" — user_intent's idempotent merge preserves
+        # the explicit value from process-1 in that case.
+        mode=mode,
+        depth=depth,
     )
     try:
         asyncio.run(orch.run_pipeline())
@@ -508,6 +548,10 @@ def run(args: argparse.Namespace) -> int:
             max_remediate_cycles=getattr(
                 args, "max_remediate_cycles", 2,
             ),
+            # Cycle 2 / DP9b-analogue: forward --mode + --depth so
+            # the orchestrator's _persist_user_intent captures them.
+            mode=getattr(args, "mode", None),
+            depth=getattr(args, "depth", None),
         )
 
     elif st.phase in (
@@ -531,6 +575,10 @@ def run(args: argparse.Namespace) -> int:
             max_remediate_cycles=getattr(
                 args, "max_remediate_cycles", 2,
             ),
+            # Cycle 2 / DP9b-analogue: forward --mode + --depth so
+            # the orchestrator's _persist_user_intent captures them.
+            mode=getattr(args, "mode", None),
+            depth=getattr(args, "depth", None),
         )
 
     elif st.phase == "assembled":

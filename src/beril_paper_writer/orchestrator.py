@@ -411,6 +411,16 @@ class PaperWriterOrchestrator:
         model: str | None = None,
         model_writing: str | None = None,
         no_adversarial: bool = False,
+        # Cycle 2 / DP9b-analogue (v1.2.0, 2026-06-07): mode + depth
+        # are operator intent the v1.1.0 CLI accepted but silently
+        # dropped — they were parsed in draft.py but never threaded
+        # into the orchestrator. Now: caller-explicit overrides; when
+        # set we persist them onto state.mode and audit/user_intent.json
+        # so the deliverable validator (G4) can check the manuscript
+        # against what the user actually picked. None means "use the
+        # state.json default (paper) and don't claim user intent."
+        mode: str | None = None,
+        depth: str | None = None,
         # Stage 4 Tier S (2026-05-18): P0 gate flags. Default behaviour
         # is "gate active, no remediation, no override" — so a fresh
         # `draft` run that surfaces P0s will pause at p0_review with
@@ -424,6 +434,11 @@ class PaperWriterOrchestrator:
         self.max_cost_usd = max_cost_usd
         self.model = model
         self.model_writing = model_writing
+        # Cycle 2 / DP9b-analogue: stash caller-explicit mode/depth
+        # so _initialize_state can persist them to state.mode +
+        # user_intent.json. None = "no explicit intent."
+        self._explicit_mode = mode
+        self._explicit_depth = depth
         # Stage 4 Tier S: gate flags. ``remediate`` is consumed by
         # ``phase_p0_review`` to decide whether to dispatch into
         # ``phase_remediate``; ``ship_with_p0s`` short-circuits the
@@ -481,13 +496,165 @@ class PaperWriterOrchestrator:
         self.state: DraftState = self._initialize_state()
 
     def _initialize_state(self) -> DraftState:
-        """Load state from disk or create a fresh one."""
+        """Load state from disk or create a fresh one.
+
+        Cycle 2 (v1.2.0): also persists `audit/user_intent.json` —
+        the DP9b-analogue substrate the deliverable validator's G4
+        reads. We write user_intent BEFORE loading state so the
+        explicit-flag bookkeeping (mode_explicit=True iff
+        --mode was passed) is captured even on a fresh draft. On
+        `continue` / second-process re-entry the user_intent write
+        is an idempotent merge: process-1's explicit values win
+        over process-2's defaults (see user_intent.write_user_intent).
+        """
         if not self.draft_dir.exists():
             self.draft_dir.mkdir(parents=True)
             state = DraftState(phase="init", project_id=self.project_dir.name)
+            # Apply explicit mode if the caller passed one — otherwise
+            # state.mode stays at its default ("paper"). state.mode is
+            # the on-disk source of truth for the rest of the pipeline.
+            if self._explicit_mode is not None:
+                state.mode = self._explicit_mode
             save_state(self.draft_dir, state)
-            return state
-        return load_state(self.draft_dir)
+        else:
+            state = load_state(self.draft_dir)
+            # On reload, if the caller passed --mode and it differs
+            # from the persisted state.mode, that's a user typo on
+            # `continue` — DO NOT silently mutate state.mode. The
+            # validator's G4 will catch the mismatch loud.
+            if (self._explicit_mode is not None
+                    and state.mode != self._explicit_mode):
+                logger.warning(
+                    "Caller passed mode=%r but state.json has mode=%r. "
+                    "Keeping the persisted state.mode; the deliverable "
+                    "validator (G4) will surface this mismatch.",
+                    self._explicit_mode, state.mode,
+                )
+
+        # Persist user intent (idempotent merge — first process's
+        # explicit pick wins on a second-process re-entry). Audience
+        # isn't a paper-writer concept; we pass a placeholder so the
+        # cross-skill user_intent schema is honored.
+        try:
+            self._persist_user_intent()
+        except Exception as exc:  # pragma: no cover — defensive
+            # user_intent persistence must NOT block the pipeline.
+            # Log loud; the validator's G4 will surface "no intent
+            # persisted" as an advisory.
+            logger.warning(
+                "user_intent.write_user_intent failed (%s); deliverable "
+                "validator G4 will treat this draft as legacy/no-intent.",
+                exc,
+            )
+        return state
+
+    def _persist_user_intent(self) -> None:
+        """Write audit/user_intent.json via the copied user_intent
+        helper. Idempotent — see user_intent.write_user_intent
+        docstring for the merge rules. Reuses the same persistence
+        layer beril-presentation-maker uses (Cycle 1).
+
+        Vocabulary note: user_intent.py is copied VERBATIM from
+        beril-presentation-maker so the conformance fixture's byte-
+        identity check holds. Its `mode` vocabulary is the shared
+        set ('talk-30', 'talk-45', ..., 'paper', 'report'); paper-
+        writer's modes ('paper', 'report') are a subset. Its `tier`
+        vocabulary is presentation-maker's STRONG/THIN/EXPLORATORY —
+        which does NOT match paper-writer's --depth (quick/standard/
+        deep). So we persist MODE only via user_intent; depth lives
+        in state.json (a paper-writer-private field, added in this
+        cycle), where the deliverable validator's G4 advisory can
+        still surface it. The cross-skill `tier` slot is recorded as
+        a placeholder ('STRONG') with explicit=False so the
+        intent-vs-output check ignores it. This is the right
+        layering: shared schema for cross-skill concerns; private
+        state for skill-specific concerns.
+        """
+        skill_tools = (Path(__file__).parent / "skill" / "tools").resolve()
+        if str(skill_tools) not in sys.path:
+            sys.path.insert(0, str(skill_tools))
+        import user_intent  # noqa: E402
+
+        mode = self._explicit_mode or "paper"
+        user_intent.write_user_intent(
+            self.draft_dir,
+            mode=mode,
+            tier="STRONG",  # placeholder; tier_explicit=False below
+            audience="peer",  # placeholder; audience_explicit=False below
+            mode_explicit=self._explicit_mode is not None,
+            tier_explicit=False,
+            audience_explicit=False,
+        )
+
+    def _run_deliverable_validation(self) -> None:
+        """Cycle 2 (v1.2.0) — pre-handoff Tier-1 deterministic gate.
+
+        Invoked at the end of `run_pipeline` after the deliverable
+        (manuscript.md + manuscript.docx) is produced. Runs the four
+        gates (section_completeness, placeholder_or_leaked_template,
+        figure_resolution_and_embedding, mode_depth_vs_user_intent)
+        and writes the findings + summary to
+        `audit/deliverable_validation.json` under
+        `deliverable-validation.v1`. If any P0/P1 findings surface,
+        invokes `finalize_deliverable.finalize` to apply
+        auto-remediations (rerun_validate, reassemble — both
+        manuscript-read-only) and re-validate.
+
+        The deliverable is ALWAYS produced. Validator failure here
+        never blocks handoff; it just leaves a report in
+        audit/deliverable_validation.json the operator can act on.
+        """
+        skill_tools = (Path(__file__).parent / "skill" / "tools").resolve()
+        if str(skill_tools) not in sys.path:
+            sys.path.insert(0, str(skill_tools))
+        import validate_deliverable as vd  # noqa: E402
+
+        logger.info("[deliverable] validate_deliverable: running 4 gates...")
+        findings = vd.validate(self.draft_dir)
+        out = vd.write_findings(self.draft_dir, findings)
+        summary = vd._summarize(findings)
+        logger.info(
+            "[deliverable] %d finding(s) (P0=%d, P1=%d, advisory=%d); wrote %s",
+            summary["total"],
+            summary["by_severity"].get(vd.SEVERITY_P0, 0),
+            summary["by_severity"].get(vd.SEVERITY_P1, 0),
+            summary["by_severity"].get(vd.SEVERITY_ADVISORY, 0),
+            out,
+        )
+        if vd.readiness_exit_code(findings) == 0:
+            logger.info("[deliverable] clean (no P0/P1 findings).")
+            return
+
+        # Findings present → run finalize remediation + re-check.
+        import finalize_deliverable as fd  # noqa: E402
+
+        logger.info("[deliverable] finalize: applying auto-remediations...")
+        result = fd.finalize(self.draft_dir)
+        if "error" in result:
+            logger.warning("[deliverable] finalize: %s", result["error"])
+            return
+        for a in result["actions_applied"]:
+            tag = "✓" if a["applied"] else "·"
+            logger.info("[deliverable]   %s %s: %s", tag, a["action"], a["message"])
+        s = result["second_pass_summary"]
+        logger.info(
+            "[deliverable] post-remediation — total=%d, P0=%d, P1=%d, "
+            "advisory=%d (readiness rc=%d)",
+            s["total"],
+            s["by_severity"].get("P0", 0),
+            s["by_severity"].get("P1", 0),
+            s["by_severity"].get("advisory", 0),
+            result["second_pass_readiness_rc"],
+        )
+        for c in result["targeted_commands"]:
+            logger.warning(
+                "[deliverable]   targeted [%s] %s: %s",
+                c["severity"], c["gate"], c["note"],
+            )
+            if c["command"]:
+                logger.warning("[deliverable]     $ %s", c["command"])
+        for n in result["advisory_notes"]:
+            logger.info("[deliverable]   advisory %s: %s", n["gate"], n["message"])
 
     def _check_circuit_breaker(self):
         """Enforce the max_cost_usd ceiling."""
@@ -585,6 +752,25 @@ class PaperWriterOrchestrator:
             # If a rewrite cycle is needed, it should go through Phase 2
             # (targeted holistic re-pass) or Phase 4 (selective optimizer).
             if self.state.phase == "assembled":
+                # Cycle 2 (v1.2.0): pre-handoff deliverable validation.
+                # Runs the four-gate deterministic check
+                # (section_completeness, placeholder_or_leaked_template,
+                # figure_resolution_and_embedding, mode_depth_vs_user_intent)
+                # + finalize remediation pass. The deliverable is ALWAYS
+                # produced; readiness is what the validator reports.
+                # See skill/tools/validate_deliverable.py docstring for
+                # gate semantics and the never-discard remediation
+                # policy (DETECTION pure, REMEDIATION separate).
+                try:
+                    self._run_deliverable_validation()
+                except Exception as exc:  # pragma: no cover — defensive
+                    # Validator failure must NOT block handoff — the
+                    # manuscript is already produced; surface and
+                    # continue.
+                    logger.warning(
+                        "validate_deliverable hook failed (%s); "
+                        "manuscript is still complete on disk.", exc,
+                    )
                 logger.info("Pipeline complete. Paper assembled.")
         except PipelineHalted as e:
             logger.info(f"Pipeline paused: {e}")

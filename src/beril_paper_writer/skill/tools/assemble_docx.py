@@ -67,7 +67,7 @@ def _check_python_docx() -> int:
             "Error: python-docx not importable. It is declared in pyproject.toml "
             "runtime deps; reinstall via "
             "`pipx install --force "
-            "git+ssh://git@github.com/ArkinLaboratory/beril-paper-writer-skill.git`.\n"
+            "git+ssh://git@github.com/kbaseincubator/beril-paper-writer-skill.git`.\n"
         )
         return 2
     return 0

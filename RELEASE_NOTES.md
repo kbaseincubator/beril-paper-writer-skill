@@ -1,11 +1,186 @@
 # beril-paper-writer-skill — release notes
 
-**Current:** v1.1.0 (2026-06-06).
+**Current:** v1.2.0 (2026-06-07).
 
 This file is the **cumulative current-version log** — where the skill
 is, what shipped, and pointers to per-version detail. Per-version
 release notes for the v0.x line live in
 [`release-notes/`](release-notes/).
+
+## v1.2.0 — Cycle 2: pre-handoff deliverable validation + DP9b-analogue fix (2026-06-07)
+
+**Minor release.** Second CRAFT hardening-cycle deliverable —
+extends Cycle 1 (presentation-maker v1.2.0) to paper-writer. Adds
+a deterministic Tier-1 gate at the pre-handoff point that catches
+the silent omissions/defects v1.1.x had to fix manually after they
+shipped — without discarding the deliverable or forcing an
+expensive re-run. Companion CRAFT v0.3.3 re-pin delivers it.
+
+**Theory tested:** *a deterministic pre-handoff gate catches the
+silent omissions/defects that today only the human or adversarial
+review catches.* Test: regression fixtures per gate (drawn from the
+paper-writer caulobacter draft_2 + Cycle-1 lessons) all fire as
+expected; the clean fixture passes (modulo M-series advisories that
+are accurate-and-expected on a synthetic minimal manuscript).
+
+### New gates — `validate_deliverable` (4 checks)
+
+Runs at the pre-handoff point in `orchestrator.run_pipeline`, right
+after `phase_assemble` and just before "Pipeline complete. Paper
+assembled." Each gate maps to a real defect class:
+
+  1. **G1 section_completeness** — WRAPS
+     `validate_manuscript.run_all_validators` (M1–M10) and projects
+     each Violation onto the deliverable-validation.v1 contract.
+     `escalation_path` projects to remediation `kind`:
+     `auto-fix → auto + rerun_validate`, `escalate → targeted`,
+     `user-modify → targeted`, `accept-as-limitation → advisory`.
+     **Does NOT re-implement** M1–M10; the section logic stays in
+     validate_manuscript. (Decision 1: complement, not absorb.)
+  2. **G2 placeholder_or_leaked_template** — no `TBD`/`TBD - …` in
+     manuscript body, title, or authors. Title + authors line
+     present. Dirname-leak in title (P1 + TARGETED — operator
+     rewrites; **never auto-strip**, per the Cycle-1 G1 lesson).
+     The narrowed detector fires only on (a) verbatim full slug or
+     (b) ≥2 ADJACENT dir-segments — lone "Caulobacter"/"Loss"
+     **must NOT** fire (regression fixture pinned).
+  3. **G3 figure_resolution_and_embedding** — every block-image
+     reference in manuscript.md resolves on disk via the same
+     lookup `assemble_docx.render_image` uses (draft_dir/figures
+     first, then project_dir/figures); when manuscript.docx is
+     present, every resolvable reference must have a matching
+     embedded picture.
+  4. **G4 mode_depth_vs_user_intent** — the DP9b-analogue. Compares
+     the persisted user intent (`audit/user_intent.json`) to
+     `state.json` mode and (if present)
+     `audit/validate_manuscript.json` mode. Catches the silent
+     `--mode` drop class (see DP9b fix below).
+
+Findings emit to `audit/deliverable_validation.json` under the
+**same `deliverable-validation.v1` schema** as
+beril-presentation-maker (Decision: schema reused VERBATIM — the
+cross-skill finding contract). Projectable fields (`gate`,
+`severity`, `remediation.kind`) are tokens drawn from frozen
+vocabularies — telemetry-ready for the later run-record contract
+(Cycle 2+) without a rewrite.
+
+### Never-discard remediation policy
+
+A blocking finding does NOT delete the deliverable or force a full
+re-run. Each finding carries a `remediation` block keyed to cost:
+
+- **auto** (deterministic, manuscript-read-only) —
+  `finalize_deliverable.py` runs handlers + re-validates. Two
+  handlers:
+    - `rerun_validate` — re-run validate_manuscript with the
+      resolved mode; write `audit/validate_manuscript.json`.
+      Pure read on manuscript.md.
+    - `reassemble` — re-run `assemble_docx.main` against the
+      current manuscript.md. No LLM.
+  **`strip_dirname_token` is intentionally absent** — fuzzy
+  auto-mutation of titles is the Cycle-1 G1 lesson (it deleted
+  organism names on real Caulobacter titles).
+- **targeted** (cheap, one-stage) — emit the exact
+  `beril-paper-writer continue …` command; operator runs it.
+- **advisory** — surfaced, never blocks.
+
+The deliverable is ALWAYS produced; readiness is what the validator
+reports; nothing expensive is recomputed.
+
+### DP9b-analogue fix — `--mode` / `--depth` plumbing
+
+Two silent drops fixed:
+
+1. **`draft.py`** parsed `--mode` and `--depth` but the
+   `PaperWriterOrchestrator` constructor had no parameters for
+   them — they were silently dropped. Now: forwarded into
+   `Orchestrator(..., mode=…, depth=…)`, which stores them on
+   `state.mode` (mode) and writes `audit/user_intent.json`
+   (mode + the explicit-sentinel that says "user picked this vs.
+   inheriting a default").
+2. **`continue_run.py`** had no `--mode`/`--depth` flags at all;
+   only `--model` was forwarded. Now: same flags as `draft`,
+   plumbed the same way. The idempotent user_intent merge
+   ensures process-1's explicit pick wins over process-2's
+   defaults (and a deliberate explicit mode-flip on resume
+   surfaces as a G4 mismatch finding).
+
+### `user_intent.py` — COPIED VERBATIM from presentation-maker v1.2.0
+
+Per the CRAFT `llm_config` copy-not-share convention (Decision 2):
+the persistence layer is copied byte-identical to the
+beril-presentation-maker v1.2.0 source (commit `7b0baed`, blob
+`0ae779ed…`). The new test `test_user_intent_byte_identical_
+to_presentation_maker` asserts the byte identity locally; the
+craft-platform conformance fixture will assert it cross-repo (to
+be extended in the CRAFT v0.3.3 re-pin commit).
+
+Vocabulary note: user_intent's `tier` slot uses presentation-
+maker's STRONG/THIN/EXPLORATORY vocabulary — which does NOT match
+paper-writer's `--depth` (quick/standard/deep). So depth is NOT
+persisted via user_intent; it's threaded into the orchestrator and
+into state-related artifacts only. A future depth-vs-output check
+is deferred to a later cycle.
+
+### New files
+
+- `src/beril_paper_writer/skill/tools/user_intent.py` — COPIED
+  VERBATIM from beril-presentation-maker v1.2.0.
+- `src/beril_paper_writer/skill/tools/validate_deliverable.py` —
+  the 4-gate pure read-only check + `deliverable-validation.v1`
+  emitter + `check` CLI.
+- `src/beril_paper_writer/skill/tools/finalize_deliverable.py` —
+  the auto-remediation + re-validation + targeted-route emitter
+  + `finalize` CLI.
+- `tests/unit/test_validate_deliverable.py` — 27 tests: clean
+  fixture, per-gate regressions (including the Cycle-1 correct-
+  Caulobacter-title regression case), DP9b-analogue mode-drop,
+  schema-shape, finalize-handler-removal pins, byte-identity
+  check.
+
+### Modified files
+
+- `src/beril_paper_writer/orchestrator.py` — `__init__` accepts
+  `mode` + `depth`; `_initialize_state` writes
+  `audit/user_intent.json` via the copied user_intent module +
+  applies explicit mode to `state.mode` on first init;
+  `run_pipeline` calls `_run_deliverable_validation` after
+  `phase_assemble`.
+- `src/beril_paper_writer/commands/draft.py` — forwards
+  `args.mode` + `args.depth` to the orchestrator constructor.
+- `src/beril_paper_writer/commands/continue_run.py` — adds
+  `--mode` + `--depth` CLI args + forwards them through
+  `_resume_via_orchestrator`.
+- `src/beril_paper_writer/skill/tools/assemble_docx.py:70` —
+  bonus: stale `ArkinLaboratory` URL in the python-docx
+  ImportError message → `kbaseincubator`.
+- `pyproject.toml` + `src/beril_paper_writer/__init__.py` —
+  version `1.1.0 → 1.2.0` (both files, per the CRAFT-sync gotcha
+  pinned in v1.1.0).
+
+### Verification (CC-local)
+
+- pytest unit suite: **1105 pass** (+ 27 new in this commit; full
+  count includes all existing tests). 0 regressions.
+- Ruff: clean on all new files; existing-file delta from this
+  cycle's edits = 0 net new issues (pre-existing nits in
+  orchestrator.py / assemble_docx.py left alone for scope
+  discipline).
+- The live verification gate (Cowork: run validate_deliverable
+  against the caulobacter draft_2 → clean except for known
+  M-series advisories; doctored fixtures per gate → each fires
+  loud) and the hub re-run (Adam) remain external.
+
+### Git disposition
+
+Commit-local on `beril-paper-writer` main; NOT pushed, NOT
+tagged. Cowork verifies independently; Adam pushes + tags v1.2.0;
+then CRAFT v0.3.3 re-pin (submodule → v1.2.0, pyproject pin,
+CRAFT version) — and in that same craft-platform commit, the
+conformance fixture is extended to assert user_intent.py matches
+across presentation-maker + paper-writer (both at v1.2.0).
+
+---
 
 ## v1.1.0 — CRAFT runtime-config standardization (2026-06-06)
 
