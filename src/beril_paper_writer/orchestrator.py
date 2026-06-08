@@ -350,6 +350,18 @@ class PaperWriterOrchestrator:
         # continue rather than fail the phase on a telemetry issue.
         cost_usd = 0.0
         envelope_note = ""
+        # Cycle 3 / DP1: also capture the call's usage (tokens) + model
+        # so record_stage() can fold real per-phase telemetry into the
+        # run-record. Stashed on self (not added to the return tuple)
+        # to avoid churning the helper's many callers. Reset per call.
+        self._last_call_telemetry = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "model": resolved_model,
+            "cost_usd": 0.0,
+        }
         if stdout.strip():
             try:
                 envelope = json.loads(stdout.strip())
@@ -359,6 +371,25 @@ class PaperWriterOrchestrator:
                         cost_usd = float(raw)
                     else:
                         envelope_note = "envelope missing total_cost_usd"
+                    # usage block: Claude Code's json envelope carries a
+                    # `usage` dict with input/output/cache token counts.
+                    usage = envelope.get("usage")
+                    if isinstance(usage, dict):
+                        self._last_call_telemetry.update({
+                            "input_tokens": int(
+                                usage.get("input_tokens", 0) or 0),
+                            "output_tokens": int(
+                                usage.get("output_tokens", 0) or 0),
+                            "cache_read_tokens": int(
+                                usage.get("cache_read_input_tokens", 0) or 0),
+                            "cache_creation_tokens": int(
+                                usage.get(
+                                    "cache_creation_input_tokens", 0) or 0),
+                        })
+                    # Envelope may name the concrete model; prefer it.
+                    env_model = envelope.get("model")
+                    if isinstance(env_model, str) and env_model:
+                        self._last_call_telemetry["model"] = env_model
                 else:
                     envelope_note = f"envelope not a dict ({type(envelope).__name__})"
             except json.JSONDecodeError as e:
@@ -366,6 +397,32 @@ class PaperWriterOrchestrator:
                     f"envelope not parseable JSON: {e.msg}; first 200 chars: "
                     f"{stdout[:200]!r}"
                 )
+        self._last_call_telemetry["cost_usd"] = round(cost_usd, 6)
+
+        # Cycle 3 / DP1: ACCUMULATE this call's tokens into the per-phase
+        # accumulator. A phase may make several claude calls (drafting,
+        # remediate); recording only the last call's tokens would
+        # undercount — so we sum every call and advance_phase records
+        # the SUM (cost stays delta-based; tokens are summed, matching
+        # the presmaker reference's sum-every-call semantics). Reset at
+        # each advance_phase boundary. Guarded with getattr so a caller
+        # that constructs the orchestrator without __init__ (test shims)
+        # doesn't crash the claude path.
+        acc = getattr(self, "_phase_token_accumulator", None)
+        if isinstance(acc, dict):
+            acc["input_tokens"] += int(
+                self._last_call_telemetry["input_tokens"])
+            acc["output_tokens"] += int(
+                self._last_call_telemetry["output_tokens"])
+            acc["cache_read_tokens"] += int(
+                self._last_call_telemetry["cache_read_tokens"])
+            acc["cache_creation_tokens"] += int(
+                self._last_call_telemetry["cache_creation_tokens"])
+        m = self._last_call_telemetry.get("model")
+        models = getattr(self, "_phase_models", None)
+        if isinstance(models, list) and isinstance(m, str) and m \
+                and m not in models:
+            models.append(m)
 
         # Increment + persist.
         if cost_usd > 0.0:
@@ -494,6 +551,26 @@ class PaperWriterOrchestrator:
                     "BERIL_ADVERSARIAL_BIN to its absolute path."
                 )
         self.state: DraftState = self._initialize_state()
+
+        # Cycle 3 / DP1: run-record.v1 telemetry. `_run_record_started`
+        # guards record_start to once-per-process; `_last_recorded_cost`
+        # lets advance_phase attribute per-phase cost as the delta in
+        # cumulative cost_so_far_usd. `_phase_token_accumulator` SUMS the
+        # token counts of EVERY claude call made within the current phase
+        # (a phase like drafting/remediate makes several) — recording
+        # only the LAST call's tokens would undercount silently (cost is
+        # delta-correct but tokens would diverge from the presmaker
+        # reference, which sums every call). Reset at each advance_phase
+        # boundary, exactly like _last_recorded_cost. `_phase_models`
+        # collects the distinct models seen in-phase. Best-effort
+        # throughout: a telemetry write must never break the pipeline.
+        self._run_record_started = False
+        self._last_recorded_cost = float(self.state.cost_so_far_usd or 0.0)
+        self._phase_token_accumulator: dict = {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        }
+        self._phase_models: list[str] = []
 
     def _initialize_state(self) -> DraftState:
         """Load state from disk or create a fresh one.
@@ -662,11 +739,121 @@ class PaperWriterOrchestrator:
             logger.error(f"Cost limit exceeded: ${self.state.cost_so_far_usd:.2f} >= ${self.max_cost_usd:.2f}")
             raise TokenLimitExceeded(f"Cumulative spend reached ${self.state.cost_so_far_usd:.2f}")
 
+    # ------------------------------------------------------------------
+    # Cycle 3 / DP1 — run-record.v1 emitter hooks (native Python; the
+    # emitter CORE is copy-adapted in skill/tools/run_record_emitter.py,
+    # NOT imported from craft-platform). All best-effort: a telemetry
+    # write must never break the pipeline.
+    # ------------------------------------------------------------------
+
+    def _rr(self):
+        """Import the vendored run_record_emitter (sibling tool). Returns
+        the module or None if unavailable (skill tools not on path)."""
+        try:
+            import sys
+            tools = Path(__file__).resolve().parent / "skill" / "tools"
+            if str(tools) not in sys.path:
+                sys.path.insert(0, str(tools))
+            import run_record_emitter as rr  # noqa: E402
+            return rr
+        except Exception:  # pragma: no cover — defensive
+            return None
+
+    def _rr_ensure_started(self) -> None:
+        if self._run_record_started:
+            return
+        rr = self._rr()
+        if rr is None:
+            return
+        try:
+            rr.record_start(self.draft_dir)
+            self._run_record_started = True
+            self._last_recorded_cost = float(
+                self.state.cost_so_far_usd or 0.0)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("run-record record_start skipped: %s", exc)
+
+    def _rr_record_completed_phase(self, phase: str) -> None:
+        """Record the phase that just finished.
+          cost   = DELTA in cumulative cost_so_far_usd since the last
+                   record (captures multi-call phases);
+          tokens = SUM of every claude call's usage in this phase
+                   (the per-phase accumulator) — NOT the last call's,
+                   which would undercount a multi-call phase and diverge
+                   from the presmaker reference's sum-every-call rule;
+          model  = the phase's model(s); a single model is the common
+                   case, so we record the last-seen one (the list is
+                   tracked for models_used at the record level).
+        A non-LLM phase (extract/assemble) made no calls → the
+        accumulator is all-zero and _phase_models is empty → a clean
+        zero-cost, null-model entry. The accumulator + cost baseline are
+        RESET here, at the advance_phase boundary."""
+        rr = self._rr()
+        if rr is None:
+            self._reset_phase_telemetry()
+            return
+        cur_cost = float(self.state.cost_so_far_usd or 0.0)
+        delta = max(0.0, cur_cost - self._last_recorded_cost)
+        acc = getattr(self, "_phase_token_accumulator", {}) or {}
+        models = getattr(self, "_phase_models", []) or []
+        model = models[-1] if models else None
+        try:
+            rr.record_stage(
+                self.draft_dir,
+                stage_id=phase,
+                status="completed",
+                model=model,
+                input_tokens=int(acc.get("input_tokens", 0)),
+                output_tokens=int(acc.get("output_tokens", 0)),
+                cache_read_tokens=int(acc.get("cache_read_tokens", 0)),
+                cache_creation_tokens=int(acc.get("cache_creation_tokens", 0)),
+                cost_usd=delta,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("run-record record_stage(%s) skipped: %s", phase, exc)
+        self._last_recorded_cost = cur_cost
+        self._reset_phase_telemetry()
+
+    def _reset_phase_telemetry(self) -> None:
+        """Zero the per-phase token accumulator + model list at an
+        advance_phase boundary (mirrors _last_recorded_cost's reset)."""
+        self._phase_token_accumulator = {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        }
+        self._phase_models = []
+
+    def _rr_record_halt(self, gate: str) -> None:
+        rr = self._rr()
+        if rr is None:
+            return
+        try:
+            rr.record_halt(self.draft_dir, gate_id=gate)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("run-record record_halt(%s) skipped: %s", gate, exc)
+
+    def _rr_record_finalize(self, status: str) -> None:
+        rr = self._rr()
+        if rr is None:
+            return
+        try:
+            rr.record_finalize(self.draft_dir, status=status)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("run-record record_finalize(%s) skipped: %s",
+                         status, exc)
+
     def advance_phase(self, new_phase: str):
         """Update phase, check cost limits, and save to disk."""
         if new_phase not in VALID_PHASES:
             raise ValueError(f"Invalid phase: {new_phase}")
         logger.info(f"Advancing phase: {self.state.phase} -> {new_phase}")
+        # Cycle 3 / DP1: the OLD phase just completed — record it before
+        # transitioning. `init` is a pre-pipeline placeholder (no work);
+        # skip it. The run-record is lazily started on first advance.
+        old_phase = self.state.phase
+        self._rr_ensure_started()
+        if old_phase and old_phase != "init":
+            self._rr_record_completed_phase(old_phase)
         self.state.phase = new_phase
         self.state.touch()
         save_state(self.draft_dir, self.state)
@@ -772,13 +959,29 @@ class PaperWriterOrchestrator:
                         "manuscript is still complete on disk.", exc,
                     )
                 logger.info("Pipeline complete. Paper assembled.")
+                # Cycle 3 / DP1: terminal write — PHASE-driven status
+                # (reaching `assembled` → completed). Runs AFTER
+                # deliverable validation so the artifact pointers
+                # (deliverable_validation.json + manuscript.docx) resolve.
+                self._rr_record_finalize("completed")
         except PipelineHalted as e:
             logger.info(f"Pipeline paused: {e}")
+            # Cycle 3 / DP1: halt-gate writer. The current phase NAMES
+            # the gate; record_halt flips status=halted + current_stage.
+            # The finalize guard then preserves it across process exit;
+            # a resume's record_start opens the next run.
+            self._rr_record_halt(self.state.phase)
         except DiscrepancyInteractiveHalt as e:
             logger.warning(f"Interactive Discrepancy Halt: {e}")
             # Emits handoff for the UI
+            self._rr_record_halt(self.state.phase)
         except Exception as e:
             logger.exception("Pipeline failed unexpectedly.")
+            # Cycle 3 / DP1: terminal write — an unexpected exception is
+            # a failed run (PHASE-driven: we did not reach `assembled`).
+            # The finalize guard preserves a prior `halted` if that's
+            # what the record holds. Best-effort; re-raise regardless.
+            self._rr_record_finalize("failed")
             raise
 
     async def phase_extract(self):

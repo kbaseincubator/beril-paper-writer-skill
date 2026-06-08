@@ -1,0 +1,73 @@
+{
+  "schema_version": "run-record.v1",
+  "skill": "paper-writer",
+  "skill_version": "1.3.0",
+  "run_id": "run-2",
+  "draft_dir": "/projects/ibd_phage_targeting/papers/draft_3",
+  "mode": "paper",
+  "status": "completed",
+  "started_at": "2026-06-08T16:00:00Z",
+  "finished_at": "2026-06-08T17:35:00Z",
+  "exit_code": 0,
+  "current_stage": null,
+  "stages": [
+    {
+      "id": "drafting",
+      "status": "completed",
+      "model": "claude-opus-4-7",
+      "started_at": "2026-06-08T16:08:00Z",
+      "finished_at": "2026-06-08T17:00:00Z",
+      "elapsed_seconds": 3120.0,
+      "input_tokens": 92000,
+      "output_tokens": 31000,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cost_usd": 5.42,
+      "subrecord": null
+    },
+    {
+      "id": "review",
+      "status": "completed",
+      "model": "claude-opus-4-7",
+      "started_at": "2026-06-08T17:00:00Z",
+      "finished_at": "2026-06-08T17:25:00Z",
+      "elapsed_seconds": 1500.0,
+      "input_tokens": 40000,
+      "output_tokens": 8000,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cost_usd": 1.4,
+      "subrecord": null
+    },
+    {
+      "id": "assemble",
+      "status": "completed",
+      "model": null,
+      "started_at": "2026-06-08T17:33:00Z",
+      "finished_at": "2026-06-08T17:35:00Z",
+      "elapsed_seconds": 120.0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cost_usd": 0.0,
+      "subrecord": null
+    }
+  ],
+  "totals": {
+    "cost_usd": 6.82,
+    "input_tokens": 132000,
+    "output_tokens": 39000,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "elapsed_seconds": 4740.0
+  },
+  "models_used": [
+    "claude-opus-4-7"
+  ],
+  "artifacts": {
+    "user_intent": "audit/user_intent.json",
+    "deliverable_validation": "audit/deliverable_validation.json",
+    "deliverable": "manuscript.docx"
+  }
+}
