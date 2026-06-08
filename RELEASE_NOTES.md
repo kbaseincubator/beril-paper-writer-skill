@@ -37,13 +37,49 @@ assembled." Each gate maps to a real defect class:
      `user-modify → targeted`, `accept-as-limitation → advisory`.
      **Does NOT re-implement** M1–M10; the section logic stays in
      validate_manuscript. (Decision 1: complement, not absorb.)
-  2. **G2 placeholder_or_leaked_template** — no `TBD`/`TBD - …` in
-     manuscript body, title, or authors. Title + authors line
-     present. Dirname-leak in title (P1 + TARGETED — operator
-     rewrites; **never auto-strip**, per the Cycle-1 G1 lesson).
-     The narrowed detector fires only on (a) verbatim full slug or
-     (b) ≥2 ADJACENT dir-segments — lone "Caulobacter"/"Loss"
-     **must NOT** fire (regression fixture pinned).
+
+     *Followup (Cowork verification, 2026-06-07): the raw M1-M10
+     projection over-fired on real well-formed manuscripts.* M1
+     reports "missing required paper-mode section: 'title'" P0 on
+     every H1-titled paper (because it looks for a literal `## Title`
+     section); M2 (structured-abstract-subsections) + M9
+     (limitations) report P0 on prose-handled papers. Calibrated
+     projection: (a) M1 "missing title" is **suppressed** when
+     manuscript.md has a leading H1 (the H1 + author block IS the
+     title page); (b) M2 + M9 errors are **demoted from P0/auto to
+     P1/advisory** (these are publishing-house style preferences,
+     not deliverable completeness blocks — many real papers ship
+     prose abstracts and in-discussion limitations). M3 ai_disclosure
+     + M4 data_availability **stay P0/auto** (those are genuine
+     ICMJE blocks). A well-formed manuscript with H1 + author block
+     + prose abstract + in-prose limitations + AI Disclosure +
+     Data Availability now passes G1 with NO spurious P0 (regression
+     fixture pinned: `test_g1_well_formed_h1_titled_paper_passes_no_p0`).
+  2. **G2 placeholder_or_leaked_template** — no placeholder tokens
+     (TBD, TK, TO BE COMPLETED, TO BE FILLED, FILL IN, PLACEHOLDER,
+     XXX, `[...]`, empty `[]`) in title / author / affiliation /
+     body. Title + author line present (P0/blank → targeted; P1
+     missing-label → targeted). Affiliation placeholder also P0.
+     Dirname-leak in title (P1 + TARGETED — operator rewrites;
+     **never auto-strip**, per the Cycle-1 G1 lesson). The narrowed
+     detector fires only on (a) verbatim full slug or (b) ≥2
+     ADJACENT dir-segments — lone "Caulobacter"/"Loss" **must NOT**
+     fire (regression fixture pinned).
+
+     *Followup (Cowork verification, 2026-06-07): the original
+     `_TBD_RE` only matched `\\bTBD\\b`.* Real draft_2 shipped with
+     `**Authors:** [AUTHOR LIST TO BE COMPLETED]` and
+     `**Affiliations:** [TO BE COMPLETED]` — both slid through
+     unflagged. Broadened the vocab to the in-the-wild template set
+     above (alphabetic + bracketed-ellipsis + empty-bracketed).
+     Added the previously-missing **affiliation check**
+     (`g2:affiliations_tbd`, P0 when the `Affiliations:` label is
+     present with a placeholder/empty value). Author-label parser
+     now correctly strips bold markdown markers around the colon
+     (`**Authors:** value` extracts to `value`, not `** value`).
+     Body-wide finding renamed `g2:tbd_in_body → g2:placeholder_in_body`
+     to reflect the broadened vocab. Regression fixtures pinned for
+     each case, including the two literal draft_2 strings.
   3. **G3 figure_resolution_and_embedding** — every block-image
      reference in manuscript.md resolves on disk via the same
      lookup `assemble_docx.render_image` uses (draft_dir/figures

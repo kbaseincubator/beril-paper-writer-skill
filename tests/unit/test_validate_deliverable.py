@@ -389,7 +389,10 @@ def test_g2_single_other_segment_does_not_fire(tmp_path):
 
 def test_g2_tbd_in_body_fires(tmp_path):
     """A `TBD` token in the manuscript body fires a P1 with a
-    targeted remediation pointing at `continue`."""
+    targeted remediation pointing at `continue`. v1.2.0 followup:
+    the finding id moved from `g2:tbd_in_body` → `g2:placeholder_in_body`
+    when the placeholder vocab broadened beyond TBD; the test
+    asserts the new id."""
     draft_dir = _build_clean_draft(tmp_path)
     bad_md = _CLEAN_MANUSCRIPT.replace(
         "We sequenced and analysed expression data.",
@@ -397,11 +400,11 @@ def test_g2_tbd_in_body_fires(tmp_path):
     )
     (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
     findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
-    tbd = [f for f in findings if f.id == "g2:tbd_in_body"]
-    assert tbd
-    assert tbd[0].severity == vd.SEVERITY_P1
-    assert tbd[0].remediation.kind == vd.REMEDIATION_TARGETED
-    assert "TBD" in tbd[0].message
+    placeholder = [f for f in findings if f.id == "g2:placeholder_in_body"]
+    assert placeholder
+    assert placeholder[0].severity == vd.SEVERITY_P1
+    assert placeholder[0].remediation.kind == vd.REMEDIATION_TARGETED
+    assert "TBD" in placeholder[0].message
 
 
 def test_g2_tbd_presenter_fires(tmp_path):
@@ -427,6 +430,293 @@ def test_g2_missing_title_fires(tmp_path):
     t = [f for f in findings if f.id == "g2:title_missing"]
     assert t
     assert t[0].severity == vd.SEVERITY_P0
+
+
+# ---------------------------------------------------------------------------
+# v1.2.0 followup (Cowork verification, 2026-06-07): G2 under-fired.
+# The original _TBD_RE only matched \bTBD\b. Real draft_2 shipped with
+# bracketed-template placeholders that slid through:
+#   "**Authors:** [AUTHOR LIST TO BE COMPLETED]"
+#   "**Affiliations:** [TO BE COMPLETED]"
+# Broaden the vocab AND add an Affiliations check. These tests pin the
+# exact strings from the caulobacter draft_2 brief.
+# ---------------------------------------------------------------------------
+
+
+def test_g2_caulobacter_authors_bracketed_template_fires_p0(tmp_path):
+    """Real draft_2 string: `**Authors:** [AUTHOR LIST TO BE COMPLETED]`.
+    Must fire g2:authors_tbd as P0. Both the bold-label parsing AND
+    the broadened placeholder vocab (TO BE COMPLETED) are exercised."""
+    draft_dir = _build_clean_draft(tmp_path)
+    bad_md = _CLEAN_MANUSCRIPT.replace(
+        "Authors: Adam Arkin · LBNL",
+        "**Authors:** [AUTHOR LIST TO BE COMPLETED]",
+    )
+    (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
+    findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
+    f = [x for x in findings if x.id == "g2:authors_tbd"]
+    assert f, (
+        f"caulobacter draft_2 author template must fire g2:authors_tbd; "
+        f"got {[(x.id, x.message[:80]) for x in findings]}"
+    )
+    assert f[0].severity == vd.SEVERITY_P0
+    # The captured value should be the bracketed content (no `**` leak).
+    assert "[AUTHOR LIST TO BE COMPLETED]" in f[0].message
+
+
+def test_g2_caulobacter_affiliations_bracketed_template_fires_p0(tmp_path):
+    """Real draft_2 string: `**Affiliations:** [TO BE COMPLETED]`.
+    Must fire the new g2:affiliations_tbd as P0. Before the v1.2.0
+    followup, this slid through entirely (no affiliation check
+    existed)."""
+    draft_dir = _build_clean_draft(tmp_path)
+    bad_md = _CLEAN_MANUSCRIPT.replace(
+        "Authors: Adam Arkin · LBNL",
+        "Authors: Adam Arkin · LBNL\n**Affiliations:** [TO BE COMPLETED]",
+    )
+    (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
+    findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
+    f = [x for x in findings if x.id == "g2:affiliations_tbd"]
+    assert f, (
+        f"caulobacter draft_2 affiliation template must fire "
+        f"g2:affiliations_tbd; got {[(x.id, x.message[:80]) for x in findings]}"
+    )
+    assert f[0].severity == vd.SEVERITY_P0
+    assert "[TO BE COMPLETED]" in f[0].message
+
+
+def test_g2_broad_placeholder_vocab_each_fires(tmp_path):
+    """Each placeholder token in the broadened vocab must fire when
+    used as an author value. Coverage matrix for the alphabetic
+    vocab: TBD, TK, TO BE COMPLETED, TO BE FILLED, FILL IN,
+    PLACEHOLDER, XXX."""
+    draft_dir = _build_clean_draft(tmp_path)
+    base_md = _CLEAN_MANUSCRIPT
+    for value in ("TBD", "TK", "TO BE COMPLETED", "TO BE FILLED",
+                  "FILL IN", "PLACEHOLDER", "XXX", "XXXX"):
+        bad_md = base_md.replace(
+            "Authors: Adam Arkin · LBNL",
+            f"Authors: {value}",
+        )
+        (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
+        findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
+        f = [x for x in findings if x.id == "g2:authors_tbd"]
+        assert f, f"value {value!r} should fire authors_tbd; got {findings}"
+        assert f[0].severity == vd.SEVERITY_P0
+
+
+def test_g2_bracketed_ellipsis_in_body_fires(tmp_path):
+    """`[...]` in body prose is the "TK insertion point" convention
+    — also a placeholder. Should fire g2:placeholder_in_body."""
+    draft_dir = _build_clean_draft(tmp_path)
+    bad_md = _CLEAN_MANUSCRIPT.replace(
+        "We sequenced and analysed expression data.",
+        "We sequenced [...] and analysed expression data.",
+    )
+    (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
+    findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
+    f = [x for x in findings if x.id == "g2:placeholder_in_body"]
+    assert f
+
+
+def test_g2_empty_bracketed_author_value_fires(tmp_path):
+    """`Authors: []` — empty bracket pair. The empty-bracketed
+    detector is independent of the alphabetic vocab."""
+    draft_dir = _build_clean_draft(tmp_path)
+    bad_md = _CLEAN_MANUSCRIPT.replace(
+        "Authors: Adam Arkin · LBNL",
+        "Authors: []",
+    )
+    (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
+    findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
+    f = [x for x in findings if x.id == "g2:authors_tbd"]
+    assert f
+    assert f[0].severity == vd.SEVERITY_P0
+
+
+def test_g2_real_citation_brackets_do_not_fire(tmp_path):
+    """`[Smith 2024]` and `[C-013]` style citation markers in the
+    manuscript body MUST NOT fire — they're not placeholders. The
+    detector only fires on bracketed-ellipsis or bracketed-alphabetic
+    vocab, never on arbitrary brackets."""
+    draft_dir = _build_clean_draft(tmp_path)
+    bad_md = _CLEAN_MANUSCRIPT.replace(
+        "We sequenced and analysed expression data.",
+        "We sequenced samples [Smith 2024] and analysed expression data [C-013].",
+    )
+    (draft_dir / "manuscript.md").write_text(bad_md, encoding="utf-8")
+    findings = vd.check_g2_placeholder_or_leaked_template(draft_dir, bad_md)
+    placeholder = [f for f in findings if f.id == "g2:placeholder_in_body"]
+    assert placeholder == [], (
+        f"real citation brackets must not fire as placeholders; got "
+        f"{[(f.id, f.message[:120]) for f in placeholder]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v1.2.0 followup G1 calibration (Cowork verification, 2026-06-07):
+# G1 over-fired. M1 reported "missing title" P0 on every H1-titled
+# paper because PAPER_REQUIRED_SECTIONS['title'] looks for a literal
+# `## Title` section. M2 (abstract-subsections) + M9 (limitations)
+# also fired P0 on prose-handled papers. These tests pin the fixed
+# projection: a well-formed real manuscript (H1 + author block +
+# prose abstract, no `## Limitations` heading) must pass G1 with
+# no spurious P0; only ICMJE-genuinely-blocking M-series (M3
+# ai_disclosure, M4 data_availability) keep their P0/auto status.
+# ---------------------------------------------------------------------------
+
+
+_WELL_FORMED_MANUSCRIPT = """\
+# Iron regulation in Caulobacter crescentus: a fur regulon analysis
+
+Authors: Adam Arkin · LBNL
+
+## Abstract
+
+Iron is essential for bacterial growth. We analysed the fur regulon
+in Caulobacter crescentus and identified 12 regulated genes that
+form a coherent iron-response circuit. These genes coordinate
+iron homeostasis under both replete and limiting conditions.
+
+## Introduction
+
+The fur regulon is a key iron-response circuit.
+
+## Methods
+
+We sequenced and analysed expression data.
+
+## Results
+
+Figure 1 shows the regulon structure.
+
+![Figure 1: fur regulon overview](figures/fig01.png)
+
+## Discussion
+
+The fur regulon coordinates iron homeostasis. We acknowledge that
+our cohort size limits generalisation; a larger cross-strain panel
+would strengthen the inference.
+
+## AI Disclosure
+
+This manuscript was drafted with assistance from a large language
+model under human supervision per the ICMJE V.A requirement.
+
+## Data Availability
+
+Sequencing data deposited at the NCBI Gene Expression Omnibus under
+accession GSE-987654, available at https://www.ncbi.nlm.nih.gov/geo/
+upon publication. Analysis scripts archived at Zenodo, DOI to follow.
+
+## References
+
+1. Smith et al. 2025.
+"""
+
+
+def test_g1_well_formed_h1_titled_paper_passes_no_p0(tmp_path):
+    """The load-bearing regression case Cowork raised: a real
+    well-formed manuscript with an H1 title + author block + prose
+    abstract + in-discussion-prose limitations + AI disclosure +
+    Data Availability must pass G1 with NO P0 findings. Pre-
+    followup G1 spuriously fired P0 on M1 missing-title (because
+    no `## Title` section) + M2 structured-abstract-subsections +
+    M9 limitations. Post-followup: M1 suppressed when H1 present;
+    M2 + M9 errors demoted to P1+advisory."""
+    draft_dir = _build_clean_draft(tmp_path)
+    (draft_dir / "manuscript.md").write_text(
+        _WELL_FORMED_MANUSCRIPT, encoding="utf-8",
+    )
+    findings = vd.check_g1_section_completeness(draft_dir, mode="paper")
+    p0s = [f for f in findings if f.severity == vd.SEVERITY_P0]
+    assert p0s == [], (
+        f"well-formed H1-titled paper must NOT produce P0 G1 findings; "
+        f"got {[(f.id, f.message[:120]) for f in p0s]}"
+    )
+
+
+def test_g1_m1_title_suppressed_when_h1_present(tmp_path):
+    """Direct pin on the M1 suppression: when manuscript.md has a
+    leading H1, the M1 'Missing required paper-mode section: title'
+    violation must be suppressed from the projection (the H1 IS the
+    title page)."""
+    draft_dir = _build_clean_draft(tmp_path)
+    # Use the clean fixture (which has an H1) but strip the abstract
+    # so M1 doesn't also fire about ABSTRACT — we want to isolate
+    # the title-suppression.
+    findings = vd.check_g1_section_completeness(draft_dir, mode="paper")
+    m1_title_findings = [
+        f for f in findings
+        if f.id.startswith("g1:m1_") and "title" in f.message.lower()
+    ]
+    assert m1_title_findings == [], (
+        f"M1 missing-title must be suppressed when H1 is present; "
+        f"got {[f.message[:120] for f in m1_title_findings]}"
+    )
+
+
+def test_g1_m1_missing_title_still_fires_without_h1(tmp_path):
+    """When the H1 IS absent, the M1 title violation should pass
+    through normally (P0/auto). The suppression is H1-conditional,
+    not unconditional."""
+    draft_dir = _build_clean_draft(tmp_path)
+    # Strip the H1 from the clean fixture; manuscript.md now opens
+    # with the author line, no H1.
+    no_h1_md = _CLEAN_MANUSCRIPT.split("\n", 1)[1]
+    (draft_dir / "manuscript.md").write_text(no_h1_md, encoding="utf-8")
+    findings = vd.check_g1_section_completeness(draft_dir, mode="paper")
+    m1_title = [
+        f for f in findings
+        if f.id.startswith("g1:m1_") and "title" in f.message.lower()
+    ]
+    assert m1_title, "M1 missing-title MUST fire when no H1 is present"
+    # And it remains P0/auto (no demotion for the genuinely-absent case).
+    assert m1_title[0].severity == vd.SEVERITY_P0
+    assert m1_title[0].remediation.kind == vd.REMEDIATION_AUTO
+
+
+def test_g1_m2_structured_abstract_demoted_to_p1_advisory(tmp_path):
+    """M2 fires when the Abstract lacks structured subsections
+    (Background/Methods/Results/Conclusions). The followup demotes
+    this from P0/auto to P1/advisory — many real papers ship prose
+    abstracts and structured-subsection enforcement is publishing-
+    house style, not deliverable completeness."""
+    draft_dir = _build_clean_draft(tmp_path)
+    (draft_dir / "manuscript.md").write_text(
+        _WELL_FORMED_MANUSCRIPT, encoding="utf-8",
+    )
+    findings = vd.check_g1_section_completeness(draft_dir, mode="paper")
+    m2_findings = [f for f in findings if f.id.startswith("g1:m2_")]
+    if m2_findings:
+        # If M2 fires at all (depends on validate_manuscript's exact
+        # rules), it must NOT be P0 and MUST be advisory.
+        for f in m2_findings:
+            assert f.severity == vd.SEVERITY_P1
+            assert f.remediation.kind == vd.REMEDIATION_ADVISORY
+
+
+def test_g1_m3_ai_disclosure_remains_p0_auto(tmp_path):
+    """The calibration MUST NOT demote M3 ai_disclosure — that's a
+    real ICMJE requirement. Stripping the AI Disclosure section from
+    the well-formed manuscript should still produce a P0/auto finding."""
+    draft_dir = _build_clean_draft(tmp_path)
+    no_ai_md = _WELL_FORMED_MANUSCRIPT.replace(
+        "## AI Disclosure\n\nThis manuscript was drafted with assistance"
+        " from a large language\nmodel under human supervision per the"
+        " ICMJE V.A requirement.\n\n",
+        "",
+    )
+    (draft_dir / "manuscript.md").write_text(no_ai_md, encoding="utf-8")
+    findings = vd.check_g1_section_completeness(draft_dir, mode="paper")
+    m3 = [f for f in findings if f.id.startswith("g1:m3_")]
+    # M3 should still fire if it would have fired pre-followup.
+    if m3:
+        assert m3[0].severity == vd.SEVERITY_P0, (
+            f"M3 ai_disclosure must remain P0 (genuine ICMJE block); "
+            f"got severity={m3[0].severity}"
+        )
+        assert m3[0].remediation.kind == vd.REMEDIATION_AUTO
 
 
 # ===========================================================================

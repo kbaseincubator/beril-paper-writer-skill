@@ -303,16 +303,72 @@ def check_g1_section_completeness(
             ),
         )]
 
+    # v1.2.0 followup (Cowork verification, 2026-06-07): calibrate
+    # the projection BEFORE the per-violation emit loop. The raw
+    # M1-M10 pass produces a mix of "real" deliverable-blocking
+    # findings and "structured-paper-prescriptivism" findings that
+    # don't match how real manuscripts handle their content. The
+    # adjustments below match Adam's calibration:
+    #
+    # 1. M1 missing-title: validate_manuscript looks for a section
+    #    literally named "Title" / "Title Page" via
+    #    PAPER_REQUIRED_SECTIONS['title']. A real manuscript whose
+    #    title is the leading H1 + an author block IS a valid title
+    #    page; we must NOT P0 on every H1-titled paper. Detect the
+    #    leading H1 (via _extract_title_line) and SUPPRESS the M1
+    #    title violation when present.
+    # 2. M2 structured-abstract subsections: a paper-mode manuscript
+    #    with a prose abstract (one paragraph, no bold subheadings)
+    #    is valid; ICMJE-strict structured-subsection enforcement
+    #    is a publishing-house style preference, not a deliverable
+    #    completeness check. DEMOTE to P1 + advisory (no command).
+    # 3. M9 limitations: many real papers handle limitations in-
+    #    prose within the discussion section rather than as a
+    #    dedicated `## Limitations` heading. DEMOTE to P1 + advisory.
+    # 4. M3 ai_disclosure + M4 data_availability: these ARE
+    #    deliverable-blocking (ICMJE requires both for publishable
+    #    work). LEAVE as P0/auto.
+    #
+    # The calibration is per-validator-id (not per-violation-string)
+    # so a future M1 change that adds new violation classes won't
+    # silently slip through. Anything not in this calibration table
+    # falls through to the default escalation-path mapping.
+    manuscript_md = _load_manuscript_md(draft_dir)
+    has_h1_title = (
+        manuscript_md is not None
+        and _extract_title_line(manuscript_md) is not None
+    )
+
+    def _projected(viol, validator_id: str) -> tuple[str, str, str | None]:
+        """Return (severity, kind, action) for one Violation after the
+        calibration above. Helper inlined here so the per-violation
+        emit loop stays readable; the table is small enough not to
+        warrant a module-level dict."""
+        # M1 — H1 + author block IS a title page; suppress signaled
+        # by returning (None, ...) which the caller skips.
+        if (validator_id == "M1"
+                and has_h1_title
+                and "'title'" in viol.message):
+            return ("__suppress__", "", None)
+        # M2 / M9 demotion: P0 -> P1 + advisory.
+        if validator_id in ("M2", "M9") and viol.severity == "error":
+            return (SEVERITY_P1, REMEDIATION_ADVISORY, None)
+        # Default: original mapping.
+        severity = _VIOLATION_TO_SEVERITY.get(viol.severity, SEVERITY_P1)
+        kind, action = _ESCALATION_TO_REMEDIATION.get(
+            viol.escalation_path,
+            (REMEDIATION_TARGETED, None),
+        )
+        return (severity, kind, action)
+
     for validator in report.validators:
         # Only emit Findings for actual violations. pass /
         # not-applicable validators are silent — they're recorded in
         # the underlying ValidationReport (read-if-present pattern).
         for v_idx, viol in enumerate(validator.violations):
-            severity = _VIOLATION_TO_SEVERITY.get(viol.severity, SEVERITY_P1)
-            kind, action = _ESCALATION_TO_REMEDIATION.get(
-                viol.escalation_path,
-                (REMEDIATION_TARGETED, None),
-            )
+            severity, kind, action = _projected(viol, validator.id)
+            if severity == "__suppress__":
+                continue  # H1-title-suppression branch (M1)
             findings.append(Finding(
                 id=f"g1:{validator.id.lower()}_{viol.severity}_{v_idx}",
                 gate=GATES[0],
@@ -348,20 +404,76 @@ def check_g1_section_completeness(
 # G2 placeholder_or_leaked_template
 # ---------------------------------------------------------------------------
 
-# TBD patterns we treat as placeholders. Match `TBD`, `TBD - …`, `TBD:`,
-# `tbd` (case-insensitive). Word-boundary so we don't false-positive on
-# the substring "tbd" inside another word (rare but possible —
-# "lambdabld" wouldn't match, "TBD" alone would).
-_TBD_RE = re.compile(r"\b[Tt][Bb][Dd]\b")
+# Placeholder vocabulary. v1.2.0 followup (Cowork verification,
+# 2026-06-07): the original detector only matched `\bTBD\b`, which
+# under-fires on real LLM-emitted templates. The caulobacter draft_2
+# shipped with "**Authors:** [AUTHOR LIST TO BE COMPLETED]" /
+# "**Affiliations:** [TO BE COMPLETED]" — both invisible to a TBD-
+# only check. Broaden to the full set of in-the-wild bracketed +
+# template-language placeholders:
+#
+#   TBD / tbd                                       (the original)
+#   TK                                              (publishing shorthand)
+#   TO BE COMPLETED                                 (caulobacter draft_2)
+#   AUTHOR LIST TO BE COMPLETED                     (literal LLM output)
+#   FILL IN / TO BE FILLED                          (common prompt phrasing)
+#   PLACEHOLDER                                     (verbatim)
+#   XXX / XXXX                                      (placeholder convention)
+#   [...] / […]                                     (bracketed ellipsis)
+#
+# Each pattern is anchored with \b on alphabetic forms; bracketed
+# forms ([TO BE COMPLETED], [TK], [...]) are matched via a separate
+# `_BRACKETED_PLACEHOLDER_RE` so a bracket WITHOUT a placeholder
+# inside (a legitimate `[Smith 2024]` citation, an `[A]` annotation)
+# doesn't false-positive. Substring match on the alphabetic forms
+# inside brackets is intentional — `[TO BE COMPLETED]` and
+# `[AUTHOR LIST TO BE COMPLETED]` both fire via the same vocab.
+_PLACEHOLDER_PATTERNS = (
+    r"TBD",
+    r"TK",
+    r"TO\s+BE\s+COMPLETED",
+    r"TO\s+BE\s+FILLED",
+    r"FILL\s+IN",
+    r"PLACEHOLDER",
+    r"XXX+",            # XXX, XXXX, XXXXX, ...
+)
+_PLACEHOLDER_RE = re.compile(
+    r"\b(?:" + "|".join(_PLACEHOLDER_PATTERNS) + r")\b",
+    re.IGNORECASE,
+)
+# Bracketed-ellipsis catches `[...]` and the unicode `[…]` — these
+# are unambiguous "fill this in" placeholders even without the
+# alphabetic vocab above.
+_BRACKETED_ELLIPSIS_RE = re.compile(r"\[\s*(?:\.{3,}|…)\s*\]")
+
+# Author/affiliation value patterns that are placeholder-by-shape:
+# empty value after the label, OR an EMPTY bracketed value (e.g.
+# `Authors: []`, `Authors: [ ]`). A bracketed value containing real
+# content goes through _PLACEHOLDER_RE / _BRACKETED_ELLIPSIS_RE.
+_EMPTY_BRACKETED_RE = re.compile(r"^\s*\[\s*\]\s*$")
+
+
+# Legacy export: many tests + handlers reference `_TBD_RE` directly.
+# Keep it as an alias to _PLACEHOLDER_RE so the broadened vocab
+# applies at every reading site without renaming the symbol. The
+# alphabetic vocab is a superset of the prior `\bTBD\b` pattern.
+_TBD_RE = _PLACEHOLDER_RE
 
 
 def _is_tbd_value(value: str | None) -> bool:
+    """True iff value is None/blank, contains a placeholder token
+    (TBD/TK/TO BE COMPLETED/…), contains a bracketed ellipsis, or is
+    an empty bracketed pair."""
     if value is None:
         return True
     stripped = value.strip()
     if not stripped:
         return True
-    return bool(_TBD_RE.search(stripped))
+    return bool(
+        _EMPTY_BRACKETED_RE.match(stripped)
+        or _PLACEHOLDER_RE.search(stripped)
+        or _BRACKETED_ELLIPSIS_RE.search(stripped)
+    )
 
 
 def _contains_dirname_token(
@@ -425,34 +537,95 @@ def _extract_title_line(manuscript_md: str) -> str | None:
     return None
 
 
-# Author-line patterns paper-writer's manuscript convention can emit.
-# This is best-effort, not strict — the prompt-template doesn't pin a
-# single shape, so we look for either:
-#   - a line with the literal label "Authors:" / "Author:" followed
-#     by a non-TBD value, OR
-#   - a paragraph immediately after the H1 title that contains a
-#     name-like token (capitalized word with optional middle initial).
-# A real Caulobacter manuscript would carry "Adam Arkin, …"; a
-# defective draft would carry "TBD", blank, or be missing entirely.
+# Author / affiliation label patterns. paper-writer's manuscript
+# convention can emit several shapes:
+#   "Authors: …"                   bare label
+#   "**Authors:** …"               bold label (markdown emphasis)
+#   "_Authors:_ …"                 italic label
+#   "Author: …"                    singular form
+#   "By: …"                        casual form
+# Trailing colon optional. Bold/italic markers are absorbed so the
+# extracted VALUE doesn't include them — that lets _is_tbd_value
+# correctly match an empty-after-the-label case (e.g. caulobacter's
+# `**Authors:** [AUTHOR LIST TO BE COMPLETED]` extracts to
+# `[AUTHOR LIST TO BE COMPLETED]`, which fires via the broadened
+# _PLACEHOLDER_RE).
+# Label-line regex shape:
+#   ^                          start
+#   \s*                        optional indent
+#   [*_]{0,2}                  leading bold/italic markers (0..2 chars)
+#   (?:Authors?|By)            the label word
+#   [*_]{0,2}                  trailing emphasis on label (uncommon)
+#   \s*:?\s*                   optional colon
+#   [*_]{0,2}                  trailing bold/italic markers AFTER colon
+#                              (caulobacter shape: `**Authors:** value`)
+#   (.*?)                      captured value
+#   [*_]{0,2}                  trailing bold/italic markers at line end
+#   \s*$                       end
+# The two `[*_]{0,2}` groups around the capture are critical — they
+# strip the bold pair so the captured value is the actual content
+# the user typed, not contaminated with stray `**`.
 _AUTHOR_LABEL_RE = re.compile(
-    r"^\s*\*{0,2}(?:Authors?|By)\*{0,2}\s*:?\s*(.*?)\s*$",
+    r"^\s*[*_]{0,2}(?:Authors?|By)[*_]{0,2}\s*:?\s*[*_]{0,2}\s*"
+    r"(.*?)"
+    r"\s*[*_]{0,2}\s*$",
+    re.IGNORECASE,
+)
+# Affiliation label — same shape. New in the v1.2.0 followup
+# (Cowork verification, 2026-06-07): the original detector ignored
+# affiliations entirely, so `**Affiliations:** [TO BE COMPLETED]`
+# slid through unflagged. Affiliations are part of the author block;
+# a placeholder affiliation is the same defect class as a placeholder
+# author.
+_AFFILIATION_LABEL_RE = re.compile(
+    r"^\s*[*_]{0,2}(?:Affiliations?)[*_]{0,2}\s*:?\s*[*_]{0,2}\s*"
+    r"(.*?)"
+    r"\s*[*_]{0,2}\s*$",
     re.IGNORECASE,
 )
 
 
-def _extract_author_line(manuscript_md: str) -> str | None:
-    """Find the author line near the top of the manuscript. None if
-    not present (G2 will emit a missing-authors finding)."""
-    lines = manuscript_md.splitlines()
-    # Scan the first 30 lines (typically: title, blank, authors,
-    # affiliations, blank, abstract). If we haven't seen an author
-    # block by then we treat it as missing.
-    for raw_line in lines[:30]:
-        m = _AUTHOR_LABEL_RE.match(raw_line)
+def _extract_labeled_value(
+    manuscript_md: str, label_re: re.Pattern[str],
+) -> str | None:
+    """Generic helper: scan the first 30 lines for a label match;
+    return the captured value (or None if the line is present-but-
+    empty after the label, or no line matched at all).
+
+    "Present but empty" still returns None — callers distinguish
+    "label missing entirely" from "label present with empty value"
+    via the parallel `_label_line_present` helper below. (G2 wants
+    to flag BOTH as different findings: `_missing` and `_tbd`.)
+    """
+    for raw_line in manuscript_md.splitlines()[:30]:
+        m = label_re.match(raw_line)
         if m:
-            authors = m.group(1).strip()
-            return authors or None
+            value = m.group(1).strip()
+            return value or None
     return None
+
+
+def _label_line_present(
+    manuscript_md: str, label_re: re.Pattern[str],
+) -> bool:
+    """True iff the label line appears in the first 30 lines at all
+    — regardless of whether the value is populated. Used to split
+    "missing" (no label line) from "TBD/empty" (label line with no
+    real value)."""
+    return any(
+        label_re.match(raw_line)
+        for raw_line in manuscript_md.splitlines()[:30]
+    )
+
+
+def _extract_author_line(manuscript_md: str) -> str | None:
+    """Find the author line value near the top of the manuscript."""
+    return _extract_labeled_value(manuscript_md, _AUTHOR_LABEL_RE)
+
+
+def _extract_affiliation_line(manuscript_md: str) -> str | None:
+    """Find the affiliation line value near the top of the manuscript."""
+    return _extract_labeled_value(manuscript_md, _AFFILIATION_LABEL_RE)
 
 
 def check_g2_placeholder_or_leaked_template(
@@ -552,9 +725,18 @@ def check_g2_placeholder_or_leaked_template(
             ),
         ))
 
-    # Authors.
+    # Authors. v1.2.0 followup (Cowork verification, 2026-06-07):
+    # distinguish "no Authors: label at all" (P1 missing) from "label
+    # present with placeholder value" (P0 placeholder) — the real
+    # caulobacter draft_2 shipped with the second shape, and lumping
+    # them under "missing" let it slide. Use _label_line_present to
+    # split the two cases; _extract_author_line returns None for
+    # both, so check the label-present sentinel first.
+    authors_label_present = _label_line_present(
+        manuscript_md, _AUTHOR_LABEL_RE,
+    )
     authors = _extract_author_line(manuscript_md)
-    if authors is None:
+    if not authors_label_present:
         findings.append(Finding(
             id="g2:authors_missing",
             gate=GATES[1],
@@ -583,14 +765,50 @@ def check_g2_placeholder_or_leaked_template(
             severity=SEVERITY_P0,
             slide_id_or_target="manuscript",
             message=(
-                f"G2: author line is TBD/blank (got: {authors!r})."
+                f"G2: author line is a placeholder/blank (got: "
+                f"{authors!r}). Matches the broadened placeholder "
+                f"vocabulary (TBD / TK / TO BE COMPLETED / "
+                f"PLACEHOLDER / FILL IN / XXX / `[...]` / bare `[]`)."
             ),
             remediation=Remediation(
                 kind=REMEDIATION_TARGETED,
                 command=f"beril-paper-writer continue {draft_dir}",
                 note=(
-                    "Same path as authors_missing: re-run drafting "
-                    "or hand-edit manuscript.md."
+                    "Same path as authors_missing: re-run drafting or "
+                    "hand-edit manuscript.md."
+                ),
+            ),
+        ))
+
+    # Affiliations. v1.2.0 followup (2026-06-07): caulobacter draft_2
+    # shipped "**Affiliations:** [TO BE COMPLETED]" — the original
+    # detector ignored affiliations entirely. We treat a placeholder
+    # affiliation the same way as a placeholder author (P0); a missing
+    # Affiliations: label is P1 (some manuscripts inline affiliations
+    # into the author line — `Adam Arkin (LBNL)` — which is fine,
+    # so absence is advisory rather than blocking).
+    affiliations_label_present = _label_line_present(
+        manuscript_md, _AFFILIATION_LABEL_RE,
+    )
+    affiliations = _extract_affiliation_line(manuscript_md)
+    if affiliations_label_present and _is_tbd_value(affiliations):
+        findings.append(Finding(
+            id="g2:affiliations_tbd",
+            gate=GATES[1],
+            severity=SEVERITY_P0,
+            slide_id_or_target="manuscript",
+            message=(
+                f"G2: affiliation line is a placeholder/blank "
+                f"(got: {affiliations!r}). Matches the broadened "
+                f"placeholder vocabulary."
+            ),
+            remediation=Remediation(
+                kind=REMEDIATION_TARGETED,
+                command=f"beril-paper-writer continue {draft_dir}",
+                note=(
+                    "Affiliations are LLM-written from beril.yaml. "
+                    "If beril.yaml has affiliations, re-run drafting; "
+                    "otherwise add manually."
                 ),
             ),
         ))
@@ -600,12 +818,16 @@ def check_g2_placeholder_or_leaked_template(
     # to surface any later "TBD - production placeholder" lines that
     # leaked through the holistic draft. Conservative: emit ONE
     # finding per slot, capped at 10 to avoid spamming.
-    body_tbds = list(_TBD_RE.finditer(manuscript_md))
-    if body_tbds:
-        # The first ~10 TBD occurrences with context.
+    # Body-wide placeholder sweep. v1.2.0 followup: uses the broadened
+    # _PLACEHOLDER_RE (alphabetic vocab) AND _BRACKETED_ELLIPSIS_RE
+    # (`[...]` / `[…]`) so the same LLM-emitted templates Authors and
+    # Affiliations catch above also surface when buried in body prose.
+    body_hits: list[re.Match[str]] = list(_PLACEHOLDER_RE.finditer(manuscript_md))
+    body_hits.extend(_BRACKETED_ELLIPSIS_RE.finditer(manuscript_md))
+    body_hits.sort(key=lambda m: m.start())
+    if body_hits:
         slots = []
-        for m in body_tbds[:10]:
-            # Find the line containing this match.
+        for m in body_hits[:10]:
             line_start = manuscript_md.rfind("\n", 0, m.start()) + 1
             line_end = manuscript_md.find("\n", m.end())
             if line_end == -1:
@@ -614,23 +836,25 @@ def check_g2_placeholder_or_leaked_template(
             line_no = manuscript_md.count("\n", 0, m.start()) + 1
             slots.append((line_no, line[:120]))
         findings.append(Finding(
-            id="g2:tbd_in_body",
+            id="g2:placeholder_in_body",
             gate=GATES[1],
             severity=SEVERITY_P1,
             slide_id_or_target="manuscript",
             message=(
-                f"G2: {len(body_tbds)} TBD token(s) in manuscript.md "
-                f"(first {len(slots)} shown):\n  "
+                f"G2: {len(body_hits)} placeholder token(s) in "
+                f"manuscript.md (TBD / TK / TO BE COMPLETED / "
+                f"PLACEHOLDER / FILL IN / XXX / `[...]`; first "
+                f"{len(slots)} shown):\n  "
                 + "\n  ".join(f"L{n}: {ln}" for n, ln in slots)
             ),
             remediation=Remediation(
                 kind=REMEDIATION_TARGETED,
                 command=f"beril-paper-writer continue {draft_dir}",
                 note=(
-                    "Each TBD is a placeholder the drafting LLM left "
-                    "for operator follow-through. Edit manuscript.md "
-                    "to resolve or re-run drafting on the affected "
-                    "sections."
+                    "Each placeholder is a token the drafting LLM "
+                    "left for operator follow-through. Edit "
+                    "manuscript.md to resolve or re-run drafting on "
+                    "the affected sections."
                 ),
             ),
         ))
