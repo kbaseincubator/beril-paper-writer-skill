@@ -766,12 +766,23 @@ class PaperWriterOrchestrator:
         if rr is None:
             return
         try:
-            rr.record_start(self.draft_dir)
+            # v1.3.1 / Cycle-3 follow-up P0-2: resume-aware. record_
+            # resume_or_start RE-OPENS an existing halted/running record
+            # (one run per manuscript across a handshake-halt) instead
+            # of allocating a fresh run-N; a completed/failed or absent
+            # record allocates fresh. Decision is by record STATUS, so
+            # this is correct for BOTH the first `draft` invocation and
+            # a `continue` resume without the orchestrator needing to
+            # know which it is. The cost baseline stays
+            # state.cost_so_far_usd (loaded cumulative on resume) — only
+            # the record IDENTITY changes (same run, not a new one).
+            run_n, action = rr.record_resume_or_start(self.draft_dir)
             self._run_record_started = True
             self._last_recorded_cost = float(
                 self.state.cost_so_far_usd or 0.0)
+            logger.debug("run-record %s run-%s", action, run_n)
         except Exception as exc:  # pragma: no cover — defensive
-            logger.debug("run-record record_start skipped: %s", exc)
+            logger.debug("run-record record_resume_or_start skipped: %s", exc)
 
     def _rr_record_completed_phase(self, phase: str) -> None:
         """Record the phase that just finished.

@@ -161,15 +161,94 @@ def test_record_stage_refuses_to_mutate_halted(tmp_path):
     assert _read_canonical(draft)["status"] == "halted"
 
 
-def test_resume_after_halt_opens_new_run(tmp_path):
+def test_record_start_always_allocates_even_over_halted(tmp_path):
+    """record_start's contract is unconditional allocation (used for
+    genuine fresh runs). The RESUME path uses record_resume_or_start
+    instead — see the P0-2 tests below."""
     draft = _mk_draft(tmp_path)
     rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
     rr.record_halt(draft, gate_id="throughline_pick")
-    # resume
     n2 = rr.record_start(draft, started_at="2026-06-08T17:00:00Z")
     assert n2 == 2
     rec = _read_canonical(draft)
     assert rec["status"] == "running" and rec["run_id"] == "run-2"
+
+
+# ---------------------------------------------------------------------------
+# v1.3.1 / Cycle-3 follow-up P0-2 — resume re-opens, doesn't allocate
+# ---------------------------------------------------------------------------
+
+def test_resume_reopens_halted_record_same_run(tmp_path):
+    """A handshake-halt → continue must stay ONE run record: re-open
+    (flip halted→running), keep run_id + started_at + cumulative totals
+    + stages[]. NOT a fresh run-N+1 (the P0-2 fragmentation bug)."""
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_stage(draft, stage_id="triage", status="completed",
+                    model="claude-opus-4-7", input_tokens=15000,
+                    output_tokens=2200, cost_usd=0.41, elapsed_seconds=300)
+    rr.record_halt(draft, gate_id="throughline_pick")
+    pre = _read_canonical(draft)
+    assert pre["status"] == "halted" and pre["run_id"] == "run-1"
+
+    run_n, action = rr.record_resume_or_start(
+        draft, started_at="2026-06-08T17:00:00Z")
+    assert action == "reopened" and run_n == 1
+    rec = _read_canonical(draft)
+    assert rec["run_id"] == "run-1"                      # same run
+    assert rec["status"] == "running"                    # flipped back
+    assert rec["started_at"] == "2026-06-08T16:00:00Z"   # ORIGINAL start
+    assert rec["finished_at"] is None and rec["exit_code"] is None
+    assert rec["totals"]["cost_usd"] == 0.41             # cumulative, not $0
+    assert {s["id"] for s in rec["stages"]} >= {"triage", "throughline_pick"}
+    run_dirs = sorted(p.name for p in (draft / "audit" / "runs").iterdir())
+    assert run_dirs == ["run-1"]                          # exactly one
+
+
+def test_resume_on_running_record_reopens(tmp_path):
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_stage(draft, stage_id="extract", status="completed")
+    run_n, action = rr.record_resume_or_start(
+        draft, started_at="2026-06-08T18:00:00Z")
+    assert action == "reopened" and run_n == 1
+
+
+def test_resume_on_completed_record_allocates_fresh(tmp_path):
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_finalize(draft, status="completed")
+    run_n, action = rr.record_resume_or_start(
+        draft, started_at="2026-06-08T18:00:00Z")
+    assert action == "allocated" and run_n == 2
+    assert _read_canonical(draft)["status"] == "running"
+
+
+def test_resume_no_record_allocates_fresh(tmp_path):
+    draft = _mk_draft(tmp_path)
+    run_n, action = rr.record_resume_or_start(
+        draft, started_at="2026-06-08T18:00:00Z")
+    assert action == "allocated" and run_n == 1
+
+
+def test_resume_then_complete_one_record(tmp_path):
+    """Full halt→resume→complete: ONE record, cumulative total, status
+    completed, stages span the halt."""
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_stage(draft, stage_id="triage", status="completed",
+                    cost_usd=0.41)
+    rr.record_halt(draft, gate_id="throughline_pick")
+    rr.record_resume_or_start(draft, started_at="2026-06-08T17:00:00Z")
+    rr.record_stage(draft, stage_id="drafting", status="completed",
+                    cost_usd=5.42)
+    rr.record_finalize(draft, status="completed")
+    rec = _read_canonical(draft)
+    assert rec["status"] == "completed" and rec["run_id"] == "run-1"
+    assert abs(rec["totals"]["cost_usd"] - 5.83) < 1e-9
+    assert {"triage", "drafting"} <= {s["id"] for s in rec["stages"]}
+    run_dirs = sorted(p.name for p in (draft / "audit" / "runs").iterdir())
+    assert run_dirs == ["run-1"]
 
 
 # ---------------------------------------------------------------------------

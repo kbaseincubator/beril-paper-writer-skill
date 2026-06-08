@@ -346,6 +346,52 @@ def record_start(
     return run_n
 
 
+def record_resume_or_start(
+    draft_dir: Path,
+    *,
+    started_at: str | None = None,
+    skill_version: str | None = None,
+) -> tuple[int, str]:
+    """Resume-aware entry point (v1.3.1 / Cycle-3 follow-up P0-2).
+
+    The orchestrator calls THIS (not record_start) when it lazily opens
+    the run-record, so a handshake-halt + `continue` stays ONE run
+    record instead of fragmenting across run-N (halted) + run-N+1
+    (resumed) and resetting craft status to $0 mid-manuscript. Decision
+    is by the existing canonical record's STATUS:
+
+      status ∈ {halted, running}  → RE-OPEN (flip→running; keep run_id +
+        started_at + cumulative totals + stages[]). The interrupted run
+        continues; subsequent record_stage calls append.
+      status ∈ {completed, failed}, or no record → ALLOCATE a fresh
+        run-N (a genuine redo / fresh start).
+
+    Returns (run_n, action) where action ∈ {"reopened", "allocated"}.
+    """
+    draft_dir = Path(draft_dir)
+    existing = _load_existing_record(_run_record_path(draft_dir))
+    status = existing.get("status") if isinstance(existing, dict) else None
+
+    if status in ("halted", "running"):
+        run_n = _find_run_n(existing)
+        if run_n is None:
+            return record_start(
+                draft_dir, started_at=started_at,
+                skill_version=skill_version), "allocated"
+        reopened = dict(existing)
+        reopened["status"] = "running"
+        reopened["finished_at"] = None
+        reopened["exit_code"] = None
+        # run_id, started_at, stages[], totals, models_used, artifacts
+        # carry over unchanged.
+        _write_canonical_and_archive(draft_dir, reopened, run_n)
+        return run_n, "reopened"
+
+    return record_start(
+        draft_dir, started_at=started_at,
+        skill_version=skill_version), "allocated"
+
+
 def record_stage(
     draft_dir: Path,
     *,
