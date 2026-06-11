@@ -99,6 +99,107 @@ def _next_run_n(runs_dir: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# C1-A2 — cross-record completeness guard (VENDORED from craft.run_record)
+# ---------------------------------------------------------------------------
+#
+# Canonical impl: craft-platform `craft.run_record.check_no_dropped_stages`.
+# paper-writer ships STANDALONE (pipx install, no craft-platform on path),
+# so — like the rest of this emitter — the function is COPIED, not imported.
+# A craft-platform conformance check pins this copy byte-equal to the
+# canonical AND to presmaker's vendored copy; keep all three in sync.
+#
+# A resume must NEVER lose a stage a prior run completed. The per-record
+# reconciliation only checks totals==sum(present), so an incomplete record
+# reconciles perfectly — the C1-A drop is exactly this class. Called at
+# finalize, BEFORE writing status=completed; a non-empty return is a hard,
+# loud failure (raises CompletenessError).
+
+
+class CompletenessError(Exception):
+    """Raised at finalize when the C1-A2 completeness guard finds the
+    canonical would drop a stage a prior run completed. Carries the list
+    of error strings. This is a CORRECTNESS signal, distinct from the
+    best-effort telemetry-write failures the orchestrator swallows — the
+    orchestrator must let it surface loudly, never log-and-continue."""
+
+    def __init__(self, errors: list):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def _completed_stage_ids(record: object) -> set:
+    """The set of stage ids a record marks `completed`. Tolerant of a
+    malformed record. (Vendored from craft.run_record.)"""
+    out: set = set()
+    if not isinstance(record, dict):
+        return out
+    stages = record.get("stages")
+    if not isinstance(stages, list):
+        return out
+    for s in stages:
+        if (isinstance(s, dict) and s.get("status") == "completed"
+                and isinstance(s.get("id"), str) and s["id"]):
+            out.add(s["id"])
+    return out
+
+
+def check_no_dropped_stages(canonical: dict, archived_runs: list) -> list:
+    """Cross-record completeness guard (C1-A2). The canonical's set of
+    `completed` stage ids MUST be a SUPERSET of every archived run's
+    `completed` set; returns error strings naming any dropped stage.
+    Manifest-free. VENDORED byte-equal from craft.run_record — keep in
+    sync (conformance-pinned)."""
+    errors: list = []
+    canon_completed = _completed_stage_ids(canonical)
+    canon_run_id = (canonical.get("run_id")
+                    if isinstance(canonical, dict) else None)
+    for archived in archived_runs:
+        arch_run_id = (archived.get("run_id")
+                       if isinstance(archived, dict) else None)
+        if arch_run_id is not None and arch_run_id == canon_run_id:
+            continue
+        arch_completed = _completed_stage_ids(archived)
+        dropped = arch_completed - canon_completed
+        if dropped:
+            errors.append(
+                f"completeness: canonical (run_id={canon_run_id!r}) is "
+                f"missing {len(dropped)} stage(s) that archived run "
+                f"{arch_run_id!r} completed: {sorted(dropped)} — a resume "
+                f"must never drop a completed stage (C1-A). Refusing to "
+                f"finalize as completed."
+            )
+    return errors
+
+
+def _load_archived_runs(draft_dir: Path) -> list:
+    """Load every archived runs/run-N/run_record.json as a parsed dict.
+    A corrupt forensic archive shouldn't BLOCK finalize, but it must not
+    be silent either — loud-warn to stderr and skip it (the guard
+    tolerates a missing entry). Never raises."""
+    import sys
+    out: list = []
+    runs_dir = _runs_dir(draft_dir)
+    if not runs_dir.is_dir():
+        return out
+    for run_dir in sorted(runs_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        rr = run_dir / "run_record.json"
+        if not rr.is_file():
+            continue
+        try:
+            out.append(json.loads(rr.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"run_record_emitter: WARNING — could not read archived "
+                f"run record {rr} for the completeness guard ({exc}); "
+                f"skipping that archive.",
+                file=sys.stderr,
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Time + atomic write (copy-adapted from presmaker finalize_run.py)
 # ---------------------------------------------------------------------------
 
@@ -360,11 +461,20 @@ def record_resume_or_start(
     (resumed) and resetting craft status to $0 mid-manuscript. Decision
     is by the existing canonical record's STATUS:
 
-      status ∈ {halted, running}  → RE-OPEN (flip→running; keep run_id +
-        started_at + cumulative totals + stages[]). The interrupted run
-        continues; subsequent record_stage calls append.
-      status ∈ {completed, failed}, or no record → ALLOCATE a fresh
-        run-N (a genuine redo / fresh start).
+      status ∈ {halted, running, failed}  → RE-OPEN (flip→running; keep
+        run_id + started_at + cumulative totals + stages[]). The
+        interrupted run continues; subsequent record_stage calls append,
+        and a stage that previously failed upserts failed→completed in
+        place on retry. (halted = handshake gate; running = crash/
+        re-invoke; FAILED = mid-pipeline stage failure — a `continue`
+        after a failure is a CONTINUATION of the same build, not a redo,
+        so the stages the failed run completed before the failure MUST be
+        carried, not dropped. Bucketing `failed` with `completed` here was
+        the C1-A defect: it opened a fresh empty run that lost the
+        already-completed stages' cost.)
+      status == completed, or no record → ALLOCATE a fresh run-N (a
+        genuine redo of a finished manuscript). Per Adam (C1, 2026-06-11):
+        the fix is `failed` ONLY; `completed → fresh` stays.
 
     Returns (run_n, action) where action ∈ {"reopened", "allocated"}.
     """
@@ -372,7 +482,7 @@ def record_resume_or_start(
     existing = _load_existing_record(_run_record_path(draft_dir))
     status = existing.get("status") if isinstance(existing, dict) else None
 
-    if status in ("halted", "running"):
+    if status in ("halted", "running", "failed"):
         run_n = _find_run_n(existing)
         if run_n is None:
             return record_start(
@@ -570,6 +680,20 @@ def record_finalize(
         skill_version=existing.get(
             "skill_version", skill_version or _SKILL_VERSION),
     )
+
+    # C1-A2 completeness guard: before declaring COMPLETED, the canonical's
+    # completed-stage set MUST be a superset of every archived run's. A
+    # resume that dropped a completed stage reconciles totals perfectly yet
+    # under-reports — this is the only check that catches it. Fail LOUD:
+    # raise CompletenessError (a correctness signal the orchestrator must
+    # NOT swallow as a best-effort telemetry miss). Only guard the
+    # completed path — a `failed` finalize already signals a problem.
+    if status == "completed":
+        drop_errors = check_no_dropped_stages(
+            record, _load_archived_runs(draft_dir))
+        if drop_errors:
+            raise CompletenessError(drop_errors)
+
     canonical, _archive = _write_canonical_and_archive(
         draft_dir, record, run_n)
     return canonical

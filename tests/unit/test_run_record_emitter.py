@@ -231,6 +231,98 @@ def test_resume_no_record_allocates_fresh(tmp_path):
     assert action == "allocated" and run_n == 1
 
 
+# ---------------------------------------------------------------------------
+# C1-A1 — reopen on `failed` (continuation, not redo). Paper-writer analog
+# of the presmaker fix; byte-identical disposition logic.
+# ---------------------------------------------------------------------------
+
+def test_resume_on_failed_record_reopens_not_fresh(tmp_path):
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_stage(draft, stage_id="triage", status="completed", cost_usd=0.4)
+    rr.record_finalize(draft, status="failed", exit_code=1)
+    assert _read_canonical(draft)["status"] == "failed"
+    run_n, action = rr.record_resume_or_start(
+        draft, started_at="2026-06-08T18:00:00Z")
+    assert action == "reopened" and run_n == 1
+    assert _read_canonical(draft)["status"] == "running"
+
+
+def test_failure_then_resume_carries_completed_stages_no_drop(tmp_path):
+    """C1-A acceptance (paper-writer): a continue after a mid-pipeline
+    failure CARRIES the stages the failed run completed (no drop, no dup),
+    total = sum of what actually ran."""
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_stage(draft, stage_id="triage", status="completed", cost_usd=0.41)
+    rr.record_stage(draft, stage_id="extract", status="completed", cost_usd=4.99)
+    rr.record_stage(draft, stage_id="drafting", status="running")
+    rr.record_finalize(draft, status="failed", exit_code=1)
+    assert _read_canonical(draft)["status"] == "failed"
+    # continue → reopen (not fresh)
+    run_n, action = rr.record_resume_or_start(
+        draft, started_at="2026-06-08T18:00:00Z")
+    assert action == "reopened" and run_n == 1
+    rr.record_stage(draft, stage_id="drafting", status="completed",
+                    cost_usd=5.42)
+    rr.record_finalize(draft, status="completed")
+    rec = _read_canonical(draft)
+    assert rec["status"] == "completed" and rec["run_id"] == "run-1"
+    ids = [s["id"] for s in rec["stages"]]
+    assert len(ids) == len(set(ids)), f"duplicate ids: {ids}"
+    completed = {s["id"] for s in rec["stages"]
+                 if s.get("status") == "completed"}
+    assert {"triage", "extract", "drafting"} <= completed
+    # total = 0.41 + 4.99 + 5.42 = 10.82 (extract's 4.99 NOT dropped)
+    assert abs(rec["totals"]["cost_usd"] - 10.82) < 1e-9
+    run_dirs = sorted(p.name for p in (draft / "audit" / "runs").iterdir())
+    assert run_dirs == ["run-1"]
+
+
+# ---------------------------------------------------------------------------
+# C1-A2 — completeness guard (paper-writer wiring)
+# ---------------------------------------------------------------------------
+
+def test_finalize_completeness_guard_fires_on_dropped_stage(tmp_path):
+    """A forged archive that completed `extract` + a canonical (run-2)
+    that lacks it → record_finalize(completed) raises CompletenessError
+    and does NOT write completed."""
+    draft = _mk_draft(tmp_path)
+    run1 = draft / "audit" / "runs" / "run-1"
+    run1.mkdir(parents=True, exist_ok=True)
+    (run1 / "run_record.json").write_text(json.dumps({
+        "run_id": "run-1", "status": "failed",
+        "stages": [{"id": "extract", "status": "completed"}],
+    }), encoding="utf-8")
+    rr.record_start(draft, started_at="2026-06-08T18:00:00Z")
+    assert _read_canonical(draft)["run_id"] == "run-2"
+    rr.record_stage(draft, stage_id="drafting", status="completed",
+                    cost_usd=1.0)
+    with pytest.raises(rr.CompletenessError) as ei:
+        rr.record_finalize(draft, status="completed")
+    msg = "; ".join(ei.value.errors)
+    assert "extract" in msg and "must never drop" in msg
+    assert _read_canonical(draft)["status"] != "completed"
+
+
+def test_finalize_completeness_guard_passes_normal_resume(tmp_path):
+    """Guard must NOT false-fire on a correct A1 resume (failed archive
+    shares the canonical run_id → skipped; carried stages present)."""
+    draft = _mk_draft(tmp_path)
+    rr.record_start(draft, started_at="2026-06-08T16:00:00Z")
+    rr.record_stage(draft, stage_id="triage", status="completed", cost_usd=0.4)
+    rr.record_stage(draft, stage_id="extract", status="completed", cost_usd=4.9)
+    rr.record_finalize(draft, status="failed", exit_code=1)
+    rr.record_resume_or_start(draft, started_at="2026-06-08T18:00:00Z")
+    rr.record_stage(draft, stage_id="drafting", status="completed", cost_usd=5.0)
+    # must NOT raise
+    rr.record_finalize(draft, status="completed")
+    rec = _read_canonical(draft)
+    assert rec["status"] == "completed"
+    assert {"triage", "extract", "drafting"} <= {
+        s["id"] for s in rec["stages"] if s["status"] == "completed"}
+
+
 def test_resume_then_complete_one_record(tmp_path):
     """Full halt→resume→complete: ONE record, cumulative total, status
     completed, stages span the halt."""

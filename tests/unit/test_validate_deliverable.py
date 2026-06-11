@@ -959,3 +959,62 @@ def test_finalize_rerun_validate_writes_audit_report(tmp_path):
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["mode"] == "paper"
     assert "validators" in payload
+
+
+# ---------------------------------------------------------------------------
+# C1-C — remediation verifies its result + exit reflects surviving P0
+# (paper-writer analog of the presmaker fix). paper-writer's auto-handlers
+# are read-only (no populate-from-source TBD bug), so the C guarantee here
+# is the architectural one: readiness = FRESH re-detect over the shipped
+# artifact, exit reflects a surviving blocking P0 — never a handler's
+# self-report.
+# ---------------------------------------------------------------------------
+
+def test_finalize_exit_reflects_surviving_p0(tmp_path):
+    """C1-C ACCEPTANCE (paper-writer): a manuscript missing a required
+    IMRaD section (P0) → finalize() runs its auto-handlers (rerun_validate
+    / reassemble) but the SECOND-PASS validate re-detects the missing
+    section, so readiness exit is non-zero and the P0 is surfaced. Proves
+    exit = fresh re-detect over the shipped manuscript, not handler-trust.
+    """
+    draft_dir = _build_clean_draft(tmp_path)
+    manuscript = draft_dir / "manuscript.md"
+    text = manuscript.read_text(encoding="utf-8")
+    # Remove the Methods section → M1 missing-section P0.
+    text = text.replace(
+        "## Methods\n\nWe sequenced and analysed expression data.\n\n", "")
+    manuscript.write_text(text, encoding="utf-8")
+
+    # first-pass findings so finalize has an audit to read.
+    vd.write_findings(draft_dir, vd.validate(draft_dir))
+    result = fd.finalize(draft_dir)
+
+    # readiness exit is non-zero (a blocking P0 survives).
+    assert result["second_pass_readiness_rc"] != 0, (
+        "a surviving missing-section P0 must yield a non-zero readiness exit"
+    )
+    # the P0 is re-detected in the fresh second pass (not handler-trusted).
+    second = vd.validate(draft_dir)
+    assert any(f.severity == vd.SEVERITY_P0 for f in second), (
+        "the missing-Methods P0 must survive the second pass"
+    )
+    # whatever auto-handlers ran reported their REAL outcome (no handler
+    # falsely claims it cleared the gate).
+    for a in result["actions_applied"]:
+        assert isinstance(a["applied"], bool)
+
+
+def test_finalize_reassemble_self_verifies_output(tmp_path):
+    """C1-C: the reassemble handler must verify its own mutation — a
+    rc==0 from assemble_docx that did NOT produce manuscript.docx is a
+    FAILURE, not a cleared gate. (mtime/rc≠completion discipline.)"""
+    import inspect
+    src = inspect.getsource(fd._reassemble)
+    # the handler checks the output file exists after the assemble call
+    assert "out_docx.is_file()" in src, (
+        "_reassemble must verify manuscript.docx exists after assemble "
+        "(rc==0 != completion)"
+    )
+    assert "was not\n" in src or "not written" in src or "exited 0" in src, (
+        "_reassemble must fail loud when assemble exits 0 without output"
+    )

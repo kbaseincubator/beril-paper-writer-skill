@@ -847,9 +847,23 @@ class PaperWriterOrchestrator:
         rr = self._rr()
         if rr is None:
             return
+        # C1-A2: the completeness guard is a CORRECTNESS gate, not a
+        # best-effort telemetry write. A CompletenessError means the
+        # run-record would falsely claim a complete run while a prior
+        # run's completed stage was dropped — that MUST surface loudly,
+        # never be swallowed to logger.debug like a telemetry miss. So we
+        # catch it FIRST and re-raise; only genuine telemetry-write
+        # failures (disk, schema) fall through to the best-effort skip.
+        completeness_error = getattr(rr, "CompletenessError", None)
         try:
             rr.record_finalize(self.draft_dir, status=status)
-        except Exception as exc:  # pragma: no cover — defensive
+        except Exception as exc:
+            if (completeness_error is not None
+                    and isinstance(exc, completeness_error)):
+                logger.error(
+                    "run-record COMPLETENESS FAILURE on finalize(%s): %s",
+                    status, exc)
+                raise
             logger.debug("run-record record_finalize(%s) skipped: %s",
                          status, exc)
 
@@ -1670,6 +1684,7 @@ Please draft the entire manuscript.
 """
         # Stage 1 Tier D: use cost-tracking helper. Holistic draft is
         # the single largest LLM call ($4-8 expected per SPEC §6.7).
+        subprocess_start = time.time()
         rc, stdout, stderr, cost = await self._run_claude_p_with_cost(
             phase_label="phase_drafting",
             tier="standard",
@@ -1683,6 +1698,26 @@ Please draft the entire manuscript.
                 f"STDERR: {stderr}"
             )
             raise RuntimeError("Holistic drafting failed.")
+
+        # C1-B: rc==0 is NOT proof the manuscript landed. The drafting
+        # call can exit 0 having emitted a Write event that didn't write
+        # (the silent-Write class) — a missing manuscript.md is the worst
+        # silent failure in the pipeline. Assert the artifact is fresh
+        # (exists + rewritten by this call); a violation is a HARD FAIL,
+        # not a silent proceed. (Shared guard — same contract every
+        # artifact-writing stage uses.)
+        manuscript_md = self.draft_dir / "manuscript.md"
+        ok, reason = self._assert_artifact_fresh(
+            path=manuscript_md,
+            subprocess_start=subprocess_start,
+            label="phase_drafting (manuscript.md)",
+        )
+        if not ok:
+            logger.error(f"Holistic draft completion check FAILED: {reason}")
+            raise RuntimeError(
+                f"Holistic drafting exited 0 but the manuscript did not "
+                f"land: {reason}"
+            )
 
         logger.info(f"Holistic drafting completed in {time.time() - start:.2f}s")
 
@@ -2485,6 +2520,65 @@ with the citation key in the manuscript.
             "on this manuscript."
         )
 
+    def _assert_artifact_fresh(
+        self,
+        *,
+        path: Path,
+        subprocess_start: float,
+        label: str,
+        sentinel_substrings: tuple[str, ...] = (
+            '"status": "in_progress"', '"status":"in_progress"',
+        ),
+    ) -> tuple[bool, str]:
+        """C1-B shared stage-output completion guard
+        (``[[feedback_subprocess_mtime_contract]]``). rc==0 from a
+        ``claude -p`` subprocess is NOT proof the artifact landed — the
+        process can exit 0 having emitted a Write tool-use event that did
+        not actually write (observed live), or be content-filter-blocked
+        after a partial write. The file is the contract:
+
+          (a) it MUST exist;
+          (b) its mtime MUST be >= ``subprocess_start`` (1s filesystem
+              slop) — i.e. THIS invocation rewrote it, not a stale leftover;
+          (c) it MUST NOT still contain an in-progress sentinel.
+
+        Returns ``(ok, reason)``. ``ok=False`` means the artifact did not
+        land; the caller decides whether to retry or hard-fail (an
+        artifact-writing stage should NOT pass on a False). This lifts the
+        previously adversarial-only mtime check into a reusable guard every
+        artifact-writing phase can call (brief C1-B: generalize the
+        guard)."""
+        from datetime import datetime, timezone
+        if not path.is_file():
+            return False, (
+                f"{label}: expected output {path} does not exist after the "
+                f"subprocess exited — rc==0 is not a completion signal."
+            )
+        mtime = path.stat().st_mtime
+        if mtime + 1.0 < subprocess_start:
+            mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            start_iso = datetime.fromtimestamp(
+                subprocess_start, tz=timezone.utc).isoformat()
+            return False, (
+                f"{label}: output {path} has mtime {mtime_iso}, which "
+                f"PREDATES the subprocess start ({start_iso}) — the "
+                f"subprocess exited without rewriting its output (stale "
+                f"artifact)."
+            )
+        if sentinel_substrings:
+            try:
+                head = path.read_text(encoding="utf-8")[:4096]
+            except OSError:
+                head = ""
+            for sentinel in sentinel_substrings:
+                if sentinel in head:
+                    return False, (
+                        f"{label}: in-progress sentinel survived in {path} "
+                        f"— the stage reported success but never wrote its "
+                        f"artifact (rc==0 != completion)."
+                    )
+        return True, ""
+
     def _check_adversarial_output_fresh(
         self,
         *,
@@ -2509,31 +2603,28 @@ with the citation key in the manuscript.
         The check does NOT distinguish root cause (CLI bug vs our
         invocation pattern vs inner claude -p issue). It only
         surfaces the failure to the operator.
-        """
-        if not adv_json_path.is_file():
+
+        C1-B: now delegates to the shared ``_assert_artifact_fresh``
+        guard (one implementation of the mtime/sentinel contract for
+        every artifact-writing stage). The adversarial review is
+        advisory, so this keeps the warn-and-return-False behavior (the
+        gate proceeds against no/stale findings) rather than hard-failing
+        — but the underlying contract check is now shared, not forked."""
+        ok, reason = self._assert_artifact_fresh(
+            path=adv_json_path,
+            subprocess_start=subprocess_start,
+            label="Tier 3 adversarial review",
+            # the adversarial CLI's JSON has no in-progress sentinel;
+            # only the exist + mtime checks apply here.
+            sentinel_substrings=(),
+        )
+        if not ok:
             logger.warning(
-                f"Tier 3 contract check: adversarial output {adv_json_path} "
-                "does not exist after the CLI exited 0. The gate will "
-                "see no adversarial findings; this is a silent failure."
+                f"Tier 3 contract check: {reason} The gate will evaluate "
+                f"against no/stale adversarial findings — proceed with "
+                f"caution."
             )
-            return False
-        mtime = adv_json_path.stat().st_mtime
-        if mtime + 1.0 < subprocess_start:
-            from datetime import datetime, timezone
-            mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-            start_iso = datetime.fromtimestamp(
-                subprocess_start, tz=timezone.utc,
-            ).isoformat()
-            logger.warning(
-                f"Tier 3 contract check: adversarial output "
-                f"{adv_json_path} has mtime {mtime_iso}, which "
-                f"PREDATES the subprocess start ({start_iso}). The "
-                "adversarial CLI exited 0 but did not rewrite its "
-                "output file. The gate will evaluate against STALE "
-                "findings — proceed with caution."
-            )
-            return False
-        return True
+        return ok
 
     def _quarantine_adversarial_json(
         self, *, adv_json_path: Path, reason: str,
