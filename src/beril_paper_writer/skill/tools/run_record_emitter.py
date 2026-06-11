@@ -696,4 +696,20 @@ def record_finalize(
 
     canonical, _archive = _write_canonical_and_archive(
         draft_dir, record, run_n)
+
+    # C1-D telemetry egress: project the (A2-verified, persisted) record
+    # through the strict drop-by-default whitelist and best-effort batch-write
+    # ONE JSONL to the shared egress root. Disabled (CRAFT_TELEMETRY_ROOT=off)
+    # → cheap no-op. NEVER raises / slows finalize: the egress fn swallows its
+    # own faults, and this wrapper double-guards a vendored-import hiccup.
+    try:
+        import sys
+
+        from beril_paper_writer import telemetry as _craft_telemetry
+        _craft_telemetry.egress_run_record(
+            record, audit_dir=_audit_dir(draft_dir))
+    except Exception as _exc:  # noqa: BLE001 — telemetry NEVER perturbs finalize
+        print(f"run_record_emitter: telemetry egress skipped "
+              f"({type(_exc).__name__}: {_exc}).", file=sys.stderr)
+
     return canonical
